@@ -3,14 +3,30 @@ import numpy as np
 import ussa1976
 from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
+import config
 
 class USSA1976:
     """
     A class to provide atmospheric properties based on the US Standard Atmosphere 1976 model,
     extended to 1000 km. It uses a pre-computed lookup table and linear interpolation
     for high performance.
+
+
+    WARNING: Numerical Discontinuity at max_alt
+
+    The current implementation forces atmospheric density and pressure to strictly 0.0 for altitudes above 1000 km. While physically approximating a vacuum, this creates a sharp mathematical discontinuity (infinite gradient) at the boundary.
+
+    This presents two critical risks for rocket simulations:
+
+    Solver Stalling: Variable-step ODE solvers (e.g., scipy.integrate.solve_ivp, Runge-Kutta) may "stutter" or hang as they reduce the time step to near-zero in an attempt to resolve the non-smooth transition.
+
+    Mathematical Singularities: Any guidance algorithm, entropy calculation, or plotting function that computes logarithmic values (e.g., np.log(rho)) will crash, as the logarithm of zero is undefined (ln(0)=−∞).
+
+    Recommendation: For high-fidelity simulations, clamp the minimum return value to a non-zero epsilon (e.g., 1e-100) rather than 0.0.
+
+
     """
-    def __init__(self, step=100, max_alt=1000000):
+    def __init__(self, step=config.ATMOSPHERE_STEP, max_alt=config.ATMOSPHERE_MAX_ALT):
         """
         Initializes the atmospheric model by generating a pre-computed lookup table.
 
@@ -64,6 +80,8 @@ class USSA1976:
         T = self._T_interp(altitude).item()
         
         return rho, p, T
+
+
 
 if __name__ == '__main__':
     # Initialize the atmospheric model
