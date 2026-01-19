@@ -5,7 +5,7 @@ from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import config
 
-class USSA1976:
+class Atmosphere:
     """
     A class to provide atmospheric properties based on the US Standard Atmosphere 1976 model,
     extended to 1000 km. It uses a pre-computed lookup table and linear interpolation
@@ -83,15 +83,18 @@ class USSA1976:
 
 
 
+
+
+
 if __name__ == '__main__':
     # Initialize the atmospheric model
-    atmosphere = USSA1976()
+    atmosphere_model = Atmosphere()
 
     # Generate a range of altitudes to test the interpolation
     test_altitudes = np.linspace(0, 1050000, 2000)
     
     # Get the properties for each altitude
-    results = [atmosphere.get_properties(alt) for alt in test_altitudes]
+    results = [atmosphere_model.get_properties(alt) for alt in test_altitudes]
     
     # Unzip the results
     rhos, ps, Ts = zip(*results)
@@ -116,3 +119,7 @@ if __name__ == '__main__':
 
     plt.tight_layout()
     plt.show()
+
+
+
+
