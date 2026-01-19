@@ -5,7 +5,7 @@ from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import config
 
-class Atmosphere:
+class AtmosphericState:
     """
     A class to provide atmospheric properties based on the US Standard Atmosphere 1976 model,
     extended to 1000 km. It uses a pre-computed lookup table and linear interpolation
@@ -88,7 +88,7 @@ class Atmosphere:
 
 if __name__ == '__main__':
     # Initialize the atmospheric model
-    atmosphere_model = Atmosphere()
+    atmosphere_model = AtmosphericState()
 
     # Generate a range of altitudes to test the interpolation
     test_altitudes = np.linspace(0, 1050000, 2000)
