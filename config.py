@@ -67,9 +67,6 @@ DefaultEnvConfig = EnvConfig()
 
 
 
-
-
-
 ##################### vehicle.py mainly ##################### 
 @dataclass
 class SequenceConfig:
@@ -118,7 +115,8 @@ class TwoStageRocketConfig:
     @property
     def launch_mass(self) -> float:
         return (self.stage_1.dry_mass + self.stage_1.propellant_mass +
-                self.stage_2.dry_mass + self.stage_2.propellant_mass)
+                self.stage_2.dry_mass + self.stage_2.propellant_mass +
+                self.payload_mass)
 
 
 # --- SpaceX Starship Block 2 Data ---
@@ -129,7 +127,7 @@ class TwoStageRocketConfig:
 StarshipBlock2 = TwoStageRocketConfig(
     name="SpaceX Starship Block 2 (Flight Proven)",
     
-    payload_mass=0.0,
+    payload_mass = 0.0,
 
     sequence=SequenceConfig(
         main_engine_ramp_time=3.0,     

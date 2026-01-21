@@ -110,6 +110,7 @@ class Environment:
         )
 
     def _calculate_gravity(self, r_eci: Vector3, r_norm: float) -> Vector3:
+
         """Helper to calculate Gravity Vector (Central + J2)"""
         
         # 1. Central Gravity (Monopole)
@@ -132,6 +133,50 @@ class Environment:
             return g_central + np.array([gx, gy, gz])
             
         return g_central
+
+    def get_launch_site_state(self) -> tuple[Vector3, Vector3]:
+        """
+        Automatically converts the config's Geodetic Launch Coordinates 
+        (Lat/Lon/Alt) into ECI Position and Velocity vectors.
+        
+        Returns:
+            r_eci: Position vector [x, y, z] (meters)
+            v_eci: Initial velocity vector due to Earth rotation [vx, vy, vz] (m/s)
+        """
+        # 1. Unpack Config Constants
+        lat_deg = self.config.launch_latitude
+        lon_deg = self.config.launch_longitude
+        alt = self.config.launch_altitude
+        
+        R_eq = self.config.earth_radius_equator
+        f = self.config.earth_flattening
+        omega = self.config.earth_omega_vector
+
+        # 2. Geodetic to ECEF/ECI Conversion
+        # We assume T=0 aligns ECEF with ECI for simplicity (Greenwich at X-axis).
+        lat_rad = np.radians(lat_deg)
+        lon_rad = np.radians(lon_deg)
+        
+        # Oblate Spheroid Math (WGS84)
+        e2 = 2*f - f**2  # Eccentricity squared
+        sin_lat = np.sin(lat_rad)
+        
+        # Prime Vertical Radius of Curvature (N)
+        # This is the distance from surface to Z-axis along the normal.
+        N = R_eq / np.sqrt(1 - e2 * sin_lat**2)
+        
+        # Calculate Position (r_eci)
+        x = (N + alt) * np.cos(lat_rad) * np.cos(lon_rad)
+        y = (N + alt) * np.cos(lat_rad) * np.sin(lon_rad)
+        z = (N * (1 - e2) + alt) * sin_lat
+        
+        r_eci = np.array([x, y, z])
+        
+        # 3. Calculate Initial Velocity (Earth Rotation Boost)
+        # The pad is spinning with the Earth. v = omega x r
+        v_eci = np.cross(omega, r_eci)
+        
+        return r_eci, v_eci
 
 
 def visualize_environment():
