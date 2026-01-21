@@ -41,5 +41,15 @@ class EnvConfig:
     # Maximum altitude in meters for the lookup table.
     atmosphere_max_alt: float = 1_000_000.0
 
+    # --- Launch Configuration ---
+    # Launch site latitude in degrees (Default: Cape Canaveral)
+    launch_latitude: float = 28.5721
+    
+    # Launch site longitude in degrees (Default: Cape Canaveral)
+    launch_longitude: float = -80.6480
+    
+    # Initial altitude above sea level in meters
+    launch_altitude: float = 0.0
+
 # You can create a default config instance for easy import elsewhere
 DefaultEnvConfig = EnvConfig()

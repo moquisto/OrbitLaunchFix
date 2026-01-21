@@ -244,6 +244,46 @@ def visualize_environment():
     plt.ylabel('Wind Speed (m/s)')
     plt.grid(True)
 
+    # ==========================================
+    # 4. CONSOLE DATA DUMP (For LLM Verification)
+    # ==========================================
+    print("\n" + "="*60)
+    print("PHYSICS VERIFICATION DATA DUMP")
+    print("="*60)
+    
+    print("\n--- A. ATMOSPHERE SAMPLES (US Standard Atmosphere 1976) ---")
+    print(f"{'Alt (m)':<12} {'Density (kg/m3)':<20} {'Pressure (Pa)':<15} {'Temp (K)':<10} {'SoS (m/s)':<10}")
+    
+    # Key altitudes: Sea level, Tropopause, Stratosphere, Mesosphere, Thermosphere, Vacuum boundary
+    test_alts = [0, 11000, 20000, 50000, 80000, 100000, config.atmosphere_max_alt + 1000]
+    
+    for h in test_alts:
+        r_sample = np.array([R_eq + h, 0, 0])
+        s = env.get_state(0, r_sample)
+        print(f"{h:<12.1f} {s.density:<20.5e} {s.pressure:<15.5e} {s.temperature:<10.2f} {s.speed_of_sound:<10.2f}")
+
+    print("\n--- B. GRAVITY CHECK (J2 Perturbation) ---")
+    # 1. Equator at Surface Radius
+    r_eq_surf = np.array([R_eq, 0, 0])
+    g_eq = np.linalg.norm(env.get_state(0, r_eq_surf).gravity_vector)
+    
+    # 2. Pole at Surface Radius (Geometric distance = R_eq, not actual pole surface)
+    # This isolates the J2 mass distribution effect from the flattening effect.
+    r_pole_at_req = np.array([0, 0, R_eq])
+    g_pole = np.linalg.norm(env.get_state(0, r_pole_at_req).gravity_vector)
+    
+    print(f"Gravity at Equator (r = R_eq): {g_eq:.5f} m/s^2")
+    print(f"Gravity at Pole    (r = R_eq): {g_pole:.5f} m/s^2")
+    print(f"Delta (Eq - Pole):             {g_eq - g_pole:.5f} m/s^2 (Should be positive due to J2 bulge)")
+
+    print("\n--- C. WIND CHECK (Earth Rotation) ---")
+    v_wind_surf = np.linalg.norm(env.get_state(0, r_eq_surf).wind_velocity)
+    v_wind_high = np.linalg.norm(env.get_state(0, np.array([R_eq + 100000, 0, 0])).wind_velocity)
+    print(f"Wind Speed at Surface: {v_wind_surf:.2f} m/s")
+    print(f"Wind Speed at 100km:   {v_wind_high:.2f} m/s (Should be higher)")
+    
+    print("="*60 + "\n")
+
     plt.show()
 
 if __name__ == "__main__":
