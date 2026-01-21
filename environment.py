@@ -21,6 +21,7 @@ class EnvironmentalState:
     speed_of_sound: float       # [m/s]
     temperature: float          # [K]
 
+
 class Environment:
     def __init__(self, config: EnvConfig):
         self.config = config
@@ -41,6 +42,7 @@ class Environment:
         self.table_rho = data["rho"].values      # Extract numpy array
         self.table_temp = data["t"].values       # Extract numpy array
         self.table_pressure = data["p"].values   # Extract numpy array
+
 
     def get_state(self, t: float, r_eci: Vector3) -> EnvironmentalState:
         """
@@ -130,8 +132,6 @@ class Environment:
             return g_central + np.array([gx, gy, gz])
             
         return g_central
-
-
 
 
 def visualize_environment():
