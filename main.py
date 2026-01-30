@@ -14,15 +14,16 @@ def solve_optimal_trajectory():
     #    - Controls U are [Throttle_X, Throttle_Y, Throttle_Z] (Direction * Throttle %)
     
     # 3. Set Constraints
-    #    - Initial State: r0, v0 = env.get_launch_site_state()
-    #      (Must match ECI frame with Earth rotation)
+    #    - Initial State: r0, v0 = env.get_launch_site_state() (ECI Frame)
+    #      opti.subject_to(X1_pos[0] == r0)
+    #      opti.subject_to(X1_vel[0] == v0)
     #    - Linkage: X2_start_pos == X1_end_pos
     #    - Linkage: X2_start_vel == X1_end_vel
     #    - Linkage: X2_start_mass == Ship_Wet_Mass (Fixed constant)
     #    - Constraint: X1_end_mass >= Booster_Dry_Mass + Ship_Wet_Mass (Cannot burn structure)
     #    - Terminal State (Target Orbit Altitude, Velocity, Inclination)
-    #    - Path Constraints Phase 1: 0.4 <= norm(U1) <= 1.0
-    #    - Path Constraints Phase 2: 0.4 <= norm(U2) <= 1.0
+    #    - Path Constraints Phase 1: 0.4 <= norm(U1) <= 1.0 (Booster always on)
+    #    - Path Constraints Phase 2: 0.0 <= norm(U2) <= 1.0 (Note: Real engine requires {0} U [0.4, 1.0])
     #    - Dynamics Phase 1: vehicle.get_dynamics(..., mode="boost", scaling=scaling)
     #    - Dynamics Phase 2: vehicle.get_dynamics(..., mode="ship", scaling=scaling)
     
