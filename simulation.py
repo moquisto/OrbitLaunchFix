@@ -5,7 +5,7 @@
 def run_simulation(optimization_result):
     # 1. Extract control schedules for Phase 1 and Phase 2
     
-    # 2. Create Interpolation Functions for controls (Linear/Cubic)
+    # 2. Create Interpolation Functions for controls (Linear)
     #    *CRITICAL*: Ensure time arrays from optimizer are UNSCALED (seconds) before creating interpolator.
     
     # 3. Propagate Phase 1 (Booster)

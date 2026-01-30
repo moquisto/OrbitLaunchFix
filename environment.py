@@ -9,6 +9,18 @@ class Environment:
         #    self.rho_interp = ca.interpolant(...)
         pass
 
+    def get_launch_site_state(self):
+        # Calculates the Initial State (Position & Velocity) in ECI frame
+        # based on the Launch Site Latitude/Longitude and Earth Rotation.
+        
+        # 1. Convert Lat/Lon/Alt to ECEF Position (r_ecef)
+        #    (Account for Earth Flattening/WGS84)
+        
+        # 2. Calculate Initial Velocity (v_eci)
+        #    v_eci = cross(Earth_Omega, r_ecef)
+        # Return r_eci, v_eci (Numpy arrays)
+        pass
+
     def get_state_opti(self, position_vector_sym):
         # CasADi-compatible method (Symbolic)
         # 1. Calculate Geodetic Altitude (Symbolic math, no 'if' statements)

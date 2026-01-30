@@ -11,17 +11,18 @@ def solve_optimal_trajectory():
     # 2. Define Decision Variables
     #    - Phase 1 (Boost): States X1, Controls U1, Time T1
     #    - Phase 2 (Ship):  States X2, Controls U2, Time T2
-    #    - Controls U are [Thrust_X, Thrust_Y, Thrust_Z] (Scaled Force)
+    #    - Controls U are [Throttle_X, Throttle_Y, Throttle_Z] (Direction * Throttle %)
     
     # 3. Set Constraints
-    #    - Initial State (Launchpad conditions)
+    #    - Initial State: r0, v0 = env.get_launch_site_state()
+    #      (Must match ECI frame with Earth rotation)
     #    - Linkage: X2_start_pos == X1_end_pos
     #    - Linkage: X2_start_vel == X1_end_vel
     #    - Linkage: X2_start_mass == Ship_Wet_Mass (Fixed constant)
     #    - Constraint: X1_end_mass >= Booster_Dry_Mass + Ship_Wet_Mass (Cannot burn structure)
     #    - Terminal State (Target Orbit Altitude, Velocity, Inclination)
-    #    - Path Constraints Phase 1: 0.4*Stage1_Thrust_Vac/scaling.force <= norm(U1) <= 1.0*Stage1_Thrust_Vac/scaling.force
-    #    - Path Constraints Phase 2: 0.4*Stage2_Thrust_Vac/scaling.force <= norm(U2) <= 1.0*Stage2_Thrust_Vac/scaling.force
+    #    - Path Constraints Phase 1: 0.4 <= norm(U1) <= 1.0
+    #    - Path Constraints Phase 2: 0.4 <= norm(U2) <= 1.0
     #    - Dynamics Phase 1: vehicle.get_dynamics(..., mode="boost", scaling=scaling)
     #    - Dynamics Phase 2: vehicle.get_dynamics(..., mode="ship", scaling=scaling)
     
