@@ -2,8 +2,8 @@
 
 import unittest
 import numpy as np
-from config import EnvConfig
-from environment import Environment, EnvironmentalState
+from oldconfig import EnvConfig
+from oldenvironment import Environment, EnvironmentalState
 
 class TestEnvironment(unittest.TestCase):
 
