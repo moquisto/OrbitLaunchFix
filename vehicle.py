@@ -81,4 +81,6 @@ class Vehicle:
         #     if is_casadi:
         #         return ca.vertcat(*res)
         #     else:
+        #         # Ensure scalar mass flow is wrapped in an array for concatenation
+        #         res[-1] = np.array([res[-1]])
         #         return np.concatenate(res)
