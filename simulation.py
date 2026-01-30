@@ -5,8 +5,10 @@
 def run_simulation(optimization_result):
     # 1. Extract control schedules for Phase 1 and Phase 2
     
-    # 2. Create Interpolation Functions for controls (Linear)
+    # 2. Create Interpolation Functions for controls (Linear or Zero-Order Hold)
     #    *CRITICAL*: Ensure time arrays from optimizer are UNSCALED (seconds) before creating interpolator.
+    #    *PHYSICS*: Enforce Raptor engine throttle limits (0.4 to 1.0).
+    #               Values < 0.4 should be clamped to 0.4 (if active) or 0.0 (if coasting).
     
     # 3. Propagate Phase 1 (Booster)
     #    - Define wrapper: dynamics_wrapper(t, y) -> vehicle.get_dynamics(y, interp_ctrl(t), t, stage_mode="boost", scaling=None)

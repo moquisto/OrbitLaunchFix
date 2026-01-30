@@ -7,6 +7,9 @@ class Environment:
         # 1. Load atmospheric data (US Standard Atmosphere 1976, 0-1000km continuous)
         # 2. Setup CasADi Interpolants (B-splines) for Density/Pressure vs Altitude
         #    self.rho_interp = ca.interpolant(...)
+        
+        # 3. Compile CasADi function for Simulation use (Guarantees 1:1 parity)
+        #    self._compile_sim_function()
         pass
 
     def get_launch_site_state(self):
@@ -32,10 +35,8 @@ class Environment:
         pass
 
     def get_state_sim(self, position_vector_num):
-        # Numpy-compatible method (Numeric) for forward simulation
-        # 1. Calculate Geodetic Altitude
-        # 2. Query Atmosphere (np.interp)
-        # 3. Calculate Gravity (Numeric)
-        # 4. Calculate Wind Vector (Numeric)
+        # Wrapper for the compiled CasADi function
+        # 1. Call self.sim_func(position_vector_num)
+        # 2. Convert CasADi DM output to Numpy dict
         # Return dict: {'density': ..., 'pressure': ..., 'speed_of_sound': ..., 'gravity': ..., 'wind': ...}
         pass

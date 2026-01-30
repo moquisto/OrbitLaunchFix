@@ -24,7 +24,7 @@ class Vehicle:
         #       r_phys = state[0:3] * scaling.length
         #       v_phys = state[3:6] * scaling.speed
         #       m_phys = state[6]   * scaling.mass
-        #       control_phys = control # Control is now Throttle Vector [Tx, Ty, Tz] (0.0 to 1.0)
+        #       control_phys = control # Control is Throttle Vector [Tx, Ty, Tz] (Magnitude is Throttle %)
         #    Else:
         #       Use raw inputs
         
@@ -48,12 +48,12 @@ class Vehicle:
         # 6. Calculate Angle of Attack (alpha)
         #    - Use Cross Product to avoid acos() singularity at alpha=0
         #    if is_casadi:
-        #        ctrl_mag = ca.norm_2(control_phys) + 1e-6
+        #        ctrl_mag = ca.norm_2(control_phys) + 1e-9
         #        Thrust_dir = control_phys / ctrl_mag
         #        cross_prod = ca.cross(Thrust_dir, V_rel / v_rel_mag)
         #        sin_alpha_sq = ca.dot(cross_prod, cross_prod)
         #    else:
-        #        ctrl_mag = np.linalg.norm(control_phys) + 1e-6
+        #        ctrl_mag = np.linalg.norm(control_phys) + 1e-9
         #        Thrust_dir = control_phys / ctrl_mag
         #        cross_prod = np.cross(Thrust_dir, V_rel / v_rel_mag)
         #        sin_alpha_sq = np.dot(cross_prod, cross_prod)
@@ -63,17 +63,20 @@ class Vehicle:
         #    Drag_Mag = 0.5 * env_state['density'] * v_rel_mag**2 * Cd_total * Area
         #    Drag_Vector = -Drag_Mag * (V_rel / v_rel_mag)
         
-        # 8. Calculate Thrust Forces (Throttle Control Logic)
-        #    throttle_level = lib.norm(control_phys) # Should be constrained 0.4 to 1.0
+        # 8. Calculate Thrust Forces (Correct Physics: Throttle -> MassFlow -> Force)
+        #    throttle_level = lib.norm(control_phys) # Valid range: [0.4, 1.0] or 0.0
         #
-        #    # 1. Calculate Mass Flow (Constant for a given throttle setting)
-        #    # m_dot_max = stage.thrust_vac / (stage.isp_vac * g0)
-        #    # M_dot = throttle_level * m_dot_max
+        #    # 1. Calculate Mass Flow (Determined by Throttle setting)
+        #    #    The engine pumps fuel proportional to throttle, regardless of external pressure.
+        #    #    m_dot_max = stage.thrust_vac / (stage.isp_vac * g0)
+        #    #    M_dot = throttle_level * m_dot_max
         #
         #    # 2. Calculate Thrust Force (Pressure Adjusted)
-        #    # ISP_current = ISP_vac + (env_state['pressure'] / P_sl) * (ISP_sl - ISP_vac)
-        #    # Thrust_Mag = M_dot * ISP_current * g0
-        #    # Thrust_Vector = Thrust_Mag * Thrust_dir
+        #    #    Thrust = MassFlow * ExhaustVelocity + (P_exit - P_ambient) * Area_exit
+        #    #    Simplified Linear Model:
+        #    #    ISP_current = ISP_vac + (env_state['pressure'] / P_sl) * (ISP_sl - ISP_vac)
+        #    #    Thrust_Mag = M_dot * ISP_current * g0
+        #    #    Thrust_Vector = Thrust_Mag * Thrust_dir
         
         # 9. Apply Newton's Laws (F_total = ma)
         
