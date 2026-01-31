@@ -5,12 +5,92 @@ import casadi as ca
 import numpy as np
 from config import ScalingConfig
 import warnings
+import time
 import guidance
+
+def print_debug_info(opti, sol, scaling, config, environment, X1, T1_scaled, X3, T3_scaled):
+    """
+    Analyzes the failed optimization result to identify the cause.
+    """
+    print("\n" + "="*40)
+    print("       OPTIMIZATION FAILURE DIAGNOSIS")
+    print("="*40)
+    
+    # 1. Terminal State Analysis
+    x_final = sol.value(X3)[:, -1]
+    r_f = x_final[0:3] * scaling.length
+    v_f = x_final[3:6] * scaling.speed
+    m_f = x_final[6] * scaling.mass
+    
+    R_earth = environment.config.earth_radius_equator
+    r_mag = np.linalg.norm(r_f)
+    alt_f = r_mag - R_earth
+    v_mag = np.linalg.norm(v_f)
+    
+    target_alt = config.target_altitude
+    target_v = np.sqrt(environment.config.earth_mu / (R_earth + target_alt))
+    
+    print(f"TERMINAL STATE (Optimizer Output):")
+    print(f"  Altitude:   {alt_f/1000:.2f} km  (Target: {target_alt/1000:.2f} km) | Error: {(alt_f - target_alt)/1000:.2f} km")
+    print(f"  Velocity:   {v_mag:.2f} m/s    (Target: {target_v:.2f} m/s)   | Error: {v_mag - target_v:.2f} m/s")
+    
+    # 2. Mass / Fuel Analysis
+    m_dry_s2 = config.stage_2.dry_mass + config.payload_mass
+    print(f"\nMASS / PROPELLANT CHECK:")
+    print(f"  Final Mass: {m_f:.2f} kg")
+    print(f"  Dry Limit:  {m_dry_s2:.2f} kg")
+    
+    if m_f < m_dry_s2:
+        print(f"  >>> CRITICAL FAILURE: Final mass is BELOW dry mass limit by {m_dry_s2 - m_f:.2f} kg.")
+        print(f"  >>> The vehicle lacks the Delta-V to reach the target orbit with current constraints.")
+    else:
+        print(f"  Mass constraint satisfied. Remaining fuel: {m_f - m_dry_s2:.2f} kg")
+
+    # 3. Staging Analysis
+    t1 = sol.value(T1_scaled) * scaling.time
+    x1_f = sol.value(X1)[:, -1]
+    v1_f = x1_f[3:6] * scaling.speed
+    v1_mag = np.linalg.norm(v1_f)
+    
+    print(f"\nSTAGING ANALYSIS:")
+    print(f"  MECO Time:      {t1:.2f} s")
+    print(f"  MECO Velocity:  {v1_mag:.2f} m/s")
+    
+    # Check Stage 2 T/W
+    m_ship_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+    weight_ship = m_ship_wet * 9.81 # Approx gravity
+    thrust_ship = config.stage_2.thrust_vac
+    tw_ship = thrust_ship / weight_ship
+    print(f"  Ship Init T/W:  {tw_ship:.2f}")
+    
+    # Flight Path Angle (Gamma) Analysis
+    # Gamma = asin( r dot v / (|r||v|) )
+    r_s = x1_f[0:3] * scaling.length
+    v_s = x1_f[3:6] * scaling.speed
+    r_mag_s = np.linalg.norm(r_s)
+    v_mag_s = np.linalg.norm(v_s)
+    sin_gamma = np.dot(r_s, v_s) / (r_mag_s * v_mag_s)
+    gamma_deg = np.degrees(np.arcsin(np.clip(sin_gamma, -1.0, 1.0)))
+    
+    print(f"  Staging FPA (Gamma): {gamma_deg:.2f} deg")
+    
+    if tw_ship < 1.0 and gamma_deg < 5.0:
+        print(f"  >>> CRITICAL PHYSICS ISSUE: Staging T/W is {tw_ship:.2f} (< 1.0) and Flight Path Angle is low ({gamma_deg:.1f} deg).")
+        print(f"      The upper stage cannot fight gravity and will sink into the atmosphere.")
+        print(f"      SUGGESTION: Increase Booster 'meco_cutoff_mach' or force a steeper ascent.")
+    
+    # 4. Solver Metrics
+    # If we are here, the solver likely failed to satisfy constraints.
+    print(f"\nSOLVER STATUS:")
+    print(f"  The optimizer could not find a feasible solution.")
+    print("="*40 + "\n")
 
 def solve_optimal_trajectory(config, vehicle, environment):
     """
     Formulates and solves the trajectory optimization problem using CasADi.
     """
+    print(f"\n[Optimizer] Setting up CasADi problem for {config.name}...")
+    t_start = time.time()
     
     # --- 1. SETUP ---
     # Initialize CasADi Opti stack
@@ -39,7 +119,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
     m_stage1_min = config.stage_1.dry_mass + m_ship_wet
     
     # --- 2. DECISION VARIABLES ---
-    N = 50 # Nodes per phase
+    N = config.num_nodes # Nodes per phase
     
     # Phase 1: Booster Ascent
     T1_scaled = opti.variable()
@@ -72,7 +152,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
     opti.subject_to(X1[:, 0] == x0_scaled)
     
     # Time Constraints
-    opti.subject_to(T1_scaled >= 10.0 / scaling.time)
+    opti.subject_to(T1_scaled >= 60.0 / scaling.time)
     opti.subject_to(T3_scaled >= 10.0 / scaling.time)
     if use_coast:
         opti.subject_to(T2_scaled == config.sequence.separation_delay / scaling.time)
@@ -117,19 +197,25 @@ def solve_optimal_trajectory(config, vehicle, environment):
             
             # Path Constraints (Safety)
             # Altitude > -100m (allow slight dip at launch due to numerics)
-            r_k = x_k[0:3] * scaling.length
-            opti.subject_to(ca.norm_2(r_k) >= R_earth - 100.0)
+            r_k_scaled = x_k[0:3]
+            R_earth_scaled = R_earth / scaling.length
+            opti.subject_to(ca.norm_2(r_k_scaled) >= R_earth_scaled - (100.0 / scaling.length))
             
             # Mass Constraints (Don't burn more than available)
-            m_k = x_k[6] * scaling.mass
+            m_k_scaled = x_k[6]
             if phase_mode == "boost":
-                opti.subject_to(m_k >= m_stage1_min)
+                opti.subject_to(m_k_scaled >= m_stage1_min / scaling.mass)
             elif phase_mode == "ship":
-                opti.subject_to(m_k >= config.stage_2.dry_mass + config.payload_mass)
+                opti.subject_to(m_k_scaled >= (config.stage_2.dry_mass + config.payload_mass) / scaling.mass)
 
     # Apply Dynamics
     # Phase 1: Boost
     add_phase_dynamics(X1, U1, T1_scaled, "boost", 0.0)
+    
+    # STAGING FIX: Force Booster to provide minimum velocity (e.g. 1500 m/s)
+    # This prevents the solver from cutting the booster phase too short.
+    v_meco_scaled = ca.norm_2(X1[3:6, -1])
+    opti.subject_to(v_meco_scaled >= 1500.0 / scaling.speed)
     
     # Phase 2: Coast / Linkage
     t_end_p1 = T1_scaled
@@ -152,31 +238,36 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # C. Terminal Constraints (Target Orbit)
     x_final = X3[:, -1]
-    r_f = x_final[0:3] * scaling.length
-    v_f = x_final[3:6] * scaling.speed
+    r_f_scaled = x_final[0:3]
+    v_f_scaled = x_final[3:6]
     
-    r_mag = ca.norm_2(r_f)
-    v_mag = ca.norm_2(v_f)
+    r_mag_scaled = ca.norm_2(r_f_scaled)
+    v_mag_scaled = ca.norm_2(v_f_scaled)
     
     # 1. Altitude
-    opti.subject_to(r_mag == R_earth + Target_Alt)
+    target_r_scaled = (R_earth + Target_Alt) / scaling.length
+    opti.subject_to(r_mag_scaled == target_r_scaled)
     # 2. Velocity (Circular)
-    v_target = ca.sqrt(mu / (R_earth + Target_Alt))
-    opti.subject_to(v_mag == v_target)
+    v_target_phys = np.sqrt(mu / (R_earth + Target_Alt))
+    v_target_scaled = v_target_phys / scaling.speed
+    opti.subject_to(v_mag_scaled == v_target_scaled)
     # 3. Eccentricity (Flight Path Angle = 0)
-    opti.subject_to(ca.dot(r_f, v_f) == 0.0)
+    opti.subject_to(ca.dot(r_f_scaled, v_f_scaled) == 0.0)
     # 4. Inclination
-    h_vec = ca.cross(r_f, v_f)
-    opti.subject_to(h_vec[2] == ca.norm_2(h_vec) * np.cos(Target_Inc))
+    h_vec_scaled = ca.cross(r_f_scaled, v_f_scaled)
+    h_mag_scaled = ca.norm_2(h_vec_scaled)
+    opti.subject_to(h_vec_scaled[2] == h_mag_scaled * np.cos(Target_Inc))
 
     # --- 4. OBJECTIVE ---
     # Maximize Final Mass
     opti.minimize(-X3[6, -1])
     
     # --- 5. INITIALIZATION ---
-    print("Generating Initial Guess...")
+    print(f"[Optimizer] Calling Guidance module for Warm Start...")
+    t_guess = time.time()
     # FIX: Pass N, not N+1. Guidance generates N+1 points (nodes) from N intervals.
     guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N)
+    print(f"[Optimizer] Guidance generated in {time.time() - t_guess:.2f}s")
     
     def set_guess(var, val):
         # FIX: Remove try-except to expose shape mismatches immediately
@@ -202,15 +293,17 @@ def solve_optimal_trajectory(config, vehicle, environment):
     set_guess(U3, u3_guess[:, :N])
     
     # --- 6. SOLVE ---
-    print("Solving Trajectory Optimization...")
+    print(f"[Optimizer] Starting IPOPT solver (Max Iter={1000})...")
+    t_solve = time.time()
     opti.solver("ipopt", {"expand": True}, {"max_iter": 1000, "tol": 1e-4, "print_level": 5})
     
     try:
         sol = opti.solve()
-        print("Optimization Successful!")
+        print(f"[Optimizer] SUCCESS: Optimal solution found in {time.time() - t_solve:.2f}s.")
     except:
-        print("Optimization Failed. Returning debug values.")
+        print(f"[Optimizer] FAILURE: Solver did not converge after {time.time() - t_solve:.2f}s. Returning debug values.")
         sol = opti.debug
+        print_debug_info(opti, sol, scaling, config, environment, X1, T1_scaled, X3, T3_scaled)
     
     # --- 7. OUTPUT ---
     res = {}
@@ -228,6 +321,8 @@ def solve_optimal_trajectory(config, vehicle, environment):
     res["X3"] = sol.value(X3) * s_vec[:, None]
     res["U3"] = sol.value(U3)
     
+    print(f"[Optimizer] Total optimization time: {time.time() - t_start:.2f}s")
+    
     return res
 
 if __name__ == "__main__":
@@ -238,6 +333,7 @@ if __name__ == "__main__":
     import analysis
     
     print("--- Setting up Mission ---")
+    StarshipBlock2.print_summary()
     env = Environment(EARTH_CONFIG)
     veh = Vehicle(StarshipBlock2, env)
     
