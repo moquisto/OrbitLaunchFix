@@ -12,8 +12,8 @@ def run_simulation(optimization_result, vehicle, config):
     # 2. CONTROL INTERPOLATION SETUP
     #    - Define a helper function `create_interpolator(t_grid, values)`:
     #      - CRITICAL: Use 'previous' (Zero-Order Hold) if optimizer assumes constant controls per node.
-    #      - Use 'linear' only if optimizer assumes First-Order Hold.
-    #      - CRITICAL: Must handle bounds! If t > T_max, return values[-1]. If t < 0, return values[0].
+    #      - CRITICAL: Must handle bounds (Extrapolation)! 
+    #      - Use `fill_value="extrapolate"` or clamp t to [0, T_max] manually.
     #    - Create interpolators for Phase 1:
     #      - `get_throttle_1(t_local)`
     #      - `get_thrust_dir_1(t_local)` -> Must normalize output vector!

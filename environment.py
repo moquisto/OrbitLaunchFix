@@ -32,13 +32,20 @@ class Environment:
         #    z = (N * (1 - e_sq) + alt) * sin_lat
         #    r_ecef = array([x, y, z])
 
-        # 3. INITIAL VELOCITY (Inertial Frame)
-        #    # At t=0, ECEF aligns with ECI.
-        #    # Velocity is due to Earth's rotation: v = omega x r
-        #    v_eci = cross(self.config.earth_omega_vector, r_ecef)
+        # 3. ROTATE TO INERTIAL FRAME (ECI)
+        #    # Apply initial Earth rotation offset (theta_0)
+        #    theta_0 = self.config.initial_rotation
+        #    # R_z(theta_0) rotation matrix (ECEF -> ECI)
+        #    # x_eci = x_ecef * cos(theta) - y_ecef * sin(theta) ...
+        #    # For simple Z-rotation:
+        #    r_eci = rotate_z(r_ecef, theta_0)
 
-        # 4. RETURN
-        #    return r_ecef, v_eci
+        # 4. INITIAL VELOCITY (Inertial Frame)
+        #    # Velocity is due to Earth's rotation: v = omega x r
+        #    v_eci = cross(self.config.earth_omega_vector, r_eci)
+
+        # 5. RETURN
+        #    return r_eci, v_eci
         pass
 
     def get_state_opti(self, position_vector_sym, time_sym):
