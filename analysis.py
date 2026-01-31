@@ -3,6 +3,7 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 def plot_mission(optimization_data, simulation_data, environment):
     """
@@ -214,6 +215,40 @@ def plot_mission(optimization_data, simulation_data, environment):
     ax4.plot(sim_metrics['lon'][0], sim_metrics['lat'][0], 'go', label='Launch')
     ax4.plot(sim_metrics['lon'][-1], sim_metrics['lat'][-1], 'rx', label='Orbit')
     ax4.legend()
+    
+    # Figure 5: 3D Trajectory
+    fig5 = plt.figure(figsize=(10, 10))
+    ax5 = fig5.add_subplot(111, projection='3d')
+    ax5.set_title('3D Trajectory (ECI Frame)')
+    
+    # Draw Earth (Wireframe Sphere)
+    u = np.linspace(0, 2 * np.pi, 30)
+    v = np.linspace(0, np.pi, 30)
+    x_earth = R_eq * np.outer(np.cos(u), np.sin(v))
+    y_earth = R_eq * np.outer(np.sin(u), np.sin(v))
+    z_earth = R_eq * np.outer(np.ones(np.size(u)), np.cos(v))
+    
+    ax5.plot_wireframe(x_earth, y_earth, z_earth, color='c', alpha=0.2, linewidth=0.5)
+    
+    # Plot Trajectory
+    r_sim = y_sim[0:3, :]
+    ax5.plot(r_sim[0, :], r_sim[1, :], r_sim[2, :], 'r-', label='Flight Path', linewidth=2)
+    
+    # Markers
+    ax5.scatter(r_sim[0, 0], r_sim[1, 0], r_sim[2, 0], color='g', s=50, label='Launch')
+    ax5.scatter(r_sim[0, -1], r_sim[1, -1], r_sim[2, -1], color='k', marker='x', s=50, label='Orbit Injection')
+    
+    # Axis Labels & Limits
+    ax5.set_xlabel('X (ECI) [m]')
+    ax5.set_ylabel('Y (ECI) [m]')
+    ax5.set_zlabel('Z (ECI) [m]')
+    
+    # Set cubic limits for aspect ratio
+    max_val = max(np.max(np.abs(r_sim)), R_eq) * 1.1
+    ax5.set_xlim(-max_val, max_val)
+    ax5.set_ylim(-max_val, max_val)
+    ax5.set_zlim(-max_val, max_val)
+    ax5.legend()
     
     plt.show()
 

@@ -175,11 +175,12 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # --- 5. INITIALIZATION ---
     print("Generating Initial Guess...")
-    guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N+1)
+    # FIX: Pass N, not N+1. Guidance generates N+1 points (nodes) from N intervals.
+    guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N)
     
     def set_guess(var, val):
-        try: opti.set_initial(var, val)
-        except: pass
+        # FIX: Remove try-except to expose shape mismatches immediately
+        opti.set_initial(var, val)
 
     s_vec = np.array([scaling.length]*3 + [scaling.speed]*3 + [scaling.mass])
     
