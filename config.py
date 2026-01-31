@@ -54,7 +54,7 @@ class EnvConfig:
     # --- Atmosphere Constants ---
     air_gamma: float = 1.4                        # [-] Heat capacity ratio
     air_gas_constant: float = 287.058             # [J/(kg·K)] Specific gas constant
-    atmosphere_step: float = 5.0                  # [m] Lookup table resolution
+    atmosphere_step: float = 10.0                 # [m] Lookup table resolution (Linear interp is sufficient)
     atmosphere_max_alt: float = 1_000_000.0       # [m] Atmosphere cutoff altitude
     
     # --- Launch Site (Cape Canaveral) ---
@@ -63,7 +63,9 @@ class EnvConfig:
     launch_altitude: float = 0.0                  # [m]
 
     # --- Physical Constants ---
-    g0: float = 9.80665                           # [m/s^2] Standard Gravity (for ISP conversion)
+    # [m/s^2] Standard Gravity. Used ONLY for converting ISP (s) to Exhaust Velocity (m/s).
+    # DO NOT use this for calculating weight or local gravity (which varies with altitude).
+    g0: float = 9.80665                           
 
 @dataclass
 class SequenceConfig:
@@ -83,7 +85,9 @@ class AerodynamicConfig:
     """
     reference_area: float         # [m^2] Aerodynamic reference area
     mach_cd_table: np.ndarray     # [-] Drag Coefficient (Cd) vs Mach Number lookup table
-    cd_crossflow_factor: float = 30.0 # [-] Penalty factor for Angle of Attack (Crossflow Drag)
+    # [-] Coefficient for "Crossflow Drag" model: Cd_total = Cd_base + factor * sin^2(alpha).
+    # Approximates the massive drag increase when flying sideways (e.g. during flip).
+    cd_crossflow_factor: float = 30.0 
 
 @dataclass
 class StageConfig:
@@ -96,13 +100,20 @@ class StageConfig:
     # Propulsion Performance
     # NOTE: thrust_sl is a DERIVED reference value. The physics engine calculates 
     # actual thrust using thrust_vac and the ISP curve (Choked Flow assumption).
-    thrust_sl: float        # [N] Sea Level Thrust (Reference)
+    # We retain thrust_vac as the "anchor" value to define the engine's absolute 
+    # power magnitude. It is used to calculate the constant Mass Flow Rate (m_dot)
+    # at 100% throttle, since ISP only defines efficiency, not scale.
     thrust_vac: float       # [N] Vacuum Thrust (Max)
     
     isp_sl: float           # [s] Specific Impulse at Sea Level
     isp_vac: float          # [s] Specific Impulse in Vacuum
     p_sl: float             # [Pa] Reference pressure for ISP_sl
     
+    @property
+    def thrust_sl(self) -> float:
+        """Derived Sea Level Thrust based on Choked Flow physics (Constant Mass Flow)."""
+        return self.thrust_vac * (self.isp_sl / self.isp_vac)
+
     aero: AerodynamicConfig # Stage-specific aerodynamics
 
 @dataclass
@@ -115,6 +126,8 @@ class TwoStageRocketConfig:
     stage_2: StageConfig  # Ship (Second Stage)
     sequence: SequenceConfig
     payload_mass: float   # [kg] Payload mass
+    target_altitude: float = 420000.0  # [m] Target Orbit Altitude
+    target_inclination: float = 28.5   # [deg] Target Inclination
     
     @property
     def launch_mass(self) -> float:
@@ -128,12 +141,14 @@ StarshipBlock2 = TwoStageRocketConfig(
     name="SpaceX Starship Block 2 (Flight Proven)",
     
     payload_mass=0.0, # Payload to Orbit
+    target_altitude=420000.0,
+    target_inclination=28.5,
 
     sequence=SequenceConfig(
         main_engine_ramp_time=3.0,     
         upper_engine_ramp_time=2.0,    
         separation_delay=0.0,          # Hot Staging (0s delay)
-        meco_cutoff_mach=3.8,          # Staging Velocity Target
+        meco_cutoff_mach=3.8,          # Staging Velocity Target, can be altered or even omitted
         min_throttle=0.40              # 40% Minimum Throttle
     ),
     
@@ -144,7 +159,6 @@ StarshipBlock2 = TwoStageRocketConfig(
         # Propulsion (Raptor 2/3 Cluster)
         # Note: Thrust values are derived from ISP in simulation.
         # Calculated SL Thrust ~78.7 MN based on ISP ratio.
-        thrust_sl=74_580_000.0,      # Reference value
         thrust_vac=83_490_000.0,     # 33 Engines * ~2.53 MN
         isp_sl=327.0,
         isp_vac=347.0,
@@ -168,7 +182,6 @@ StarshipBlock2 = TwoStageRocketConfig(
         # Propulsion (Raptor Vacuum + Sea Level)
         # Note: Ship engines are optimized for vacuum.
         # isp_sl is low to penalize low-altitude operation.
-        thrust_sl=13_000_000.0,     # Reference (Virtual)
         thrust_vac=14_700_000.0,    # 6 Engines (3 Vac + 3 SL)
         isp_sl=100.0,               # Flow separation penalty at SL
         isp_vac=365.0,
