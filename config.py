@@ -54,13 +54,13 @@ class EnvConfig:
     # --- Atmosphere Constants ---
     air_gamma: float = 1.4                        # [-] Heat capacity ratio
     air_gas_constant: float = 287.058             # [J/(kg·K)] Specific gas constant
-    atmosphere_step: float = 10.0                 # [m] Lookup table resolution (Linear interp is sufficient)
+    atmosphere_step: float = 500.0                # [m] Lookup table resolution (Increased for solver stability)
     atmosphere_max_alt: float = 1_000_000.0       # [m] Atmosphere cutoff altitude
     
     # --- Launch Site (Cape Canaveral) ---
     launch_latitude: float = 28.5721              # [deg]
     launch_longitude: float = -80.6480            # [deg]
-    launch_altitude: float = 0.0                  # [m]
+    launch_altitude: float = 10.0                  # [m]
 
     # --- Physical Constants ---
     # [m/s^2] Standard Gravity. Used ONLY for converting ISP (s) to Exhaust Velocity (m/s).
@@ -127,7 +127,7 @@ class TwoStageRocketConfig:
     sequence: SequenceConfig
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
-    target_inclination: float = 28.5   # [deg] Target Inclination
+    target_inclination: float = 28.6   # [deg] Target Inclination (Must be >= Launch Latitude 28.57)
     
     @property
     def launch_mass(self) -> float:
@@ -142,7 +142,7 @@ StarshipBlock2 = TwoStageRocketConfig(
     
     payload_mass=0.0, # Payload to Orbit
     target_altitude=420000.0,
-    target_inclination=28.5,
+    target_inclination=28.6,
 
     sequence=SequenceConfig(
         main_engine_ramp_time=3.0,     

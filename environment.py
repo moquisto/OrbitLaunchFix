@@ -21,13 +21,18 @@ class Environment:
         p_values = data["p"].values
         t_values = data["t"].values
         
+        # Clean data to prevent NaNs from propagating into CasADi interpolants
+        rho_values = np.nan_to_num(rho_values, nan=0.0)
+        p_values = np.nan_to_num(p_values, nan=0.0)
+        t_values = np.nan_to_num(t_values, nan=200.0)
+        
         # Calculate Speed of Sound: a = sqrt(gamma * R * T)
         sos_values = np.sqrt(self.config.air_gamma * self.config.air_gas_constant * t_values)
         
         # 2. Setup CasADi Interpolants (B-splines)
         # Use Log-Density interpolation to handle 15 orders of magnitude and prevent negative values.
         # Clamp rho to small positive value to avoid log(0)
-        rho_values = np.maximum(rho_values, 1e-12)
+        rho_values = np.maximum(rho_values, 1e-9)
         
         self.log_rho_interp = ca.interpolant('log_rho', 'bspline', [self.grid_altitudes], np.log(rho_values))
         self.p_interp   = ca.interpolant('p',   'bspline', [self.grid_altitudes], p_values)
@@ -172,8 +177,10 @@ class Environment:
 
         # J2 Perturbation
         if self.config.use_j2_perturbation:
-            z_sq_ratio = z_sq / r_sq
-            factor = -1.5 * J2 * mu * (R_eq**2) / (r_mag**5)
+            # Protect against division by zero (though r_mag is usually large)
+            r_mag_safe = ca.fmax(r_mag, 1.0)
+            z_sq_ratio = z_sq / (r_sq + 1e-16)
+            factor = -1.5 * J2 * mu * (R_eq**2) / (r_mag_safe**5)
             
             term_xy = 1.0 - 5.0 * z_sq_ratio
             term_z  = 3.0 - 5.0 * z_sq_ratio

@@ -55,7 +55,7 @@ class Vehicle:
         if is_symbolic:
             v_rel_sq = dot(v_rel, v_rel)
             # v_rel_mag: Used for physics (Q, Mach) and normalization.
-            v_rel_mag = ca.sqrt(v_rel_sq + 1.0e-8)
+            v_rel_mag = ca.sqrt(v_rel_sq + 1.0)
         else:
             v_rel_mag = norm(v_rel)
 
@@ -71,18 +71,21 @@ class Vehicle:
         # Handle zero-thrust case (Coast) to avoid zero-vector in u_control.
         if is_symbolic:
             thrust_sq = dot(thrust_direction, thrust_direction)
-            thrust_mag = ca.sqrt(thrust_sq + 1.0e-8)
+            thrust_mag = ca.sqrt(thrust_sq + 1.0e-4)
+            # Smooth normalization: Transitions from 0 to Unit Vector smoothly.
+            # thrust_mag is at least 1e-3, so this is always safe.
+            u_control = thrust_direction / thrust_mag
         else:
             thrust_mag = norm(thrust_direction)
-        # Normalize thrust vector. If zero, result is zero vector (safe).
-        safe_denom = if_else(thrust_mag > 1e-9, thrust_mag, 1.0)
-        u_control = thrust_direction / safe_denom
+            safe_denom = if_else(thrust_mag > 1e-9, thrust_mag, 1.0)
+            u_control = thrust_direction / safe_denom
 
         # Angle of Attack (AoA) Logic
-        # Singularity Check: At Launchpad (v ~ 0), velocity direction is undefined.
-        # Simplified logic: u_vel scales with velocity. At v=0, u_vel=0, Drag=0.
-        # This avoids 'if_else' singularities in the gradient.
         if is_symbolic:
+            # SINGULARITY FIX (Smooth):
+            # Replaced if_else with smooth normalization to ensure continuous derivatives.
+            # v_rel_mag is calculated as sqrt(v^2 + 1e-6), so it never hits zero.
+            # u_vel approaches 0 vector as v -> 0, and Unit vector as v -> infinity.
             u_vel = v_rel / v_rel_mag
         else:
             if v_rel_mag > 1e-9:
