@@ -11,7 +11,8 @@ def run_simulation(optimization_result, vehicle, config):
     
     # 2. CONTROL INTERPOLATION SETUP
     #    - Define a helper function `create_interpolator(t_grid, values)`:
-    #      - Should use 'linear' interpolation (robust for controls).
+    #      - CRITICAL: Use 'previous' (Zero-Order Hold) if optimizer assumes constant controls per node.
+    #      - Use 'linear' only if optimizer assumes First-Order Hold.
     #      - CRITICAL: Must handle bounds! If t > T_max, return values[-1]. If t < 0, return values[0].
     #    - Create interpolators for Phase 1:
     #      - `get_throttle_1(t_local)`
@@ -36,7 +37,7 @@ def run_simulation(optimization_result, vehicle, config):
     # 4. PHASE 2: COAST & STAGING LOGIC
     #    - Start Time: `t_start_coast = sim_res_1.t[-1]`.
     #    - Initial State: `y_start_coast = sim_res_1.y[:, -1]`.
-    #    - If `T2 > 0`:
+    #    - If `T2 > 1e-4`: (Handle Hot Staging / Zero Delay)
     #      - Define `dynamics_coast(t, y)`:
     #        - Controls: Throttle = 0, Direction = [1,0,0] (irrelevant).
     #        - Return `vehicle.get_dynamics(y, 0, ..., t, mode="coast")`.

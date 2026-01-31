@@ -47,8 +47,9 @@ class Environment:
         #          Must be fully symbolic (CasADi) and differentiable.
 
         # 1. ROTATION (ECI -> ECEF)
-        #    # Earth rotates around Z-axis by angle theta = omega * t
-        #    theta = self.config.earth_omega_vector[2] * time_sym
+        #    # Earth rotates around Z-axis by angle theta = omega * t + initial_rotation
+        #    # initial_rotation ensures launch site longitude is correct in ECI at t=0.
+        #    theta = self.config.earth_omega_vector[2] * time_sym + self.config.initial_rotation
         #    # Rotation Matrix R (ECI to ECEF)
         #    # [ cos(theta)   sin(theta)   0 ]
         #    # [ -sin(theta)  cos(theta)   0 ]
@@ -107,7 +108,10 @@ class Environment:
     def get_state_sim(self, position_vector_num, time_num):
         # PSEUDOCODE:
         # Purpose: Fast numeric wrapper for simulation (scipy.solve_ivp).
-        # 1. Call the compiled CasADi function: res = self.sim_func(pos, time)
-        # 2. Unpack 'res' (CasADi DM) into a standard Python Dictionary with floats/numpy arrays.
-        # 3. Return the dictionary.
+        # CRITICAL: Must use the EXACT same physics function as the optimizer to avoid drift.
+        
+        # 1. Wrap inputs: pos_dm = ca.DM(position_vector_num), t_dm = ca.DM(time_num)
+        # 2. Call the compiled CasADi function: res = self.sim_func(pos_dm, t_dm)
+        # 3. Unpack 'res' (CasADi DM) into a standard Python Dictionary with floats/numpy arrays.
+        # 4. Return the dictionary.
         pass

@@ -28,7 +28,10 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # State Variables (Scaled) [Position(3), Velocity(3), Mass(1)]
     # X1: Matrix [7 x (N+1)] for Phase 1 (Booster Ascent)
-    # X2: Matrix [7 x (N+1)] for Phase 2 (Coast)
+    
+    # LOGIC FIX: If separation_delay < 1e-4, SKIP Phase 2 generation to avoid dt=0 singularity.
+    # if config.sequence.separation_delay > 1e-4:
+    #     X2: Matrix [7 x (N+1)] for Phase 2 (Coast)
     # X3: Matrix [7 x (N+1)] for Phase 3 (Ship Ascent)
     
     # Control Variables (Scaled/Normalized)
@@ -44,12 +47,17 @@ def solve_optimal_trajectory(config, vehicle, environment):
     # *Apply Scaling to all values*
     
     # B. Phase Linkage (Continuity)
-    # 1. Boost -> Coast
-    #    X2[:, 0] == X1[:, -1] (Position, Velocity, Mass must match exactly)
-    # 2. Coast -> Ship (Staging)
-    #    X3[pos, vel, 0] == X2[pos, vel, -1] (Kinematics match)
-    #    X3[mass, 0] == Ship_Wet_Mass + Payload (Mass discontinuity: Drop Booster)
-    #    X2[mass, -1] >= Ship_Wet_Mass + Payload + Booster_Dry_Mass (Conservation of mass check: Booster cannot burn phantom fuel)
+    # If Phase 2 exists:
+    #   1. Boost -> Coast
+    #      X2[:, 0] == X1[:, -1]
+    #   2. Coast -> Ship (Staging)
+    #      X3[pos, vel, 0] == X2[pos, vel, -1]
+    #      X3[mass, 0] == Ship_Wet_Mass + Payload
+    # Else (Hot Staging):
+    #   1. Boost -> Ship
+    #      X3[pos, vel, 0] == X1[pos, vel, -1]
+    #      X3[mass, 0] == Ship_Wet_Mass + Payload
+    #      X1[mass, -1] >= Ship_Wet_Mass + Payload + Booster_Dry_Mass
     
     # C. Dynamics (Multiple Shooting / Collocation)
     # For each Phase k in [1, 2, 3]:
