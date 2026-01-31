@@ -40,6 +40,10 @@ class EnvConfig:
     # Earth Rotation (rad/s) - Vector points along Z-axis (North)
     earth_omega_vector: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 7.2921159e-5]))
     
+    # Initial Rotation (GMST or alignment offset) [rad]
+    # Ensures Launch Site Longitude is correctly placed in Inertial Space at t=0.
+    initial_rotation: float = 0.0 
+
     # J2 Perturbation (Oblateness effect on Gravity)
     j2_constant: float = 0.0010826267
     use_j2_perturbation: bool = True
@@ -90,7 +94,8 @@ class StageConfig:
     propellant_mass: float  # [kg] Mass of usable propellant
     
     # Propulsion Performance
-    # NOTE: thrust_sl is for reference; simulation calculates thrust from ISP and Vacuum Thrust.
+    # NOTE: thrust_sl is a DERIVED reference value. The physics engine calculates 
+    # actual thrust using thrust_vac and the ISP curve (Choked Flow assumption).
     thrust_sl: float        # [N] Sea Level Thrust (Reference)
     thrust_vac: float       # [N] Vacuum Thrust (Max)
     

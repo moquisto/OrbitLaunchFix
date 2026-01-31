@@ -30,8 +30,11 @@ def solve_optimal_trajectory(config, vehicle, environment):
     # X1: Matrix [7 x (N+1)] for Phase 1 (Booster Ascent)
     
     # LOGIC FIX: If separation_delay < 1e-4, SKIP Phase 2 generation to avoid dt=0 singularity.
-    # if config.sequence.separation_delay > 1e-4:
+    # use_coast_phase = config.sequence.separation_delay > 1e-4
+    # if use_coast_phase:
     #     X2: Matrix [7 x (N+1)] for Phase 2 (Coast)
+    #     T2_scaled: Duration of Coast Phase (Constrained to config.separation_delay)
+    
     # X3: Matrix [7 x (N+1)] for Phase 3 (Ship Ascent)
     
     # Control Variables (Scaled/Normalized)
@@ -47,13 +50,15 @@ def solve_optimal_trajectory(config, vehicle, environment):
     # *Apply Scaling to all values*
     
     # B. Phase Linkage (Continuity)
-    # If Phase 2 exists:
+    # If use_coast_phase:
     #   1. Boost -> Coast
     #      X2[:, 0] == X1[:, -1]
+    #      # Mass Constraint: No fuel burn during coast
+    #      X2[mass, 0] == X2[mass, -1]
     #   2. Coast -> Ship (Staging)
     #      X3[pos, vel, 0] == X2[pos, vel, -1]
     #      X3[mass, 0] == Ship_Wet_Mass + Payload
-    # Else (Hot Staging):
+    # Else (Hot Staging / No Coast):
     #   1. Boost -> Ship
     #      X3[pos, vel, 0] == X1[pos, vel, -1]
     #      X3[mass, 0] == Ship_Wet_Mass + Payload
@@ -61,12 +66,13 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # C. Dynamics (Multiple Shooting / Collocation)
     # For each Phase k in [1, 2, 3]:
+    #   (Skip Phase 2 loop if not use_coast_phase)
     #   dt = T_k / N
     #   For each node i in 0..N-1:
     #     1. Calculate Absolute Time t_abs (Critical for Earth Rotation/J2)
     #        Phase 1: t_abs = i * dt
-    #        Phase 2: t_abs = T1 + i * dt
-    #        Phase 3: t_abs = T1 + T2 + i * dt
+    #        Phase 2: t_abs = T1 + i * dt (if exists)
+    #        Phase 3: t_abs = T1 + (T2 if exists else 0) + i * dt
     #
     #     2. Get Dynamics Derivative (f)
     #        f(x, u) = vehicle.get_dynamics(x, u, t_abs, mode=phase_mode, scaling=scaling)
