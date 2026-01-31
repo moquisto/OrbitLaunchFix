@@ -50,6 +50,8 @@ class Vehicle:
         #
         #    # Assumption: 3-DOF model, Thrust aligns with Body. AoA = Angle(Thrust, v_rel).
         #    # CRITICAL FIX: If coasting, assume vehicle aligns with velocity (Prograde) to minimize drag.
+        #    # NOTE: Crossflow is modeled as Drag (opposite to velocity), not Lift (normal force).
+        #    # This is acceptable for energy management but ignores body-lift turning effects.
         #    if stage_mode == "coast":
         #        u_thrust = u_vel
         #    else:
@@ -76,6 +78,7 @@ class Vehicle:
         #    # Mass Flow Rate (Constant for fixed throttle, depends on Vacuum ISP)
         #    # Note: We derive m_dot from Vacuum conditions (Choked Flow assumption).
         #    # This means 'thrust_sl' in config is NOT used directly; SL thrust is derived from ISP curve.
+        #    # Ensure config.thrust_sl matches (thrust_vac * isp_sl / isp_vac) to avoid confusion.
         #    m_dot = eff_throttle * stage.thrust_vac / (stage.isp_vac * self.env.config.g0)
         #
         #    # Thrust Force (Pressure Compensated)
