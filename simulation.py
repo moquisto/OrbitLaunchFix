@@ -10,6 +10,7 @@ def run_simulation(optimization_result, vehicle, config):
     """
     Verifies the optimization result using forward integration.
     """
+    print(f"\n[Simulation] Starting Verification Simulation...")
     # --- 1. UNPACK OPTIMIZATION RESULTS ---
     T1 = float(optimization_result["T1"])
     T2 = float(optimization_result.get("T2", 0.0))
@@ -76,7 +77,7 @@ def run_simulation(optimization_result, vehicle, config):
     m0 = config.launch_mass
     y0 = np.concatenate([r0, v0, [m0]])
     
-    print(f"Simulating Phase 1 (Boost): 0.0s -> {T1:.2f}s")
+    print(f"[Simulation] Phase 1 (Boost): 0.0s -> {T1:.2f}s")
     res1 = solve_ivp(
         fun=lambda t, y: sim_dynamics(t, y, "boost", 0.0, ctrl_func_1),
         t_span=(0, T1),
@@ -87,7 +88,20 @@ def run_simulation(optimization_result, vehicle, config):
     )
 
     if not res1.success and res1.status == -1:
-        print("Simulation stopped early in Phase 1 (Crash or Error).")
+        print("[Simulation] ERROR: Simulation stopped early in Phase 1 (Crash or Error).")
+    else:
+        alt_1 = (np.linalg.norm(res1.y[0:3, -1]) - vehicle.env.config.earth_radius_equator) / 1000.0
+        print(f"[Simulation] Phase 1 End: Alt={alt_1:.1f}km, Vel={np.linalg.norm(res1.y[3:6, -1]):.1f}m/s")
+
+    # --- DEBUG: CHECK DRIFT PHASE 1 ---
+    if "X1" in optimization_result:
+        opt_pos = optimization_result["X1"][0:3, -1]
+        sim_pos = res1.y[0:3, -1]
+        drift_pos = np.linalg.norm(opt_pos - sim_pos)
+        print(f"[Debug] MECO Drift (Opt vs Sim): {drift_pos:.1f} meters")
+        # Diagnose forces at MECO
+        u_meco = U1[:, -1]
+        vehicle.diagnose_forces(res1.y[:, -1], u_meco[0], u_meco[1:], res1.t[-1], "boost")
 
     # --- 6. PHASE 2: COAST / STAGING ---
     t_current = res1.t[-1]
@@ -97,7 +111,7 @@ def run_simulation(optimization_result, vehicle, config):
     results_list = [res1]
     
     if config.sequence.separation_delay > 1e-4:
-        print(f"Simulating Phase 2 (Coast): {t_current:.2f}s -> {t_current + T2:.2f}s")
+        print(f"[Simulation] Phase 2 (Coast): {t_current:.2f}s -> {t_current + T2:.2f}s")
         res2 = solve_ivp(
             fun=lambda t, y: sim_dynamics(t, y, "coast", t_current, None),
             t_span=(t_current, t_current + T2),
@@ -116,7 +130,7 @@ def run_simulation(optimization_result, vehicle, config):
     y_current[6] = m_ship_wet
     
     # --- 8. PHASE 3: SHIP ASCENT ---
-    print(f"Simulating Phase 3 (Ship): {t_current:.2f}s -> {t_current + T3:.2f}s")
+    print(f"[Simulation] Phase 3 (Ship): {t_current:.2f}s -> {t_current + T3:.2f}s")
     res3 = solve_ivp(
         fun=lambda t, y: sim_dynamics(t, y, "ship", t_current, ctrl_func_3),
         t_span=(t_current, t_current + T3),
@@ -126,6 +140,16 @@ def run_simulation(optimization_result, vehicle, config):
         method='RK45'
     )
     results_list.append(res3)
+    
+    alt_3 = (np.linalg.norm(res3.y[0:3, -1]) - vehicle.env.config.earth_radius_equator) / 1000.0
+    print(f"[Simulation] Phase 3 End: Alt={alt_3:.1f}km, Vel={np.linalg.norm(res3.y[3:6, -1]):.1f}m/s")
+
+    # --- DEBUG: CHECK DRIFT PHASE 3 ---
+    if "X3" in optimization_result:
+        opt_pos = optimization_result["X3"][0:3, -1]
+        sim_pos = res3.y[0:3, -1]
+        drift_pos = np.linalg.norm(opt_pos - sim_pos)
+        print(f"[Debug] SECO Drift (Opt vs Sim): {drift_pos/1000:.1f} km")
 
     # --- 9. CONSOLIDATE RESULTS ---
     t_full = np.concatenate([res.t for res in results_list])

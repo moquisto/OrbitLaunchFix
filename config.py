@@ -54,7 +54,7 @@ class EnvConfig:
     # --- Atmosphere Constants ---
     air_gamma: float = 1.4                        # [-] Heat capacity ratio
     air_gas_constant: float = 287.058             # [J/(kg·K)] Specific gas constant
-    atmosphere_step: float = 500.0                # [m] Lookup table resolution (Increased for solver stability)
+    atmosphere_step: float = 10.0               # [m] Lookup table resolution (Standard for stability)
     atmosphere_max_alt: float = 1_000_000.0       # [m] Atmosphere cutoff altitude
     
     # --- Launch Site (Cape Canaveral) ---
@@ -75,7 +75,6 @@ class SequenceConfig:
     main_engine_ramp_time: float   # [s] Time to ramp up Booster engines
     upper_engine_ramp_time: float  # [s] Time to ramp up Ship engines
     separation_delay: float        # [s] Coast time between staging
-    meco_cutoff_mach: float        # [-] Target Mach number for Booster Main Engine Cutoff (MECO)
     min_throttle: float            # [-] Minimum throttle capability (0.0 to 1.0)
 
 @dataclass
@@ -128,6 +127,7 @@ class TwoStageRocketConfig:
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
     target_inclination: float = 28.6   # [deg] Target Inclination (Must be >= Launch Latitude 28.57)
+    num_nodes: int = 150  # Number of discretization nodes per phase
     
     @property
     def launch_mass(self) -> float:
@@ -135,6 +135,28 @@ class TwoStageRocketConfig:
         return (self.stage_1.dry_mass + self.stage_1.propellant_mass +
                 self.stage_2.dry_mass + self.stage_2.propellant_mass +
                 self.payload_mass)
+
+    def print_summary(self):
+        """Prints a diagnostic summary of the configuration."""
+        print(f"\n" + "="*60)
+        print(f"CONFIG DIAGNOSTIC: {self.name}")
+        print(f"="*60)
+        print(f"  Target Orbit:      {self.target_altitude/1000:.1f} km @ {self.target_inclination:.1f} deg")
+        print(f"  Launch Mass:       {self.launch_mass:,.0f} kg")
+        print(f"  Payload:           {self.payload_mass:,.0f} kg")
+        print(f"-"*60)
+        print(f"  Stage 1 (Booster):")
+        print(f"    Dry Mass:        {self.stage_1.dry_mass:,.0f} kg")
+        print(f"    Propellant:      {self.stage_1.propellant_mass:,.0f} kg")
+        print(f"    Thrust (Vac):    {self.stage_1.thrust_vac/1e6:.2f} MN")
+        print(f"    ISP (SL/Vac):    {self.stage_1.isp_sl:.0f} / {self.stage_1.isp_vac:.0f} s")
+        print(f"-"*60)
+        print(f"  Stage 2 (Ship):")
+        print(f"    Dry Mass:        {self.stage_2.dry_mass:,.0f} kg")
+        print(f"    Propellant:      {self.stage_2.propellant_mass:,.0f} kg")
+        print(f"    Thrust (Vac):    {self.stage_2.thrust_vac/1e6:.2f} MN")
+        print(f"    ISP (SL/Vac):    {self.stage_2.isp_sl:.0f} / {self.stage_2.isp_vac:.0f} s")
+        print(f"="*60 + "\n")
 
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(
@@ -148,7 +170,6 @@ StarshipBlock2 = TwoStageRocketConfig(
         main_engine_ramp_time=3.0,     
         upper_engine_ramp_time=2.0,    
         separation_delay=0.0,          # Hot Staging (0s delay)
-        meco_cutoff_mach=3.8,          # Staging Velocity Target, can be altered or even omitted
         min_throttle=0.40              # 40% Minimum Throttle
     ),
     

@@ -5,6 +5,7 @@ import numpy as np
 
 class Vehicle:
     def __init__(self, rocket_config, environment):
+        print(f"[Vehicle] Initializing vehicle dynamics model: {rocket_config.name}")
         self.config = rocket_config
         self.env = environment
         
@@ -206,3 +207,34 @@ class Vehicle:
             cos_alpha = dot(u_thrust, u_vel)
 
         return q, cos_alpha
+
+    def diagnose_forces(self, state, throttle, thrust_direction, time, stage_mode="boost"):
+        """
+        Prints a detailed breakdown of forces acting on the vehicle.
+        Useful for debugging T/W issues and drag losses.
+        """
+        # Ensure numeric inputs
+        state = np.array(state)
+        thrust_direction = np.array(thrust_direction)
+        
+        # Get Derived Quantities
+        r = state[0:3]
+        v = state[3:6]
+        m = state[6]
+        
+        # Get Dynamics (returns [v, a, m_dot])
+        dyn = self.get_dynamics(state, throttle, thrust_direction, time, stage_mode, scaling=None)
+        acc_total = dyn[3:6]
+        
+        # Re-calculate components for reporting
+        env_state = self.env.get_state_sim(r, time)
+        g_vec = env_state['gravity']
+        
+        # F = ma
+        f_total = acc_total * m
+        f_gravity = g_vec * m
+        f_aero_thrust = f_total - f_gravity # Combined Aero + Thrust
+        
+        print(f"  [Force Diag] Mass: {m/1000:.1f}t | Alt: {(np.linalg.norm(r)-6378137)/1000:.1f}km")
+        print(f"  [Force Diag] G-Force: {np.linalg.norm(f_gravity)/1000:.1f} kN | Net Force: {np.linalg.norm(f_total)/1000:.1f} kN")
+        print(f"  [Force Diag] Accel:   {np.linalg.norm(acc_total):.2f} m/s^2 ({(np.linalg.norm(acc_total)/9.81):.2f} g)")
