@@ -13,30 +13,101 @@ class Environment:
         pass
 
     def get_launch_site_state(self):
-        # Calculates the Initial State (Position & Velocity) in ECI frame
-        # based on the Launch Site Latitude/Longitude and Earth Rotation.
-        
-        # 1. Convert Lat/Lon/Alt to ECEF Position (r_ecef)
-        #    (Account for Earth Flattening/WGS84)
-        
-        # 2. Calculate Initial Velocity (v_eci)
-        #    v_eci = cross(Earth_Omega, r_ecef)
-        # Return r_eci, v_eci (Numpy arrays)
+        # PSEUDOCODE:
+        # Purpose: Calculate initial r_eci and v_eci at t=0 for the launch pad.
+
+        # 1. INPUTS
+        #    lat, lon, alt = self.config.launch_latitude, ...
+        #    R_eq, f = self.config.earth_radius_equator, self.config.earth_flattening
+
+        # 2. GEODETIC TO ECEF CONVERSION (WGS84)
+        #    # Calculate Prime Vertical Radius of Curvature (N)
+        #    e_sq = 2*f - f^2
+        #    sin_lat = sin(deg2rad(lat))
+        #    N = R_eq / sqrt(1 - e_sq * sin_lat^2)
+        #
+        #    # Calculate Cartesian Coordinates
+        #    x = (N + alt) * cos(lat) * cos(lon)
+        #    y = (N + alt) * cos(lat) * sin(lon)
+        #    z = (N * (1 - e_sq) + alt) * sin_lat
+        #    r_ecef = array([x, y, z])
+
+        # 3. INITIAL VELOCITY (Inertial Frame)
+        #    # At t=0, ECEF aligns with ECI.
+        #    # Velocity is due to Earth's rotation: v = omega x r
+        #    v_eci = cross(self.config.earth_omega_vector, r_ecef)
+
+        # 4. RETURN
+        #    return r_ecef, v_eci
         pass
 
-    def get_state_opti(self, position_vector_sym):
-        # CasADi-compatible method (Symbolic)
-        # 1. Calculate Geodetic Altitude (Symbolic math, no 'if' statements)
-        # 2. Query Atmosphere Interpolants (self.rho_interp(alt))
-        # 3. Calculate Gravity Vector (Central + J2) using symbolic operations
-        # 4. Calculate Wind Vector
-        # 5. Handle Vacuum SOS: speed_of_sound = ca.fmax(sos_interp(alt), 0.1) to avoid div/0
-        # Return dict: {'density': ..., 'pressure': ..., 'speed_of_sound': ..., 'gravity': ..., 'wind': ...}
+    def get_state_opti(self, position_vector_sym, time_sym):
+        # PSEUDOCODE:
+        # Purpose: Calculate environment state (Gravity, Atmosphere) in ECI frame.
+        #          Must be fully symbolic (CasADi) and differentiable.
+
+        # 1. ROTATION (ECI -> ECEF)
+        #    # Earth rotates around Z-axis by angle theta = omega * t
+        #    theta = self.config.earth_omega_vector[2] * time_sym
+        #    # Rotation Matrix R (ECI to ECEF)
+        #    # [ cos(theta)   sin(theta)   0 ]
+        #    # [ -sin(theta)  cos(theta)   0 ]
+        #    # [ 0            0            1 ]
+        #    r_ecef = mtimes(R, position_vector_sym)
+
+        # 2. GEODETIC ALTITUDE APPROXIMATION
+        #    # Required for accurate atmospheric density (Earth is oblate).
+        #    # h ~ norm(r_ecef) - R_local(latitude)
+        #    r_mag = norm(r_ecef)
+        #    sin_lat = r_ecef[2] / (r_mag + 1e-9) # Avoid div/0
+        #    R_local = R_eq * (1 - flattening * sin_lat^2)
+        #    altitude = r_mag - R_local
+
+        # 3. ATMOSPHERE LOOKUP
+        #    # Clamp altitude to [0, max_alt] for B-spline safety
+        #    alt_clamped = fmax(0.0, fmin(altitude, max_alt))
+        #    rho = self.rho_interp(alt_clamped)
+        #    press = self.p_interp(alt_clamped)
+        #    sos = self.sos_interp(alt_clamped)
+        #
+        #    # Vacuum Handling: Fade to 0 if altitude > max_alt
+        #    # Avoid hard 'if_else' for IPOPT gradients. 
+        #    # If the B-spline is well-constructed, it should naturally be near zero at max_alt.
+        #    # Alternatively, use a smooth multiplier: rho *= 0.5 * (1 + tanh((max_alt - alt)/1000))
+        #    # For now, assuming B-spline is safe:
+        #    rho = fmax(0.0, rho) # Ensure non-negative
+        #    sos = fmax(sos, 1.0) # Safety floor for Mach calculation
+
+        # 4. GRAVITY (Central + J2)
+        #    # Calculate in ECEF (where J2 field is static)
+        #    # g_central = -mu / r^3 * r_ecef
+        #    # g_j2 = ... (Standard J2 formula using z_ecef)
+        #    g_ecef = g_central + g_j2
+        #
+        #    # Rotate Gravity back to ECI
+        #    g_eci = mtimes(R.T, g_ecef)
+
+        # 5. WIND / AIR VELOCITY (Inertial Frame)
+        #    # V_air_inertial = V_wind_local_rotated + (Omega x r_inertial)
+        #    v_wind_local = [0,0,0] # Placeholder for wind model
+        #    v_wind_eci = mtimes(R.T, v_wind_local)
+        #    v_transport = cross(omega_vec, position_vector_sym)
+        #    v_air_eci = v_wind_eci + v_transport
+
+        # 6. RETURN
+        #    return {
+        #       'density': rho,
+        #       'pressure': press,
+        #       'speed_of_sound': sos,
+        #       'gravity': g_eci,
+        #       'wind_velocity': v_air_eci
+        #    }
         pass
 
-    def get_state_sim(self, position_vector_num):
-        # Wrapper for the compiled CasADi function
-        # 1. Call self.sim_func(position_vector_num)
-        # 2. Convert CasADi DM output to Numpy dict
-        # Return dict: {'density': ..., 'pressure': ..., 'speed_of_sound': ..., 'gravity': ..., 'wind': ...}
+    def get_state_sim(self, position_vector_num, time_num):
+        # PSEUDOCODE:
+        # Purpose: Fast numeric wrapper for simulation (scipy.solve_ivp).
+        # 1. Call the compiled CasADi function: res = self.sim_func(pos, time)
+        # 2. Unpack 'res' (CasADi DM) into a standard Python Dictionary with floats/numpy arrays.
+        # 3. Return the dictionary.
         pass
