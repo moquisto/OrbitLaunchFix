@@ -56,7 +56,7 @@ class Vehicle:
         if is_symbolic:
             v_rel_sq = dot(v_rel, v_rel)
             # v_rel_mag: Used for physics (Q, Mach) and normalization.
-            v_rel_mag = ca.sqrt(v_rel_sq + 1.0)
+            v_rel_mag = ca.sqrt(fmax(v_rel_sq, 1.0e-12))
         else:
             v_rel_mag = norm(v_rel)
 
@@ -72,9 +72,8 @@ class Vehicle:
         # Handle zero-thrust case (Coast) to avoid zero-vector in u_control.
         if is_symbolic:
             thrust_sq = dot(thrust_direction, thrust_direction)
-            thrust_mag = ca.sqrt(thrust_sq + 1.0e-4)
+            thrust_mag = ca.sqrt(fmax(thrust_sq, 1.0e-12))
             # Smooth normalization: Transitions from 0 to Unit Vector smoothly.
-            # thrust_mag is at least 1e-3, so this is always safe.
             u_control = thrust_direction / thrust_mag
         else:
             thrust_mag = norm(thrust_direction)

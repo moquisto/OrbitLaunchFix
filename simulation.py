@@ -28,11 +28,38 @@ def run_simulation(optimization_result, vehicle, config):
     ctrl_func_1 = interp1d(t_grid_1, U1, axis=1, kind='previous', 
                            fill_value="extrapolate", bounds_error=False)
 
+    # --- DEBUG: Verify Control Handoff ---
+    print(f"[Debug] Verifying Control Signal Handoff (Phase 1)...")
+    # Check a few points to ensure the optimizer's plan is faithfully reproduced
+    test_indices = [0, N1 // 2, N1 - 1]
+    for idx in test_indices:
+        # Sample time: slightly into the interval to check the "Hold" behavior
+        t_sample = t_grid_1[idx] + 1e-3 
+        u_opt = U1[:, idx]
+        u_sim = ctrl_func_1(t_sample)
+        
+        diff = np.linalg.norm(u_opt - u_sim)
+        if diff > 1e-5:
+             print(f"  ! CONTROL MISMATCH at Node {idx}: Opt={u_opt} vs Sim={u_sim}")
+
     # Phase 3
     N3 = U3.shape[1]
     t_grid_3 = np.linspace(0, T3, N3 + 1)[:-1]
     ctrl_func_3 = interp1d(t_grid_3, U3, axis=1, kind='previous', 
                            fill_value="extrapolate", bounds_error=False)
+
+    # --- DEBUG: Verify Control Handoff (Phase 3) ---
+    print(f"[Debug] Verifying Control Signal Handoff (Phase 3)...")
+    test_indices_3 = [0, N3 // 2, N3 - 1]
+    for idx in test_indices_3:
+        # Sample time: slightly into the interval
+        t_sample = t_grid_3[idx] + 1e-3 
+        u_opt = U3[:, idx]
+        u_sim = ctrl_func_3(t_sample)
+        
+        diff = np.linalg.norm(u_opt - u_sim)
+        if diff > 1e-5:
+             print(f"  ! CONTROL MISMATCH at Node {idx}: Opt={u_opt} vs Sim={u_sim}")
 
     # --- 3. DEFINE DYNAMICS WRAPPER ---
     def sim_dynamics(t, y, phase_mode, t_start_phase, ctrl_func):

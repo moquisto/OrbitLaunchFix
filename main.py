@@ -8,7 +8,35 @@ import warnings
 import time
 import guidance
 
-def print_debug_info(opti, sol, scaling, config, environment, X1, T1_scaled, X3, T3_scaled):
+def check_path_constraints(sol, X, U, scaling, config, phase_name):
+    """
+    Checks for violations of path constraints in the optimizer solution.
+    """
+    print(f"  [{phase_name}] Checking Path Constraints...")
+    
+    # Unpack
+    r = sol.value(X)[0:3, :] * scaling.length
+    u_val = sol.value(U)
+    
+    # 1. Altitude Constraint
+    r_mags = np.linalg.norm(r, axis=0)
+    min_r = np.min(r_mags)
+    if min_r < scaling.length - 100.0: # Approx check against Earth Radius
+        print(f"    ! ALTITUDE VIOLATION: Min Radius = {min_r:.1f} m")
+        
+    # 2. Control Constraints
+    throttles = u_val[0, :]
+    if np.any(throttles < config.sequence.min_throttle - 1e-3) or np.any(throttles > 1.0 + 1e-3):
+        print(f"    ! THROTTLE VIOLATION: Range [{np.min(throttles):.2f}, {np.max(throttles):.2f}]")
+        
+    # 3. Direction Constraint
+    dirs = u_val[1:, :]
+    norms = np.linalg.norm(dirs, axis=0)
+    err_norm = np.max(np.abs(norms - 1.0))
+    if err_norm > 1e-3:
+        print(f"    ! CONTROL VECTOR VIOLATION: Max Norm Error = {err_norm:.4f}")
+
+def print_debug_info(opti, sol, scaling, config, environment, X1, U1, T1_scaled, X3, U3, T3_scaled):
     """
     Analyzes the failed optimization result to identify the cause.
     """
@@ -83,6 +111,10 @@ def print_debug_info(opti, sol, scaling, config, environment, X1, T1_scaled, X3,
     # If we are here, the solver likely failed to satisfy constraints.
     print(f"\nSOLVER STATUS:")
     print(f"  The optimizer could not find a feasible solution.")
+    
+    # 5. Path Constraint Check
+    check_path_constraints(sol, X1, U1, scaling, config, "Phase 1")
+    check_path_constraints(sol, X3, U3, scaling, config, "Phase 3")
     print("="*40 + "\n")
 
 def solve_optimal_trajectory(config, vehicle, environment):
@@ -303,7 +335,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
     except:
         print(f"[Optimizer] FAILURE: Solver did not converge after {time.time() - t_solve:.2f}s. Returning debug values.")
         sol = opti.debug
-        print_debug_info(opti, sol, scaling, config, environment, X1, T1_scaled, X3, T3_scaled)
+        print_debug_info(opti, sol, scaling, config, environment, X1, U1, T1_scaled, X3, U3, T3_scaled)
     
     # --- 7. OUTPUT ---
     res = {}
@@ -325,6 +357,138 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     return res
 
+def verify_physics_consistency(vehicle, config):
+    """
+    Debugs the interface between Optimizer (CasADi) and Simulation (NumPy).
+    Ensures that both 'modes' of the physics engine return identical results
+    given the same inputs.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: PHYSICS ENGINE CONSISTENCY CHECK")
+    print("="*40)
+    
+    # 1. Define Test State (Mach ~1.5, 10km alt, Pitch 45 deg)
+    # Use a state that exercises all forces: Gravity, Drag, Thrust
+    R_e = vehicle.env.config.earth_radius_equator
+    r_test = np.array([R_e + 10000.0, 0, 0]) # 10km Alt
+    v_test = np.array([0, 300.0, 300.0]) # ~424 m/s, 45 deg flight path
+    m_test = config.launch_mass * 0.8
+    
+    # Control Inputs
+    throttle_test = 1.0
+    u_dir_test = np.array([0, 0.70710678, 0.70710678]) # 45 deg pitch
+    t_test = 100.0
+    
+    # 2. Run Numeric (Simulation Mode)
+    state_num = np.concatenate([r_test, v_test, [m_test]])
+    dyn_sim = vehicle.get_dynamics(
+        state_num, throttle_test, u_dir_test, t_test, stage_mode="boost", scaling=None
+    )
+    
+    # 3. Run Symbolic (Optimizer Mode)
+    # We must construct a CasADi function to evaluate the symbolic graph
+    x_sym = ca.MX.sym('x', 7)
+    u_th_sym = ca.MX.sym('th', 1)
+    u_dir_sym = ca.MX.sym('dir', 3)
+    t_sym = ca.MX.sym('t', 1)
+    
+    dyn_sym = vehicle.get_dynamics(x_sym, u_th_sym, u_dir_sym, t_sym, stage_mode="boost", scaling=None)
+    f_dyn = ca.Function('f_dyn', [x_sym, u_th_sym, u_dir_sym, t_sym], [dyn_sym])
+    
+    # Evaluate with numeric inputs
+    res_sym = np.array(f_dyn(state_num, throttle_test, u_dir_test, t_test)).flatten()
+    
+    # 4. Compare Results
+    labels = ['vx', 'vy', 'vz', 'ax', 'ay', 'az', 'mdot']
+    has_error = False
+    
+    print(f"{'Variable':<10} | {'Simulation':<12} | {'Optimizer':<12} | {'Diff':<10}")
+    print("-" * 55)
+    
+    for i, label in enumerate(labels):
+        diff = abs(dyn_sim[i] - res_sym[i])
+        if diff > 1e-7: has_error = True
+        print(f"{label:<10} | {dyn_sim[i]:12.4f} | {res_sym[i]:12.4f} | {diff:.2e}")
+        
+    if has_error:
+        print("\n>>> CRITICAL WARNING: Physics engines disagree! Check vehicle.py logic.")
+    else:
+        print("\n>>> SUCCESS: Physics engines are consistent.")
+    print("="*40 + "\n")
+
+def verify_environment_consistency(vehicle):
+    """
+    Debugs the Environment model to ensure Symbolic (Optimizer) and 
+    Numeric (Simulation) implementations return identical values.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: ENVIRONMENT MODEL CONSISTENCY CHECK")
+    print("="*40)
+    
+    # Test points: Surface, Max Q (~12km), Space (~200km)
+    R_e = vehicle.env.config.earth_radius_equator
+    test_points = [
+        ("Surface", 0.0),
+        ("Max Q", 12000.0),
+        ("Space", 200000.0)
+    ]
+    
+    # Construct CasADi Function for Symbolic Evaluation
+    r_sym = ca.MX.sym('r', 3)
+    t_sym = ca.MX.sym('t', 1)
+    env_sym = vehicle.env.get_state_opti(r_sym, t_sym)
+    
+    # Output vector: [rho, p, sos, gravity(3), wind(3)]
+    f_env_sym = ca.Function('f_env_debug', [r_sym, t_sym], 
+                            [env_sym['density'], 
+                             env_sym['pressure'], 
+                             env_sym['speed_of_sound'], 
+                             env_sym['gravity'],
+                             env_sym['wind_velocity']])
+    
+    print(f"{'Location':<10} | {'Var':<8} | {'Simulation':<12} | {'Optimizer':<12} | {'Diff':<10}")
+    print("-" * 65)
+    
+    for name, alt in test_points:
+        # Position vector (Equatorial)
+        r_test = np.array([R_e + alt, 0, 0])
+        t_test = 0.0
+        
+        # 1. Run Numeric (Simulation Mode)
+        env_sim = vehicle.env.get_state_sim(r_test, t_test)
+        
+        # 2. Run Symbolic (Optimizer Mode)
+        res_opt = f_env_sym(r_test, t_test)
+        rho_opt = float(res_opt[0])
+        p_opt   = float(res_opt[1])
+        sos_opt = float(res_opt[2])
+        g_opt   = np.array(res_opt[3]).flatten()
+        w_opt   = np.array(res_opt[4]).flatten()
+        
+        # 3. Compare
+        # Density
+        diff_rho = abs(env_sim['density'] - rho_opt)
+        print(f"{name:<10} | {'rho':<8} | {env_sim['density']:<12.4e} | {rho_opt:<12.4e} | {diff_rho:.2e}")
+        
+        # Pressure
+        diff_p = abs(env_sim['pressure'] - p_opt)
+        print(f"{'':<10} | {'p':<8} | {env_sim['pressure']:<12.4e} | {p_opt:<12.4e} | {diff_p:.2e}")
+        
+        # Gravity Magnitude
+        g_sim_mag = np.linalg.norm(env_sim['gravity'])
+        g_opt_mag = np.linalg.norm(g_opt)
+        diff_g = abs(g_sim_mag - g_opt_mag)
+        print(f"{'':<10} | {'g_mag':<8} | {g_sim_mag:<12.4f} | {g_opt_mag:<12.4f} | {diff_g:.2e}")
+        
+        # Wind Velocity Magnitude
+        w_sim_mag = np.linalg.norm(env_sim['wind_velocity'])
+        w_opt_mag = np.linalg.norm(w_opt)
+        diff_w = abs(w_sim_mag - w_opt_mag)
+        print(f"{'':<10} | {'w_mag':<8} | {w_sim_mag:<12.4f} | {w_opt_mag:<12.4f} | {diff_w:.2e}")
+        print("-" * 65)
+
+    print("="*40 + "\n")
+
 if __name__ == "__main__":
     from config import StarshipBlock2, EARTH_CONFIG
     from vehicle import Vehicle
@@ -337,6 +501,10 @@ if __name__ == "__main__":
     env = Environment(EARTH_CONFIG)
     veh = Vehicle(StarshipBlock2, env)
     
+    print("--- Verifying Physics Model ---")
+    verify_physics_consistency(veh, StarshipBlock2)
+    verify_environment_consistency(veh)
+    
     print("--- Running Optimization ---")
     opt_res = solve_optimal_trajectory(StarshipBlock2, veh, env)
     
@@ -345,6 +513,9 @@ if __name__ == "__main__":
     
     print("--- Validating Trajectory ---")
     analysis.validate_trajectory(sim_res, StarshipBlock2, env)
+    
+    print("--- Analyzing Efficiency ---")
+    analysis.analyze_delta_v_budget(sim_res, veh, StarshipBlock2)
     
     print("--- Plotting Results ---")
     analysis.plot_mission(opt_res, sim_res, env)

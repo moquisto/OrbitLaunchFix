@@ -330,3 +330,118 @@ def validate_trajectory(simulation_data, config, environment):
         print("  STATUS: NOMINAL")
 
     print("="*40 + "\n")
+
+def analyze_delta_v_budget(simulation_data, vehicle, config):
+    """
+    Computes and prints a detailed Delta-V budget (Ideal vs Losses).
+    Helps identify inefficiencies in the trajectory (e.g. late gravity turn).
+    """
+    print("\n" + "="*40)
+    print("DELTA-V BUDGET & EFFICIENCY ANALYSIS")
+    print("="*40)
+
+    t = simulation_data['t']
+    y = simulation_data['y']
+    u = simulation_data['u']
+    
+    # Accumulators
+    dv_ideal = 0.0
+    loss_gravity = 0.0
+    loss_drag = 0.0
+    loss_steering = 0.0
+    
+    # Integration loop
+    for i in range(len(t) - 1):
+        dt = t[i+1] - t[i]
+        t_curr = t[i]
+        
+        # State
+        r = y[0:3, i]
+        v = y[3:6, i]
+        m = y[6, i]
+        
+        # Control
+        throttle = u[0, i]
+        u_thrust = u[1:, i]
+        if np.linalg.norm(u_thrust) > 1e-9:
+            u_thrust = u_thrust / np.linalg.norm(u_thrust)
+            
+        # Environment
+        env = vehicle.env.get_state_sim(r, t_curr)
+        g_vec = env['gravity']
+        
+        # Velocity Unit Vector
+        v_mag = np.linalg.norm(v)
+        if v_mag > 1.0:
+            v_hat = v / v_mag
+        else:
+            v_hat = np.array([0,0,1]) # Vertical if static
+            
+        # Determine Phase (Heuristic for Drag/Thrust calc)
+        m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+        
+        if throttle < 0.01:
+            mode = "coast"
+        elif m > m_stg2_wet + 1000.0: # Buffer
+            mode = "boost"
+        else:
+            mode = "ship"
+            
+        # Get Dynamics (Forces)
+        # We call vehicle dynamics to ensure consistency with physics engine
+        dyn = vehicle.get_dynamics(y[:, i], throttle, u_thrust, t_curr, stage_mode=mode, scaling=None)
+        acc_total = dyn[3:6]
+        
+        # Get Aerodynamics for Angle of Attack
+        q, cos_alpha = vehicle.get_aero_properties(y[:, i], u_thrust, t_curr, stage_mode=mode, scaling=None)
+        
+        # Calculate Thrust Acceleration Magnitude (Approximate based on throttle/ISP)
+        # We infer it from the dynamics: a_thrust = a_total - g - a_drag
+        # But getting a_drag is hard without re-calculating. 
+        # Let's calculate Thrust explicitly using the config data.
+        stage = config.stage_1 if "boost" in mode else config.stage_2
+        
+        acc_thrust_mag = 0.0
+        if throttle > 0.01 and "coast" not in mode:
+            g0 = vehicle.env.config.g0
+            isp_eff = stage.isp_vac + (env['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+            m_dot = throttle * stage.thrust_vac / (stage.isp_vac * g0)
+            f_thrust = m_dot * isp_eff * g0
+            acc_thrust_mag = f_thrust / m
+
+        # --- INTEGRATE LOSSES ---
+        # 1. Ideal Delta-V (Integral of Thrust Accel)
+        dv_ideal += acc_thrust_mag * dt
+        
+        # 2. Gravity Loss (Integral of -g dot v_hat)
+        # If g opposes v (climbing), dot is negative, loss is positive.
+        g_proj = np.dot(g_vec, v_hat)
+        loss_gravity += (-g_proj) * dt
+        
+        # 3. Steering Loss (Thrust not aligned with Velocity)
+        # Loss = a_thrust * (1 - cos(theta))
+        loss_steering += acc_thrust_mag * (1.0 - cos_alpha) * dt
+        
+        # 4. Drag Loss
+        # a_drag = a_total - a_thrust*u_thrust - g
+        a_drag_vec = acc_total - (acc_thrust_mag * u_thrust) - g_vec
+        drag_proj = np.dot(a_drag_vec, v_hat)
+        loss_drag += (-drag_proj) * dt
+
+    print(f"  Ideal Delta-V:    {dv_ideal:.1f} m/s")
+    print(f"  --------------------------------")
+    print(f"  Gravity Loss:     {loss_gravity:.1f} m/s  ({(loss_gravity/dv_ideal)*100:.1f}%)")
+    print(f"  Drag Loss:        {loss_drag:.1f} m/s    ({(loss_drag/dv_ideal)*100:.1f}%)")
+    print(f"  Steering Loss:    {loss_steering:.1f} m/s    ({(loss_steering/dv_ideal)*100:.1f}%)")
+    print(f"  --------------------------------")
+    
+    dv_effective = dv_ideal - loss_gravity - loss_drag - loss_steering
+    print(f"  Effective dV:     {dv_effective:.1f} m/s")
+    
+    # Compare with actual
+    v_init = np.linalg.norm(y[3:6, 0])
+    v_final = np.linalg.norm(y[3:6, -1])
+    dv_actual = v_final - v_init
+    print(f"  Actual dV Gain:   {dv_actual:.1f} m/s")
+    print(f"  Unaccounted:      {dv_actual - dv_effective:.1f} m/s (Integration/Model noise)")
+    print("="*40 + "\n")
