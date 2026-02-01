@@ -110,14 +110,13 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
     
     def event_crash(t, y):
         r = y[0:3]
-        r_norm = np.linalg.norm(r)
         
-        # WGS84 Ellipsoid Check (Consistent with Simulation/Optimizer)
-        sin_lat = r[2] / (r_norm + 1e-9)
         R_eq = environment.config.earth_radius_equator
         f = environment.config.earth_flattening
-        R_local = R_eq * (1.0 - f * sin_lat**2)
-        return r_norm - R_local
+        R_pol = R_eq * (1.0 - f)
+        
+        val = (r[0]/R_eq)**2 + (r[1]/R_eq)**2 + (r[2]/R_pol)**2
+        return val - 1.0
     event_crash.terminal = True
     event_crash.direction = -1
     

@@ -208,6 +208,14 @@ def solve_optimal_trajectory(config, vehicle, environment):
     def add_phase_dynamics(X, U, T_scaled, phase_mode, t_start_scaled):
         dt_scaled = T_scaled / N
         
+        # Apply Mass Constraints to ALL nodes (0 to N)
+        # This ensures the final node (result of last integration step) also respects the limit.
+        m_all_scaled = X[6, :]
+        if phase_mode == "boost":
+            opti.subject_to(m_all_scaled >= m_stage1_min / scaling.mass)
+        elif phase_mode == "ship":
+            opti.subject_to(m_all_scaled >= (config.stage_2.dry_mass + config.payload_mass) / scaling.mass)
+
         for k in range(N):
             # Current time (scaled & physical)
             t_k_scaled = t_start_scaled + k * dt_scaled
@@ -252,13 +260,6 @@ def solve_optimal_trajectory(config, vehicle, environment):
             # (x/Re)^2 + (y/Re)^2 + (z/Rp)^2 >= 1
             ellipsoid_metric = (r_k_scaled[0]/Re_s)**2 + (r_k_scaled[1]/Re_s)**2 + (r_k_scaled[2]/Rp_s)**2
             opti.subject_to(ellipsoid_metric >= 1.0)
-            
-            # Mass Constraints (Don't burn more than available)
-            m_k_scaled = x_k[6]
-            if phase_mode == "boost":
-                opti.subject_to(m_k_scaled >= m_stage1_min / scaling.mass)
-            elif phase_mode == "ship":
-                opti.subject_to(m_k_scaled >= (config.stage_2.dry_mass + config.payload_mass) / scaling.mass)
 
     # Apply Dynamics
     # Phase 1: Boost
@@ -357,9 +358,9 @@ def solve_optimal_trajectory(config, vehicle, environment):
     set_guess(U3, u3_guess[:, :N])
     
     # --- 6. SOLVE ---
-    print(f"[Optimizer] Starting IPOPT solver (Max Iter={1000})...")
+    print(f"[Optimizer] Starting IPOPT solver (Max Iter={2000})...")
     t_solve = time.time()
-    opti.solver("ipopt", {"expand": True}, {"max_iter": 1000, "tol": 1e-4, "print_level": 5})
+    opti.solver("ipopt", {"expand": True}, {"max_iter": 2000, "tol": 1e-6, "print_level": 5})
     
     try:
         sol = opti.solve()
@@ -474,9 +475,9 @@ def verify_scaling_consistency(config):
             print(f"    ^ NOTE: Scaled value {val_scaled:.4f} is outside ideal range [0.01, 100]")
 
     if overall_success:
-        print("\n>>> SUCCESS: Scaling logic is consistent.")
+        print("\n>>> ✅ SUCCESS: Scaling logic is consistent.")
     else:
-        print("\n>>> CRITICAL WARNING: Scaling logic failed round-trip check!")
+        print("\n>>> ❌ CRITICAL WARNING: Scaling logic failed round-trip check!")
     print("="*40 + "\n")
 
 def verify_physics_consistency(vehicle, config):
@@ -583,13 +584,12 @@ def verify_physics_consistency(vehicle, config):
             labels = ['vx', 'vy', 'vz', 'ax', 'ay', 'az', 'mdot']
             for i, label in enumerate(labels):
                 d = abs(dyn_sim[i] - res_sym[i])
-                if d > 1e-9:
-                    print(f"    ! {label}: Sim={dyn_sim[i]:.4e} Opt={res_sym[i]:.4e}")
+                print(f"    ! {label}: Sim={dyn_sim[i]:.4e} Opt={res_sym[i]:.4e} Diff={d:.2e}")
 
     if overall_success:
-        print("\n>>> SUCCESS: Physics engines are consistent across all regimes.")
+        print("\n>>> ✅ SUCCESS: Physics engines are consistent across all regimes.")
     else:
-        print("\n>>> CRITICAL WARNING: Physics engines disagree!")
+        print("\n>>> ❌ CRITICAL WARNING: Physics engines disagree!")
     print("="*40 + "\n")
 
 def verify_environment_consistency(vehicle):
@@ -681,9 +681,9 @@ def verify_environment_consistency(vehicle):
         print("-" * 70)
 
     if overall_success:
-        print("\n>>> SUCCESS: Environment models are consistent.")
+        print("\n>>> ✅ SUCCESS: Environment models are consistent.")
     else:
-        print("\n>>> CRITICAL WARNING: Environment models disagree!")
+        print("\n>>> ❌ CRITICAL WARNING: Environment models disagree!")
     print("="*40 + "\n")
 
 def verify_aerodynamics(vehicle):
@@ -708,7 +708,7 @@ def verify_aerodynamics(vehicle):
         print(f"  {m:<6.1f} | {cd1:<12.4f} | {cd2:<12.4f}")
         
         if cd1 < 0 or cd1 > 2.0 or cd2 < 0 or cd2 > 2.0:
-            print(f"  >>> FAILURE: Cd out of physical range [0, 2.0] at Mach {m}")
+            print(f"  >>> ❌ FAILURE: Cd out of physical range [0, 2.0] at Mach {m}")
     
     # 2. Crossflow Drag Model (AoA Effect)
     print("\n2. Crossflow Drag Model (Stage 1 @ Mach 2.0)")
@@ -763,9 +763,9 @@ def verify_aerodynamics(vehicle):
         print(f"  Alignment:      {dot_prod:.4f} (Should be -1.0000)")
         
         if abs(dot_prod + 1.0) < 1e-3:
-            print("  >>> SUCCESS: Drag opposes relative velocity (Wind accounted for).")
+            print("  >>> ✅ SUCCESS: Drag opposes relative velocity (Wind accounted for).")
         else:
-            print("  >>> FAILURE: Drag direction is incorrect!")
+            print("  >>> ❌ FAILURE: Drag direction is incorrect!")
     else:
         print("  >>> WARNING: Aerodynamic force too small to verify direction.")
     
@@ -876,9 +876,9 @@ def verify_positioning(vehicle):
     print(f"  Velocity Error:  {vel_err:.2e} m/s")
     
     if pos_err < 1e-3 and vel_err < 1e-3:
-        print("  >>> SUCCESS: Launch site initialization is correct.")
+        print("  >>> ✅ SUCCESS: Launch site initialization is correct.")
     else:
-        print("  >>> FAILURE: Launch site calculation mismatch!")
+        print("  >>> ❌ FAILURE: Launch site calculation mismatch!")
 
     # 2. Earth Rotation Consistency
     print("\n2. Earth Rotation & Altitude Invariance")
@@ -907,9 +907,9 @@ def verify_positioning(vehicle):
         print(f"  {t:<10.0f} | {deg:<15.1f} | {rho:<18.6f} | {status:<6}")
 
     if rot_success:
-        print("  >>> SUCCESS: Environment rotates correctly with Earth.")
+        print("  >>> ✅ SUCCESS: Environment rotates correctly with Earth.")
     else:
-        print("  >>> FAILURE: Altitude/Density fluctuates with rotation!")
+        print("  >>> ❌ FAILURE: Altitude/Density fluctuates with rotation!")
     
     # 3. WGS84 Geometry Check
     print("\n3. WGS84 Ellipsoid Geometry")
@@ -926,9 +926,9 @@ def verify_positioning(vehicle):
     print(f"  Density (Pol):   {s_pol['density']:.6e} kg/m3")
     
     if abs(s_eq['density'] - s_pol['density']) < 1e-9:
-        print("  >>> SUCCESS: WGS84 Flattening is correctly implemented.")
+        print("  >>> ✅ SUCCESS: WGS84 Flattening is correctly implemented.")
     else:
-        print("  >>> FAILURE: Model does not account for Earth flattening correctly.")
+        print("  >>> ❌ FAILURE: Model does not account for Earth flattening correctly.")
         
     print("="*40 + "\n")
 
@@ -1023,13 +1023,13 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     vel_diff = np.linalg.norm(x_prev_end[3:6] - x_stage3_start[3:6])
     
     print(f"Staging Continuity ({phase_name} -> Ship):")
-    print(f"  Position Jump: {pos_diff:.4e} m")
-    print(f"  Velocity Jump: {vel_diff:.4e} m/s")
+    print(f"  Position Gap:  {pos_diff:.4e} m")
+    print(f"  Velocity Gap:  {vel_diff:.4e} m/s")
     
     if pos_diff < 1e-3 and vel_diff < 1e-3:
-        print("  >>> SUCCESS: Kinematics are continuous across staging.")
+        print("  >>> ✅ SUCCESS: Kinematics are continuous (Point-Mass Model).")
     else:
-        print("  >>> FAILURE: Discontinuity detected at staging!")
+        print("  >>> ❌ FAILURE: Discontinuity detected at staging!")
 
     # 1.5 Booster Fuel Check (Did we burn structure?)
     # In Phase 1/2, Mass = Booster Dry + Booster Prop + Ship Wet
@@ -1046,10 +1046,10 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     print(f"  Mass at Staging:     {m_prev_end:,.2f} kg")
     print(f"  Booster Limit:       {m_booster_limit:,.2f} kg (Struct + Upper Stage)")
     if booster_margin < -1e-3:
-        print(f"  >>> FAILURE: Booster used more fuel than available! Deficit: {abs(booster_margin):.2f} kg")
+        print(f"  >>> ❌ FAILURE: Booster used more fuel than available! Deficit: {abs(booster_margin):.2f} kg")
     else:
-        print(f"  >>> SUCCESS: Booster has propellant remaining ({booster_margin:,.2f} kg).")
-        print(f"      Unused Propellant: {unused_pct:.2f}% (Discarded)")
+        print(f"  >>> ✅ SUCCESS: Booster has propellant remaining ({booster_margin:,.2f} kg).")
+        print(f"      Unused Propellant: {unused_pct:.4f}% (Discarded)")
 
     # 2. Mass Drop Logic
     m_stage3_start = x_stage3_start[6]
@@ -1063,10 +1063,12 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     print(f"  Mass Dropped:        {m_prev_end - m_stage3_start:,.2f} kg")
     
     mass_err = abs(m_stage3_start - m_ship_wet)
+    print(f"  Mass Reset Error:    {mass_err:.2e} kg")
+    
     if mass_err < 1e-3:
-        print("  >>> SUCCESS: Mass correctly reset to Ship Wet Mass.")
+        print("  >>> ✅ SUCCESS: Mass correctly reset to Ship Wet Mass.")
     else:
-        print(f"  >>> FAILURE: Mass reset incorrect! Error: {mass_err:.2f} kg")
+        print(f"  >>> ❌ FAILURE: Mass reset incorrect! Error: {mass_err:.2f} kg")
 
     # 3. Objective Analysis (Fuel Minimization)
     # We want to maximize final mass => minimize fuel used.
@@ -1093,20 +1095,48 @@ def verify_staging_and_objective(opt_res, config, environment=None):
         print(f"  Delta-V Capacity: {dv_rem:.1f} m/s (Safety Margin)")
     
     if fuel_remaining < -1e-3:
-        print("  >>> WARNING: Negative fuel remaining! Mission infeasible.")
+        print("  >>> ❌ WARNING: Negative fuel remaining! Mission infeasible.")
     elif fuel_remaining < 1000:
         print("  >>> NOTE: Fuel margins are very tight (<1t).")
     else:
-        print("  >>> SUCCESS: Positive fuel margin. Optimizer found a valid solution.")
+        print("  >>> ✅ SUCCESS: Positive fuel margin. Optimizer found a valid solution.")
 
-    # 4. Phase Duration Sanity
+    # 4. Phase Duration & Burn Rate Consistency
     t1 = opt_res.get("T1", 0.0)
     t3 = opt_res.get("T3", 0.0)
-    print(f"\nPhase Durations:")
-    print(f"  Phase 1 (Boost): {t1:.2f} s")
-    print(f"  Phase 3 (Ship):  {t3:.2f} s")
-    if t1 < 10.0 or t3 < 10.0:
-        print("  >>> WARNING: Phase duration suspiciously short (<10s).")
+    
+    print(f"\nPhase Duration & Burn Rate Analysis:")
+    print(f"  {'Phase':<15} | {'Duration':<10} | {'Fuel Used':<12} | {'Avg Flow':<10} | {'Rated Flow':<10} | {'Throttle':<10} | {'Status':<6}")
+    print("  " + "-" * 85)
+
+    def check_phase(name, t_dur, x_data, stage_config):
+        if t_dur < 1.0:
+            print(f"  {name:<15} | {t_dur:<10.2f} | {'-':<12} | {'-':<10} | {'-':<10} | {'-':<10} | SKIP")
+            return True
+
+        dm = x_data[6, 0] - x_data[6, -1]
+        mdot_avg = dm / t_dur
+        
+        # Rated mdot = Thrust_vac / (Isp_vac * g0)
+        mdot_rated = stage_config.thrust_vac / (stage_config.isp_vac * g0)
+        
+        throttle_avg = mdot_avg / mdot_rated
+        throttle_pct = throttle_avg * 100.0
+        
+        # Check bounds (allow small epsilon for numerical noise/transients)
+        is_valid = (config.sequence.min_throttle - 0.15 <= throttle_avg <= 1.15)
+        status = "OK" if is_valid else "FAIL"
+        
+        print(f"  {name:<15} | {t_dur:<10.2f} | {dm:<12.0f} | {mdot_avg:<10.1f} | {mdot_rated:<10.1f} | {throttle_pct:<9.1f}% | {status:<6}")
+        return is_valid
+
+    p1_ok = check_phase("Phase 1 (Boost)", t1, opt_res["X1"], config.stage_1)
+    p3_ok = check_phase("Phase 3 (Ship)", t3, opt_res["X3"], config.stage_2)
+
+    if p1_ok and p3_ok:
+        print("  >>> ✅ SUCCESS: Burn times and mass flows are physically consistent.")
+    else:
+        print("  >>> ❌ FAILURE: Detected impossible burn rates (Cheating detected).")
 
     print("="*40 + "\n")
 
@@ -1144,5 +1174,5 @@ if __name__ == "__main__":
     analysis.analyze_delta_v_budget(sim_res, veh, StarshipBlock2)
     
     print("--- Plotting Results ---")
-    analysis.plot_mission(opt_res, sim_res, env)
+    analysis.plot_mission(opt_res, sim_res, env, StarshipBlock2)
     print("Done.")

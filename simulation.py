@@ -83,17 +83,15 @@ def run_simulation(optimization_result, vehicle, config):
     # --- 4. DEFINE TERMINATION EVENTS ---
     def altitude_event(t, y):
         r = y[0:3]
-        r_norm = np.linalg.norm(r)
         
-        # Check against local Earth radius (WGS84)
-        if r_norm < 1.0: return -1.0
-            
-        sin_lat = r[2] / r_norm
         R_eq = vehicle.env.config.earth_radius_equator
         f = vehicle.env.config.earth_flattening
-        R_local = R_eq * (1.0 - f * sin_lat**2)
+        R_pol = R_eq * (1.0 - f)
         
-        return r_norm - R_local
+        # Exact WGS84 Ellipsoid Metric: (x/a)^2 + (y/a)^2 + (z/b)^2
+        # Surface is at 1.0. < 1.0 means underground.
+        val = (r[0]/R_eq)**2 + (r[1]/R_eq)**2 + (r[2]/R_pol)**2
+        return val - 1.0
 
     altitude_event.terminal = True
     altitude_event.direction = -1 # Trigger when crossing from positive to negative
