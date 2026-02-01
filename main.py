@@ -265,11 +265,6 @@ def solve_optimal_trajectory(config, vehicle, environment):
     # Phase 1: Boost
     add_phase_dynamics(X1, U1, T1_scaled, "boost", 0.0)
     
-    # STAGING FIX: Force Booster to provide minimum velocity (e.g. 1500 m/s)
-    # This prevents the solver from cutting the booster phase too short.
-    v_meco_scaled = ca.norm_2(X1[3:6, -1])
-    opti.subject_to(v_meco_scaled >= 1500.0 / scaling.speed)
-    
     # Phase 2: Coast / Linkage
     t_end_p1 = T1_scaled
     if use_coast:

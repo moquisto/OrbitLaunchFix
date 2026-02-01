@@ -190,7 +190,21 @@ def run_simulation(optimization_result, vehicle, config):
     if len(results_list) == 3:
         res2 = results_list[1]
         u_coast = np.zeros((4, len(res2.t)))
-        u_coast[1, :] = 1.0 # x-direction
+        
+        # Fix: Align dummy control with velocity vector for visualization.
+        # The physics engine forces u_thrust = u_vel during coast, so we replicate that here
+        # to ensure analysis plots show ~0 deg AoA.
+        v_coast = res2.y[3:6, :]
+        v_norm = np.linalg.norm(v_coast, axis=0)
+        
+        # Avoid division by zero. Default to [1, 0, 0] if velocity is zero.
+        v_dir = np.zeros_like(v_coast)
+        v_dir[0, :] = 1.0
+        
+        # Perform safe division in-place
+        np.divide(v_coast, v_norm, out=v_dir, where=v_norm > 1e-9)
+        
+        u_coast[1:, :] = v_dir
         u_list.append(u_coast)
         
     # Phase 3 Controls
