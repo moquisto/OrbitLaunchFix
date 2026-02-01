@@ -127,7 +127,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
     # --- 1. SETUP ---
     # Initialize CasADi Opti stack
     opti = ca.Opti()
-    scaling = ScalingConfig(mass=1.0e6) # Fixed reference mass (1000t) for numerical stability
+    scaling = ScalingConfig() # Use default from config.py (1000t)
     
     mu = environment.config.earth_mu
     R_earth = environment.config.earth_radius_equator
@@ -357,6 +357,96 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     return res
 
+def verify_scaling_consistency(config):
+    """
+    Verifies that scaling factors produce numerically friendly values (O(1))
+    and that round-trip conversion preserves data integrity.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: SCALING CONSISTENCY CHECK")
+    print("="*40)
+    
+    # Replicate the scaling config used in the optimizer
+    scaling = ScalingConfig() 
+    
+    print(f"Scaling Factors:")
+    print(f"  Length: {scaling.length:.4e} m")
+    print(f"  Speed:  {scaling.speed:.4e} m/s")
+    print(f"  Time:   {scaling.time:.4e} s")
+    print(f"  Mass:   {scaling.mass:.4e} kg")
+    print(f"  Force:  {scaling.force:.4e} N")
+    print("-" * 75)
+
+    # 0. Internal Consistency Check (Derived Units)
+    # Ensure F = ma and v = d/t relationships hold in the config itself
+    calc_speed = scaling.length / scaling.time
+    calc_force = scaling.mass * (scaling.length / scaling.time**2)
+    
+    if abs(scaling.speed - calc_speed) > 1e-9:
+        print(f"WARNING: Scaling speed mismatch! Config: {scaling.speed}, Calc: {calc_speed}")
+    
+    if abs(scaling.force - calc_force) > 1e-9:
+        print(f"WARNING: Scaling force mismatch! Config: {scaling.force}, Calc: {calc_force}")
+
+    # Define test cases: (Name, Physical Value, Scale Factor)
+    tests = [
+        ("Radius (Surface)", scaling.length, scaling.length),
+        ("Radius (Orbit)",   scaling.length + config.target_altitude, scaling.length),
+        ("Velocity (Orbit)", scaling.speed, scaling.speed),
+        ("Mass (Launch)",    config.launch_mass, scaling.mass),
+        ("Mass (Dry Stg2)",  config.stage_2.dry_mass, scaling.mass),
+        ("Thrust (Booster)", config.stage_1.thrust_vac, scaling.force),
+        ("Thrust (Ship)",    config.stage_2.thrust_vac, scaling.force),
+        ("Time (Mission)",   600.0, scaling.time),
+        ("Gravity (Surface)", 9.81, scaling.length / scaling.time**2) # Acceleration scaling
+    ]
+    
+    print(f"{'Variable':<20} | {'Physical':<12} | {'Scaled':<10} | {'Unscaled':<12} | {'Rel Err':<10} | {'Status':<6}")
+    print("-" * 85)
+    
+    overall_success = True
+    
+    for name, val_phys, scale_factor in tests:
+        # 1. Scale
+        val_scaled = val_phys / scale_factor
+        
+        # 2. Unscale
+        val_recovered = val_scaled * scale_factor
+        
+        # 3. Check Magnitude (Should be roughly O(1), e.g. 0.01 to 100)
+        is_reasonable = 1e-2 <= abs(val_scaled) <= 1e2
+        
+        # 4. Check Round Trip
+        err = abs(val_phys - val_recovered)
+        
+        # Robust check: Relative for non-zero, Absolute for zero
+        if abs(val_phys) > 1e-15:
+            rel_err = err / abs(val_phys)
+            is_fail = rel_err > 1e-12
+        else:
+            # For zero values, relative error is undefined/infinite if error exists.
+            # We check absolute error instead.
+            is_fail = err > 1e-12
+            rel_err = float('inf') if is_fail else 0.0
+        
+        status = "OK"
+        if not is_reasonable:
+            status = "WARN MAG"
+        if is_fail:
+            status = "FAIL"
+            overall_success = False
+            
+        print(f"{name:<20} | {val_phys:<12.4e} | {val_scaled:<10.4f} | {val_recovered:<12.4e} | {rel_err:<10.2e} | {status:<6}")
+        
+        if not is_reasonable:
+            print(f"    ^ NOTE: Scaled value {val_scaled:.4f} is outside ideal range [0.01, 100]")
+
+    if overall_success:
+        print("\n>>> SUCCESS: Scaling logic is consistent.")
+    else:
+        print("\n>>> CRITICAL WARNING: Scaling logic failed round-trip check!")
+    print("="*40 + "\n")
+
 def verify_physics_consistency(vehicle, config):
     """
     Debugs the interface between Optimizer (CasADi) and Simulation (NumPy).
@@ -577,6 +667,7 @@ if __name__ == "__main__":
     veh = Vehicle(StarshipBlock2, env)
     
     print("--- Verifying Physics Model ---")
+    verify_scaling_consistency(StarshipBlock2)
     verify_physics_consistency(veh, StarshipBlock2)
     verify_environment_consistency(veh)
     
