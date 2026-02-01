@@ -301,6 +301,18 @@ def solve_optimal_trajectory(config, vehicle, environment):
     guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N)
     print(f"[Optimizer] Guidance generated in {time.time() - t_guess:.2f}s")
     
+    # DEBUG: Analyze Guidance Guess
+    x1_end = guess["X1"][:, -1]
+    x3_end = guess["X3"][:, -1]
+    r_meco = np.linalg.norm(x1_end[0:3]) - R_earth
+    v_meco = np.linalg.norm(x1_end[3:6])
+    r_seco = np.linalg.norm(x3_end[0:3]) - R_earth
+    v_seco = np.linalg.norm(x3_end[3:6])
+    
+    print(f"[Optimizer] Guidance Guess Summary:")
+    print(f"  MECO: T={guess['T1']:.1f}s, Alt={r_meco/1000:.1f}km, Vel={v_meco:.1f}m/s")
+    print(f"  SECO: T={guess['T3']:.1f}s, Alt={r_seco/1000:.1f}km, Vel={v_seco:.1f}m/s")
+
     def set_guess(var, val):
         # FIX: Remove try-except to expose shape mismatches immediately
         opti.set_initial(var, val)
@@ -654,6 +666,130 @@ def verify_environment_consistency(vehicle):
         print("\n>>> CRITICAL WARNING: Environment models disagree!")
     print("="*40 + "\n")
 
+def verify_aerodynamics(vehicle):
+    """
+    Debugs the Aerodynamic model (Cd vs Mach, AoA, Wind) to ensure physics are sound.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: AERODYNAMICS CHECK")
+    print("="*40)
+    
+    # 1. Cd vs Mach Interpolation
+    print("1. Drag Coefficient vs Mach (0 deg AoA)")
+    mach_points = [0.0, 0.5, 0.8, 0.9, 1.0, 1.1, 1.2, 1.5, 2.0, 3.0, 5.0, 10.0, 25.0]
+    
+    print(f"  {'Mach':<6} | {'Cd (Stage 1)':<12} | {'Cd (Stage 2)':<12}")
+    print("  " + "-" * 34)
+    
+    for m in mach_points:
+        # Evaluate CasADi interpolants
+        cd1 = float(vehicle.cd_interp_stage_1(m))
+        cd2 = float(vehicle.cd_interp_stage_2(m))
+        print(f"  {m:<6.1f} | {cd1:<12.4f} | {cd2:<12.4f}")
+    
+    # 2. Crossflow Drag Model (AoA Effect)
+    print("\n2. Crossflow Drag Model (Stage 1 @ Mach 2.0)")
+    print(f"  {'AoA (deg)':<10} | {'Base Cd':<10} | {'Total Cd':<10} | {'Factor':<10}")
+    print("  " + "-" * 46)
+    
+    mach_test = 2.0
+    cd_base = float(vehicle.cd_interp_stage_1(mach_test))
+    cross_factor = vehicle.config.stage_1.aero.cd_crossflow_factor
+    
+    aoa_points = [0, 5, 10, 30, 45, 90]
+    for aoa in aoa_points:
+        rad = np.radians(aoa)
+        sin_alpha_sq = np.sin(rad)**2
+        cd_total = cd_base + cross_factor * sin_alpha_sq
+        factor = cd_total / cd_base
+        print(f"  {aoa:<10.1f} | {cd_base:<10.4f} | {cd_total:<10.4f} | {factor:<10.2f}x")
+
+    # 3. Force Vector Logic & Wind
+    print("\n3. Force Vector & Wind Interaction")
+    # Scenario: Vehicle moving Vertically at Equator. Wind blows East due to rotation.
+    R = vehicle.env.config.earth_radius_equator
+    omega = vehicle.env.config.earth_omega_vector[2]
+    
+    # State: 1km altitude, 100 m/s vertical velocity
+    state = np.array([R + 1000.0, 0, 0, 100.0, 0, 0, 100000.0]) 
+    t = 0.0
+    
+    # Expected Wind (Co-rotation): v_wind = omega x r = [0, R*omega, 0]
+    v_wind_expected = np.array([0, (R+1000.0)*omega, 0])
+    v_rel_expected = state[3:6] - v_wind_expected
+    v_rel_dir_expected = v_rel_expected / np.linalg.norm(v_rel_expected)
+    
+    # Get Dynamics (Thrust=0 to isolate Aero+Gravity)
+    dyn = vehicle.get_dynamics(state, 0.0, np.array([1,0,0]), t, stage_mode="coast", scaling=None)
+    acc_total = dyn[3:6]
+    
+    # Remove Gravity
+    env_state = vehicle.env.get_state_sim(state[0:3], t)
+    acc_aero = acc_total - env_state['gravity']
+    
+    # Check Alignment: Drag should oppose Relative Velocity
+    acc_aero_mag = np.linalg.norm(acc_aero)
+    if acc_aero_mag > 1e-9:
+        f_aero_dir = acc_aero / acc_aero_mag
+        dot_prod = np.dot(f_aero_dir, v_rel_dir_expected)
+        
+        print(f"  Veh Velocity:   {state[3:6]}")
+        print(f"  Wind Velocity:  {v_wind_expected} (Calculated)")
+        print(f"  Rel Velocity:   {v_rel_expected}")
+        print(f"  Drag Force Dir: {f_aero_dir}")
+        print(f"  Alignment:      {dot_prod:.4f} (Should be -1.0000)")
+        
+        if abs(dot_prod + 1.0) < 1e-3:
+            print("  >>> SUCCESS: Drag opposes relative velocity (Wind accounted for).")
+        else:
+            print("  >>> FAILURE: Drag direction is incorrect!")
+    else:
+        print("  >>> WARNING: Aerodynamic force too small to verify direction.")
+    
+    # 4. AoA Geometry Calculation Check
+    print("\n4. Angle of Attack (AoA) Geometry Calculation")
+    print(f"  {'Scenario':<20} | {'Thrust Dir':<15} | {'Rel Vel Dir':<15} | {'Exp AoA':<8} | {'Calc AoA':<8} | {'Status':<6}")
+    print("  " + "-" * 85)
+    
+    # Define scenarios
+    r_test = np.array([R + 100000.0, 0, 0]) # 100km up
+    t_test = 0.0
+    env_state = vehicle.env.get_state_sim(r_test, t_test)
+    wind = env_state['wind_velocity']
+    
+    scenarios = [
+        ("Aligned (0 deg)",      [1, 0, 0], [1, 0, 0], 0.0),
+        ("Pitch 45 deg",         [1, 0, 1], [1, 0, 0], 45.0),
+        ("Pitch 90 deg",         [0, 0, 1], [1, 0, 0], 90.0),
+        ("Yaw 30 deg",           [np.cos(np.radians(30)), np.sin(np.radians(30)), 0], [1, 0, 0], 30.0),
+        ("Retrograde (180 deg)", [-1, 0, 0], [1, 0, 0], 180.0)
+    ]
+    
+    for name, thrust_dir, rel_vel_dir, exp_aoa in scenarios:
+        # Construct state such that v_rel aligns with rel_vel_dir
+        v_rel_mag = 1000.0
+        v_rel = np.array(rel_vel_dir) / np.linalg.norm(rel_vel_dir) * v_rel_mag
+        v_phys = v_rel + wind
+        
+        state = np.concatenate([r_test, v_phys, [100000.0]])
+        
+        # Call get_aero_properties
+        q, cos_alpha = vehicle.get_aero_properties(state, np.array(thrust_dir), t_test, stage_mode="boost")
+        
+        # Convert cos_alpha to degrees
+        calc_aoa = np.degrees(np.arccos(np.clip(cos_alpha, -1.0, 1.0)))
+        
+        err = abs(calc_aoa - exp_aoa)
+        status = "OK" if err < 1e-3 else "FAIL"
+        
+        # Format vectors for display
+        t_str = f"[{thrust_dir[0]:.1f}, {thrust_dir[1]:.1f}, {thrust_dir[2]:.1f}]"
+        v_str = f"[{rel_vel_dir[0]:.1f}, {rel_vel_dir[1]:.1f}, {rel_vel_dir[2]:.1f}]"
+        
+        print(f"  {name:<20} | {t_str:<15} | {v_str:<15} | {exp_aoa:<8.1f} | {calc_aoa:<8.1f} | {status:<6}")
+    
+    print("="*40 + "\n")
+
 if __name__ == "__main__":
     from config import StarshipBlock2, EARTH_CONFIG
     from vehicle import Vehicle
@@ -669,6 +805,7 @@ if __name__ == "__main__":
     print("--- Verifying Physics Model ---")
     verify_scaling_consistency(StarshipBlock2)
     verify_physics_consistency(veh, StarshipBlock2)
+    verify_aerodynamics(veh)
     verify_environment_consistency(veh)
     
     print("--- Running Optimization ---")
