@@ -4,8 +4,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+from scipy.integrate import solve_ivp
 
-def plot_mission(optimization_data, simulation_data, environment):
+def plot_mission(optimization_data, simulation_data, environment, config=None):
     """
     Visualizes the mission performance and compares the optimized plan
     against the simulated reality.
@@ -64,7 +65,9 @@ def plot_mission(optimization_data, simulation_data, environment):
     # --- 3. CALCULATE DERIVED METRICS (SIMULATION) ---
     sim_metrics = {
         'alt': [], 'vel': [], 'mach': [], 'q': [], 'aoa': [], 
-        'lat': [], 'lon': []
+        'aoa_pitch': [], 'aoa_yaw': [],
+        'lat': [], 'lon': [],
+        'gamma': [], 'energy': [], 'heating': [], 'tw': [], 'g_load': []
     }
     
     R_eq = environment.config.earth_radius_equator
@@ -119,6 +122,29 @@ def plot_mission(optimization_data, simulation_data, environment):
         alpha_deg = np.degrees(np.arccos(np.clip(cos_alpha, -1.0, 1.0)))
         sim_metrics['aoa'].append(alpha_deg)
         
+        # AoA Decomposition (Pitch vs Yaw)
+        # Define Trajectory Plane Normal (n = r x v_rel)
+        # This defines the "In-Plane" vs "Out-of-Plane" directions
+        plane_norm = np.cross(r_eci, v_rel)
+        if np.linalg.norm(plane_norm) < 1e-3:
+            # Fallback for vertical flight (use East vector)
+            plane_norm = np.array([0.0, 1.0, 0.0])
+        plane_norm /= np.linalg.norm(plane_norm)
+        
+        # Define "Lift" Direction (In-Plane Normal) p = v_rel x n
+        lift_dir = np.cross(vel_dir, plane_norm)
+        
+        # Pitch AoA (Projection of Thrust onto Lift Vector)
+        # Positive = Nose Up relative to velocity
+        pitch_cmp = np.dot(thrust_dir, lift_dir)
+        aoa_pitch = np.degrees(np.arcsin(np.clip(pitch_cmp, -1.0, 1.0)))
+        sim_metrics['aoa_pitch'].append(aoa_pitch)
+        
+        # Yaw/Sideslip AoA (Projection of Thrust onto Plane Normal)
+        yaw_cmp = np.dot(thrust_dir, plane_norm)
+        aoa_yaw = np.degrees(np.arcsin(np.clip(yaw_cmp, -1.0, 1.0)))
+        sim_metrics['aoa_yaw'].append(aoa_yaw)
+        
         # 5. Ground Track (Lat/Lon)
         theta = omega_e * t + environment.config.initial_rotation
         cos_t, sin_t = np.cos(theta), np.sin(theta)
@@ -134,6 +160,40 @@ def plot_mission(optimization_data, simulation_data, environment):
         
         sim_metrics['lat'].append(lat_gd)
         sim_metrics['lon'].append(lon)
+
+        # 6. Flight Dynamics Metrics
+        # Flight Path Angle (Gamma)
+        # Angle between velocity vector and local position vector (90 deg = vertical, 0 deg = horizontal)
+        # sin(gamma) = (r . v) / (|r| |v|)
+        sin_gamma = np.dot(r_eci, v_eci) / (r_mag * vel + 1e-9)
+        gamma = np.degrees(np.arcsin(np.clip(sin_gamma, -1.0, 1.0)))
+        sim_metrics['gamma'].append(gamma)
+
+        # Specific Mechanical Energy (per kg)
+        # E = v^2/2 - mu/r
+        energy = (vel**2)/2.0 - environment.config.earth_mu / r_mag
+        sim_metrics['energy'].append(energy / 1e6) # MJ/kg
+
+        # Heating Rate Indicator (0.5 * rho * v^3)
+        # Use relative velocity (airspeed) for physical accuracy
+        heating = 0.5 * env_state['density'] * (v_rel_mag**3)
+        sim_metrics['heating'].append(heating / 1e6) # MW/m^2 approx
+
+        # Thrust-to-Weight & G-Force (Requires Config)
+        if config:
+            # Determine stage based on mass
+            m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+            stage = config.stage_1 if y_sim[6, i] > m_stg2_wet + 1000 else config.stage_2
+            
+            throttle = u_sim[0, i]
+            # Calculate accurate thrust (Pressure Compensated)
+            isp_eff = stage.isp_vac + (env_state['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+            thrust_force = throttle * stage.thrust_vac * (isp_eff / stage.isp_vac)
+            
+            weight = y_sim[6, i] * np.linalg.norm(env_state['gravity'])
+            
+            sim_metrics['tw'].append(thrust_force / weight)
+            sim_metrics['g_load'].append((thrust_force / y_sim[6, i]) / 9.81)
 
     # --- 4. PLOTTING ---
     
@@ -151,6 +211,7 @@ def plot_mission(optimization_data, simulation_data, environment):
     axs1[0].plot(t_sim, np.array(sim_metrics['alt']) / 1000.0, 'b-', label='Simulation')
     axs1[0].set_ylabel('Altitude (km)')
     axs1[0].grid(True)
+    axs1[0].set_title('Altitude Profile')
     axs1[0].legend()
     
     # Velocity
@@ -158,12 +219,14 @@ def plot_mission(optimization_data, simulation_data, environment):
     axs1[1].plot(t_opt, v_opt_mag, 'k--', alpha=0.7)
     axs1[1].plot(t_sim, sim_metrics['vel'], 'b-')
     axs1[1].set_ylabel('Velocity (m/s)')
+    axs1[1].set_title('Inertial Velocity')
     axs1[1].grid(True)
     
     # Mass
     axs1[2].plot(t_opt, x_opt[6, :] / 1000.0, 'k--', alpha=0.7)
     axs1[2].plot(t_sim, y_sim[6, :] / 1000.0, 'b-')
     axs1[2].set_ylabel('Mass (tonnes)')
+    axs1[2].set_title('Vehicle Mass')
     axs1[2].set_xlabel('Time (s)')
     axs1[2].grid(True)
     
@@ -172,17 +235,24 @@ def plot_mission(optimization_data, simulation_data, environment):
     fig2.suptitle('Aerodynamics (Simulation Data)')
     
     axs2[0].plot(t_sim, sim_metrics['q'], 'r-')
+    axs2[0].set_title('Dynamic Pressure (Max Q)')
     axs2[0].set_ylabel('Dynamic Pressure (kPa)')
     axs2[0].grid(True)
     
     axs2[1].plot(t_sim, sim_metrics['mach'], 'g-')
+    axs2[1].set_title('Mach Number')
     axs2[1].set_ylabel('Mach Number')
     axs2[1].grid(True)
     
-    axs2[2].plot(t_sim, sim_metrics['aoa'], 'm-')
+    axs2[2].plot(t_sim, sim_metrics['aoa'], 'k-', label='Total (|α|)', linewidth=1.5)
+    axs2[2].plot(t_sim, sim_metrics['aoa_pitch'], 'b--', label='Pitch (In-Plane)', linewidth=1.0, alpha=0.8)
+    axs2[2].plot(t_sim, sim_metrics['aoa_yaw'], 'r:', label='Yaw (Out-of-Plane)', linewidth=1.0, alpha=0.8)
+    axs2[2].axhline(0, color='gray', linestyle='-', linewidth=0.8, alpha=0.5)
     axs2[2].set_ylabel('Angle of Attack (deg)')
+    axs2[2].set_title('Angle of Attack')
     axs2[2].set_xlabel('Time (s)')
     axs2[2].grid(True)
+    axs2[2].legend(loc='upper right', framealpha=0.9)
     
     # Figure 3: Controls
     fig3, axs3 = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
@@ -191,6 +261,7 @@ def plot_mission(optimization_data, simulation_data, environment):
     axs3[0].step(t_opt, u_opt[0, :], 'k--', label='Opt', where='post', alpha=0.7)
     axs3[0].plot(t_sim, u_sim[0, :], 'b-', label='Sim')
     axs3[0].set_ylabel('Throttle')
+    axs3[0].set_title('Engine Throttle')
     axs3[0].set_ylim(-0.1, 1.1)
     axs3[0].grid(True)
     axs3[0].legend()
@@ -198,6 +269,7 @@ def plot_mission(optimization_data, simulation_data, environment):
     axs3[1].plot(t_sim, u_sim[1, :], label='Ux')
     axs3[1].plot(t_sim, u_sim[2, :], label='Uy')
     axs3[1].plot(t_sim, u_sim[3, :], label='Uz')
+    axs3[1].set_title('Thrust Vector (ECI Components)')
     axs3[1].set_ylabel('Thrust Vector (ECI)')
     axs3[1].set_xlabel('Time (s)')
     axs3[1].grid(True)
@@ -222,17 +294,41 @@ def plot_mission(optimization_data, simulation_data, environment):
     ax5.set_title('3D Trajectory (ECI Frame)')
     
     # Draw Earth (Wireframe Sphere)
+    # Use WGS84 Ellipsoid dimensions for visual consistency
+    R_pol = R_eq * (1.0 - f)
     u = np.linspace(0, 2 * np.pi, 30)
     v = np.linspace(0, np.pi, 30)
     x_earth = R_eq * np.outer(np.cos(u), np.sin(v))
     y_earth = R_eq * np.outer(np.sin(u), np.sin(v))
-    z_earth = R_eq * np.outer(np.ones(np.size(u)), np.cos(v))
+    z_earth = R_pol * np.outer(np.ones(np.size(u)), np.cos(v))
     
     ax5.plot_wireframe(x_earth, y_earth, z_earth, color='c', alpha=0.2, linewidth=0.5)
     
     # Plot Trajectory
     r_sim = y_sim[0:3, :]
     ax5.plot(r_sim[0, :], r_sim[1, :], r_sim[2, :], 'r-', label='Flight Path', linewidth=2)
+    
+    # --- ORBIT PROJECTION (Future Trajectory) ---
+    # Propagate the final state for one orbital period to visualize the resulting orbit
+    r_final = r_sim[:, -1]
+    v_final = y_sim[3:6, -1]
+    mu = environment.config.earth_mu
+    
+    # Estimate Period: T = 2*pi * sqrt(a^3/mu)
+    r_mag_f = np.linalg.norm(r_final)
+    v_mag_f = np.linalg.norm(v_final)
+    specific_energy = (v_mag_f**2)/2 - mu/r_mag_f
+    
+    if specific_energy < 0: # Elliptical Orbit
+        a = -mu / (2*specific_energy)
+        period = 2 * np.pi * np.sqrt(a**3 / mu)
+        
+        def two_body_dyn(t, y):
+            r = y[0:3]
+            return np.concatenate([y[3:6], -mu * r / (np.linalg.norm(r)**3)])
+            
+        sol_orbit = solve_ivp(two_body_dyn, [0, period], np.concatenate([r_final, v_final]), rtol=1e-5)
+        ax5.plot(sol_orbit.y[0], sol_orbit.y[1], sol_orbit.y[2], 'k--', linewidth=1, label='Projected Orbit', alpha=0.6)
     
     # Markers
     ax5.scatter(r_sim[0, 0], r_sim[1, 0], r_sim[2, 0], color='g', s=50, label='Launch')
@@ -250,6 +346,44 @@ def plot_mission(optimization_data, simulation_data, environment):
     ax5.set_zlim(-max_val, max_val)
     ax5.legend()
     
+    # Figure 6: Flight Dynamics (Gamma, T/W, Energy)
+    if config:
+        fig6, axs6 = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+        fig6.suptitle('Flight Dynamics')
+
+        axs6[0].plot(t_sim, sim_metrics['gamma'], 'b-')
+        axs6[0].set_ylabel('Flight Path Angle (deg)')
+        axs6[0].set_title('Flight Path Angle (0=Horizontal, 90=Vertical)')
+        axs6[0].grid(True)
+
+        axs6[1].plot(t_sim, sim_metrics['tw'], 'm-')
+        axs6[1].set_ylabel('T/W Ratio')
+        axs6[1].set_title('Thrust-to-Weight Ratio')
+        axs6[1].grid(True)
+        axs6[1].axhline(1.0, color='k', linestyle='--', alpha=0.5)
+
+        axs6[2].plot(t_sim, sim_metrics['energy'], 'g-')
+        axs6[2].set_ylabel('Specific Energy (MJ/kg)')
+        axs6[2].set_title('Specific Mechanical Energy')
+        axs6[2].set_xlabel('Time (s)')
+        axs6[2].grid(True)
+
+        # Figure 7: Loads & Thermal
+        fig7, axs7 = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        fig7.suptitle('Loads & Thermal Stress')
+
+        axs7[0].plot(t_sim, sim_metrics['g_load'], 'r-')
+        axs7[0].set_ylabel('Axial Acceleration (g)')
+        axs7[0].set_title('G-Force (Thrust Only)')
+        axs7[0].grid(True)
+
+        axs7[1].plot(t_sim, sim_metrics['heating'], 'orange')
+        axs7[1].set_ylabel('Heating Indicator (MW/m^2)')
+        axs7[1].set_title('Aerodynamic Heating Proxy (0.5 * rho * v^3)')
+        axs7[1].set_xlabel('Time (s)')
+        axs7[1].grid(True)
+
+    plt.tight_layout()
     plt.show()
 
 def validate_trajectory(simulation_data, config, environment):
@@ -293,8 +427,11 @@ def validate_trajectory(simulation_data, config, environment):
     # Circular Velocity at this altitude
     v_circ = np.sqrt(mu / r_mag)
     
+    target_radius = R_eq + config.target_altitude
+    
     print(f"TERMINAL STATE (t = {t[-1]:.1f} s)")
-    print(f"  Altitude:       {alt_final/1000:.2f} km  (Target: {config.target_altitude/1000:.2f} km)")
+    print(f"  Geodetic Alt:   {alt_final/1000:.2f} km  (Note: Varies w/ Latitude)")
+    print(f"  Orbital Radius: {r_mag/1000:.2f} km  (Target: {target_radius/1000:.2f} km)")
     print(f"  Velocity:       {v_mag:.2f} m/s    (Circular: {v_circ:.2f} m/s)")
     
     tgt_inc_str = f"{config.target_inclination:.2f}" if config.target_inclination is not None else "Auto"
@@ -302,30 +439,56 @@ def validate_trajectory(simulation_data, config, environment):
     print(f"  Eccentricity:   {eccentricity:.5f}      (Target: ~0.0)")
     
     # Errors
-    alt_err = abs(alt_final - config.target_altitude)
+    # NOTE: Optimizer targets a constant Spherical Radius (R_eq + Target_Alt).
+    # We validate against this radius to avoid false failures due to Earth's oblateness 
+    # (Geodetic altitude naturally varies in a circular orbit).
+    rad_err = abs(r_mag - target_radius)
+    
     vel_err = abs(v_mag - v_circ)
     # Handle None (Auto) case safely
     inc_err = abs(inc_deg - config.target_inclination) if config.target_inclination is not None else 0.0
     
     print("-" * 20)
-    if alt_err < 1000 and vel_err < 10 and inc_err < 0.1:
+    if rad_err < 1000 and vel_err < 10 and inc_err < 0.1:
         print("  STATUS: SUCCESS - Orbit Injection Accurate")
     else:
         print("  STATUS: WARNING - Significant Orbital Deviation")
 
     # 2. Max Q Check
     q_vals = []
+    aoa_vals = []
     for i in range(len(t)):
         r_i = y[0:3, i]
         v_i = y[3:6, i]
+        u_i = u[:, i]
+        
         env_state = environment.get_state_sim(r_i, t[i])
         v_rel = v_i - env_state['wind_velocity']
-        q = 0.5 * env_state['density'] * np.linalg.norm(v_rel)**2
+        v_rel_mag = np.linalg.norm(v_rel)
+        
+        q = 0.5 * env_state['density'] * v_rel_mag**2
         q_vals.append(q)
+        
+        # Calculate AoA
+        thrust_dir = u_i[1:]
+        if np.linalg.norm(thrust_dir) > 1e-9:
+            thrust_dir = thrust_dir / np.linalg.norm(thrust_dir)
+        else:
+            thrust_dir = np.array([1,0,0])
+            
+        vel_dir = v_rel / v_rel_mag if v_rel_mag > 1.0 else thrust_dir
+        cos_alpha = np.dot(thrust_dir, vel_dir)
+        alpha_deg = np.degrees(np.arccos(np.clip(cos_alpha, -1.0, 1.0)))
+        aoa_vals.append(alpha_deg)
     
     max_q = max(q_vals)
+    max_aoa = max(aoa_vals)
+    aoa_at_max_q = aoa_vals[np.argmax(q_vals)]
+    
     print(f"\nSTRUCTURAL LOADS")
     print(f"  Max Q:          {max_q/1000:.2f} kPa")
+    print(f"  Max AoA:        {max_aoa:.2f} deg")
+    print(f"  AoA @ Max Q:    {aoa_at_max_q:.2f} deg")
     
     if max_q > 40000: # 40 kPa is a typical limit for large rockets
         print("  STATUS: WARNING - High Dynamic Pressure")
@@ -353,87 +516,73 @@ def analyze_delta_v_budget(simulation_data, vehicle, config):
     loss_drag = 0.0
     loss_steering = 0.0
     
+    # Helper to calculate instantaneous rates
+    def get_rates(idx):
+        r_i = y[0:3, idx]
+        v_i = y[3:6, idx]
+        m_i = y[6, idx]
+        throttle_i = u[0, idx]
+        u_thrust_i = u[1:, idx]
+        if np.linalg.norm(u_thrust_i) > 1e-9:
+            u_thrust_i = u_thrust_i / np.linalg.norm(u_thrust_i)
+        
+        env = vehicle.env.get_state_sim(r_i, t[idx])
+        g_vec = env['gravity']
+        
+        v_mag = np.linalg.norm(v_i)
+        v_hat = v_i / v_mag if v_mag > 1.0 else np.array([0,0,1])
+        
+        # Determine Stage
+        m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+        if m_i > m_stg2_wet + 1000.0:
+            mode = "coast" if throttle_i < 0.01 else "boost"
+            stage = config.stage_1
+        else:
+            mode = "coast_2" if throttle_i < 0.01 else "ship"
+            stage = config.stage_2
+            
+        # Aerodynamics
+        q, cos_alpha = vehicle.get_aero_properties(y[:, idx], u_thrust_i, t[idx], stage_mode=mode, scaling=None)
+        
+        # Thrust Accel
+        acc_thrust_mag = 0.0
+        if throttle_i > 0.01 and "coast" not in mode:
+            g0 = vehicle.env.config.g0
+            isp_eff = stage.isp_vac + (env['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+            m_dot = throttle_i * stage.thrust_vac / (stage.isp_vac * g0)
+            f_thrust = m_dot * isp_eff * g0
+            acc_thrust_mag = f_thrust / m_i
+            
+        # Drag Accel (Projected)
+        # We approximate drag loss direction as opposing velocity
+        # To be precise: a_drag = a_total - a_thrust - g. 
+        # But we can just use the dynamics engine to get total accel and subtract.
+        dyn = vehicle.get_dynamics(y[:, idx], throttle_i, u_thrust_i, t[idx], stage_mode=mode, scaling=None)
+        acc_total = dyn[3:6]
+        a_drag_vec = acc_total - (acc_thrust_mag * u_thrust_i) - g_vec
+        drag_proj = np.dot(a_drag_vec, v_hat) # Usually negative
+        
+        # Rates
+        rate_ideal = acc_thrust_mag
+        rate_grav = -np.dot(g_vec, v_hat)
+        rate_steer = acc_thrust_mag * (1.0 - cos_alpha)
+        rate_drag = -drag_proj
+        
+        return rate_ideal, rate_grav, rate_steer, rate_drag
+
     # Integration loop
     for i in range(len(t) - 1):
         dt = t[i+1] - t[i]
-        t_curr = t[i]
         
-        # State
-        r = y[0:3, i]
-        v = y[3:6, i]
-        m = y[6, i]
-        
-        # Control
-        throttle = u[0, i]
-        u_thrust = u[1:, i]
-        if np.linalg.norm(u_thrust) > 1e-9:
-            u_thrust = u_thrust / np.linalg.norm(u_thrust)
-            
-        # Environment
-        env = vehicle.env.get_state_sim(r, t_curr)
-        g_vec = env['gravity']
-        
-        # Velocity Unit Vector
-        v_mag = np.linalg.norm(v)
-        if v_mag > 1.0:
-            v_hat = v / v_mag
-        else:
-            v_hat = np.array([0,0,1]) # Vertical if static
-            
-        # Determine Phase (Heuristic for Drag/Thrust calc)
-        m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
-        
-        if m > m_stg2_wet + 1000.0: # Buffer (Stage 1 Attached)
-            if throttle < 0.01:
-                mode = "coast"
-            else:
-                mode = "boost"
-        else: # Stage 2 Only
-            if throttle < 0.01:
-                mode = "coast_2"
-            else:
-                mode = "ship"
-            
-        # Get Dynamics (Forces)
-        # We call vehicle dynamics to ensure consistency with physics engine
-        dyn = vehicle.get_dynamics(y[:, i], throttle, u_thrust, t_curr, stage_mode=mode, scaling=None)
-        acc_total = dyn[3:6]
-        
-        # Get Aerodynamics for Angle of Attack
-        q, cos_alpha = vehicle.get_aero_properties(y[:, i], u_thrust, t_curr, stage_mode=mode, scaling=None)
-        
-        # Calculate Thrust Acceleration Magnitude (Approximate based on throttle/ISP)
-        # We infer it from the dynamics: a_thrust = a_total - g - a_drag
-        # But getting a_drag is hard without re-calculating. 
-        # Let's calculate Thrust explicitly using the config data.
-        stage = config.stage_1 if "boost" in mode else config.stage_2
-        
-        acc_thrust_mag = 0.0
-        if throttle > 0.01 and "coast" not in mode:
-            g0 = vehicle.env.config.g0
-            isp_eff = stage.isp_vac + (env['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
-            m_dot = throttle * stage.thrust_vac / (stage.isp_vac * g0)
-            f_thrust = m_dot * isp_eff * g0
-            acc_thrust_mag = f_thrust / m
+        # Trapezoidal Integration: 0.5 * (val_i + val_i+1) * dt
+        r1_ideal, r1_grav, r1_steer, r1_drag = get_rates(i)
+        r2_ideal, r2_grav, r2_steer, r2_drag = get_rates(i+1)
 
         # --- INTEGRATE LOSSES ---
-        # 1. Ideal Delta-V (Integral of Thrust Accel)
-        dv_ideal += acc_thrust_mag * dt
-        
-        # 2. Gravity Loss (Integral of -g dot v_hat)
-        # If g opposes v (climbing), dot is negative, loss is positive.
-        g_proj = np.dot(g_vec, v_hat)
-        loss_gravity += (-g_proj) * dt
-        
-        # 3. Steering Loss (Thrust not aligned with Velocity)
-        # Loss = a_thrust * (1 - cos(theta))
-        loss_steering += acc_thrust_mag * (1.0 - cos_alpha) * dt
-        
-        # 4. Drag Loss
-        # a_drag = a_total - a_thrust*u_thrust - g
-        a_drag_vec = acc_total - (acc_thrust_mag * u_thrust) - g_vec
-        drag_proj = np.dot(a_drag_vec, v_hat)
-        loss_drag += (-drag_proj) * dt
+        dv_ideal      += 0.5 * (r1_ideal + r2_ideal) * dt
+        loss_gravity  += 0.5 * (r1_grav  + r2_grav)  * dt
+        loss_steering += 0.5 * (r1_steer + r2_steer) * dt
+        loss_drag     += 0.5 * (r1_drag  + r2_drag)  * dt
 
     print(f"  Ideal Delta-V:    {dv_ideal:.1f} m/s")
     print(f"  --------------------------------")
