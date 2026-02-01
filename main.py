@@ -504,6 +504,8 @@ def verify_environment_consistency(vehicle):
     print(f"{'Location':<15} | {'Var':<8} | {'Simulation':<12} | {'Optimizer':<12} | {'Diff':<10}")
     print("-" * 70)
     
+    overall_success = True
+    
     for name, alt, lat in test_points:
         # Position vector
         lat_rad = np.radians(lat)
@@ -528,25 +530,38 @@ def verify_environment_consistency(vehicle):
         # 3. Compare
         # Density
         diff_rho = abs(env_sim['density'] - rho_opt)
+        if diff_rho > 1e-9: overall_success = False
         print(f"{name:<15} | {'rho':<8} | {env_sim['density']:<12.4e} | {rho_opt:<12.4e} | {diff_rho:.2e}")
         
         # Pressure
         diff_p = abs(env_sim['pressure'] - p_opt)
+        if diff_p > 1e-9: overall_success = False
         print(f"{'':<15} | {'p':<8} | {env_sim['pressure']:<12.4e} | {p_opt:<12.4e} | {diff_p:.2e}")
+        
+        # Speed of Sound
+        diff_sos = abs(env_sim['speed_of_sound'] - sos_opt)
+        if diff_sos > 1e-9: overall_success = False
+        print(f"{'':<15} | {'sos':<8} | {env_sim['speed_of_sound']:<12.4f} | {sos_opt:<12.4f} | {diff_sos:.2e}")
         
         # Gravity Magnitude
         g_sim_mag = np.linalg.norm(env_sim['gravity'])
         g_opt_mag = np.linalg.norm(g_opt)
         diff_g = abs(g_sim_mag - g_opt_mag)
+        if diff_g > 1e-9: overall_success = False
         print(f"{'':<15} | {'g_mag':<8} | {g_sim_mag:<12.4f} | {g_opt_mag:<12.4f} | {diff_g:.2e}")
         
         # Wind Velocity Magnitude
         w_sim_mag = np.linalg.norm(env_sim['wind_velocity'])
         w_opt_mag = np.linalg.norm(w_opt)
         diff_w = abs(w_sim_mag - w_opt_mag)
+        if diff_w > 1e-9: overall_success = False
         print(f"{'':<15} | {'w_mag':<8} | {w_sim_mag:<12.4f} | {w_opt_mag:<12.4f} | {diff_w:.2e}")
         print("-" * 70)
 
+    if overall_success:
+        print("\n>>> SUCCESS: Environment models are consistent.")
+    else:
+        print("\n>>> CRITICAL WARNING: Environment models disagree!")
     print("="*40 + "\n")
 
 if __name__ == "__main__":
