@@ -4,6 +4,7 @@
 
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
 
 @dataclass
 class ScalingConfig:
@@ -126,8 +127,8 @@ class TwoStageRocketConfig:
     sequence: SequenceConfig
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
-    target_inclination: float = 28.6   # [deg] Target Inclination (Must be >= Launch Latitude 28.57)
-    num_nodes: int = 150  # Number of discretization nodes per phase
+    target_inclination: Optional[float] = None   # [deg] Target Inclination. If None, defaults to Launch Latitude (Min Energy).
+    num_nodes: int = 100  # Number of discretization nodes per phase
     
     @property
     def launch_mass(self) -> float:
@@ -141,7 +142,8 @@ class TwoStageRocketConfig:
         print(f"\n" + "="*60)
         print(f"CONFIG DIAGNOSTIC: {self.name}")
         print(f"="*60)
-        print(f"  Target Orbit:      {self.target_altitude/1000:.1f} km @ {self.target_inclination:.1f} deg")
+        inc_str = f"{self.target_inclination:.1f}" if self.target_inclination is not None else "Min-Energy (Auto)"
+        print(f"  Target Orbit:      {self.target_altitude/1000:.1f} km @ {inc_str} deg")
         print(f"  Launch Mass:       {self.launch_mass:,.0f} kg")
         print(f"  Payload:           {self.payload_mass:,.0f} kg")
         print(f"-"*60)
@@ -164,7 +166,7 @@ StarshipBlock2 = TwoStageRocketConfig(
     
     payload_mass=0.0, # Payload to Orbit
     target_altitude=420000.0,
-    target_inclination=28.6,
+    target_inclination=None, # Auto-resolve to Min Energy (Latitude)
 
     sequence=SequenceConfig(
         main_engine_ramp_time=3.0,     

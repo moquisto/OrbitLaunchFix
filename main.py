@@ -134,6 +134,12 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # Target Orbit
     Target_Alt = config.target_altitude
+    
+    # Resolve Target Inclination
+    if config.target_inclination is None:
+        print(f"[Optimizer] Target Inclination not set. Defaulting to Launch Latitude ({environment.config.launch_latitude:.2f} deg) for min-energy orbit.")
+        config.target_inclination = environment.config.launch_latitude
+        
     Target_Inc_Deg = config.target_inclination
     
     # Ensure Target Inclination is physically possible (>= Latitude)
@@ -686,6 +692,9 @@ def verify_aerodynamics(vehicle):
         cd1 = float(vehicle.cd_interp_stage_1(m))
         cd2 = float(vehicle.cd_interp_stage_2(m))
         print(f"  {m:<6.1f} | {cd1:<12.4f} | {cd2:<12.4f}")
+        
+        if cd1 < 0 or cd1 > 2.0 or cd2 < 0 or cd2 > 2.0:
+            print(f"  >>> FAILURE: Cd out of physical range [0, 2.0] at Mach {m}")
     
     # 2. Crossflow Drag Model (AoA Effect)
     print("\n2. Crossflow Drag Model (Stage 1 @ Mach 2.0)")
@@ -748,7 +757,7 @@ def verify_aerodynamics(vehicle):
     
     # 4. AoA Geometry Calculation Check
     print("\n4. Angle of Attack (AoA) Geometry Calculation")
-    print(f"  {'Scenario':<20} | {'Thrust Dir':<15} | {'Rel Vel Dir':<15} | {'Exp AoA':<8} | {'Calc AoA':<8} | {'Status':<6}")
+    print(f"  {'Scenario':<20} | {'Thrust Dir':<15} | {'Rel Vel Dir':<15} | {'Exp AoA':<8} | {'Calc AoA':<8} | {'Sym Diff':<8} | {'Status':<6}")
     print("  " + "-" * 85)
     
     # Define scenarios
@@ -773,21 +782,205 @@ def verify_aerodynamics(vehicle):
         
         state = np.concatenate([r_test, v_phys, [100000.0]])
         
-        # Call get_aero_properties
+        # A. Call get_aero_properties (Numeric / Simulation Mode)
         q, cos_alpha = vehicle.get_aero_properties(state, np.array(thrust_dir), t_test, stage_mode="boost")
+        
+        # B. Call get_aero_properties (Symbolic / Optimizer Mode)
+        # This ensures the Optimizer sees the exact same AoA as the Simulation
+        x_sym = ca.MX.sym('x', 7)
+        u_sym = ca.MX.sym('u', 3)
+        t_sym = ca.MX.sym('t', 1)
+        q_sym, cos_sym = vehicle.get_aero_properties(x_sym, u_sym, t_sym, stage_mode="boost")
+        f_aero_sym = ca.Function('f_aero_check', [x_sym, u_sym, t_sym], [cos_sym])
+        cos_alpha_sym = float(f_aero_sym(state, np.array(thrust_dir), t_test))
+        
+        sym_diff = abs(cos_alpha - cos_alpha_sym)
         
         # Convert cos_alpha to degrees
         calc_aoa = np.degrees(np.arccos(np.clip(cos_alpha, -1.0, 1.0)))
         
         err = abs(calc_aoa - exp_aoa)
-        status = "OK" if err < 1e-3 else "FAIL"
+        status = "OK"
+        if err > 1e-3 or sym_diff > 1e-9:
+            status = "FAIL"
         
         # Format vectors for display
         t_str = f"[{thrust_dir[0]:.1f}, {thrust_dir[1]:.1f}, {thrust_dir[2]:.1f}]"
         v_str = f"[{rel_vel_dir[0]:.1f}, {rel_vel_dir[1]:.1f}, {rel_vel_dir[2]:.1f}]"
         
-        print(f"  {name:<20} | {t_str:<15} | {v_str:<15} | {exp_aoa:<8.1f} | {calc_aoa:<8.1f} | {status:<6}")
+        print(f"  {name:<20} | {t_str:<15} | {v_str:<15} | {exp_aoa:<8.1f} | {calc_aoa:<8.1f} | {sym_diff:<8.1e} | {status:<6}")
     
+    print("="*40 + "\n")
+
+def verify_positioning(vehicle):
+    """
+    Debugs the Coordinate Systems (ECI/ECEF), Earth Rotation, and WGS84 Geometry.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: POSITIONING & GEODESY CHECK")
+    print("="*40)
+    
+    env = vehicle.env
+    config = env.config
+    R_eq = config.earth_radius_equator
+    f = config.earth_flattening
+    
+    # 1. Launch Site Verification
+    print("1. Launch Site Initialization (t=0)")
+    r_launch, v_launch = env.get_launch_site_state()
+    
+    # Calculate expected magnitude (WGS84 radius at launch latitude + altitude)
+    lat_rad = np.radians(config.launch_latitude)
+    e2 = 2*f - f**2
+    N = R_eq / np.sqrt(1 - e2 * np.sin(lat_rad)**2)
+    h_launch = config.launch_altitude
+    
+    # Cartesian conversion for verification
+    x_exp = (N + h_launch) * np.cos(lat_rad) * np.cos(np.radians(config.launch_longitude))
+    y_exp = (N + h_launch) * np.cos(lat_rad) * np.sin(np.radians(config.launch_longitude))
+    z_exp = (N * (1 - e2) + h_launch) * np.sin(lat_rad)
+    
+    # Rotate to ECI (t=0)
+    theta_0 = config.initial_rotation
+    x_eci = x_exp * np.cos(theta_0) - y_exp * np.sin(theta_0)
+    y_eci = x_exp * np.sin(theta_0) + y_exp * np.cos(theta_0)
+    z_eci = z_exp
+    
+    r_exp = np.array([x_eci, y_eci, z_eci])
+    pos_err = np.linalg.norm(r_launch - r_exp)
+    
+    print(f"  Launch Lat/Lon:  {config.launch_latitude:.4f} N, {config.launch_longitude:.4f} E")
+    print(f"  Launch Alt:      {h_launch:.1f} m")
+    print(f"  Calc ECI Pos:    [{r_launch[0]:.0f}, {r_launch[1]:.0f}, {r_launch[2]:.0f}]")
+    print(f"  Position Error:  {pos_err:.2e} m")
+    
+    # Velocity Check (v = omega x r)
+    omega = config.earth_omega_vector
+    v_exp = np.cross(omega, r_launch)
+    vel_err = np.linalg.norm(v_launch - v_exp)
+    print(f"  Calc ECI Vel:    {np.linalg.norm(v_launch):.2f} m/s")
+    print(f"  Velocity Error:  {vel_err:.2e} m/s")
+    
+    if pos_err < 1e-3 and vel_err < 1e-3:
+        print("  >>> SUCCESS: Launch site initialization is correct.")
+    else:
+        print("  >>> FAILURE: Launch site calculation mismatch!")
+
+    # 2. Earth Rotation Consistency
+    print("\n2. Earth Rotation & Altitude Invariance")
+    # A point fixed to the Earth's surface (rotating in ECI) should maintain constant altitude/density.
+    times = [0.0, 3600.0, 43200.0] # 0, 1h, 12h
+    print(f"  {'Time (s)':<10} | {'Rotation (deg)':<15} | {'Density (kg/m3)':<18} | {'Status':<6}")
+    print("  " + "-" * 55)
+    
+    base_rho = None
+    rot_success = True
+    
+    for t in times:
+        theta = omega[2] * t + config.initial_rotation
+        # Position of a point on Equator (Alt=0) at time t
+        r_rot = np.array([R_eq * np.cos(theta), R_eq * np.sin(theta), 0.0])
+        
+        s = env.get_state_sim(r_rot, t)
+        rho = s['density']
+        
+        if base_rho is None: base_rho = rho
+        diff = abs(rho - base_rho)
+        status = "OK" if diff < 1e-9 else "FAIL"
+        if status == "FAIL": rot_success = False
+        
+        deg = np.degrees(theta) % 360
+        print(f"  {t:<10.0f} | {deg:<15.1f} | {rho:<18.6f} | {status:<6}")
+
+    if rot_success:
+        print("  >>> SUCCESS: Environment rotates correctly with Earth.")
+    else:
+        print("  >>> FAILURE: Altitude/Density fluctuates with rotation!")
+    
+    # 3. WGS84 Geometry Check
+    print("\n3. WGS84 Ellipsoid Geometry")
+    R_pol = R_eq * (1.0 - f)
+    
+    # Test at 10km altitude to avoid surface clamping masking spherical errors
+    h_test = 10000.0
+    s_eq = env.get_state_sim(np.array([R_eq + h_test, 0, 0]), 0.0)
+    s_pol = env.get_state_sim(np.array([0, 0, R_pol + h_test]), 0.0)
+    
+    print(f"  Equator Radius:  {R_eq:.1f} m (Test Alt: {h_test} m)")
+    print(f"  Polar Radius:    {R_pol:.1f} m (Test Alt: {h_test} m)")
+    print(f"  Density (Eq):    {s_eq['density']:.6e} kg/m3")
+    print(f"  Density (Pol):   {s_pol['density']:.6e} kg/m3")
+    
+    if abs(s_eq['density'] - s_pol['density']) < 1e-9:
+        print("  >>> SUCCESS: WGS84 Flattening is correctly implemented.")
+    else:
+        print("  >>> FAILURE: Model does not account for Earth flattening correctly.")
+        
+    print("="*40 + "\n")
+
+def verify_propulsion(vehicle):
+    """
+    Debugs the Propulsion Model (ISP vs Pressure, Thrust calculation).
+    Verifies that the vehicle produces correct Thrust and ISP at Sea Level and Vacuum.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: PROPULSION PERFORMANCE CHECK")
+    print("="*40)
+    
+    R_e = vehicle.env.config.earth_radius_equator
+    g0 = vehicle.env.config.g0
+    
+    # Test Cases: (Stage Name, Stage Config, Mode, Altitude, Expected Pressure Label)
+    cases = [
+        ("Stage 1 (SL)",  vehicle.config.stage_1, "boost", 0.0,      "1 atm"),
+        ("Stage 1 (Vac)", vehicle.config.stage_1, "boost", 200000.0, "0 atm"),
+        ("Stage 2 (Vac)", vehicle.config.stage_2, "ship",  200000.0, "0 atm")
+    ]
+    
+    print(f"{'Case':<15} | {'Alt (km)':<8} | {'Press (Pa)':<10} | {'ISP (s)':<8} | {'Thrust (MN)':<12} | {'Exp Thr':<12} | {'Status':<6}")
+    print("-" * 85)
+    
+    for name, stage, mode, alt, p_label in cases:
+        # 1. Get Environment State
+        r = np.array([R_e + alt, 0, 0])
+        t = 0.0
+        env = vehicle.env.get_state_sim(r, t)
+        p_act = env['pressure']
+        
+        # 2. Run Dynamics (Throttle=100%, Vertical)
+        # FIX: Set velocity to wind velocity to ensure zero relative velocity (Zero Drag).
+        # This isolates the Thrust force for precise verification.
+        v_test = env['wind_velocity']
+        # State: [r, v, m]
+        state = np.concatenate([r, v_test, [stage.dry_mass + stage.propellant_mass]])
+        dyn = vehicle.get_dynamics(state, 1.0, np.array([1,0,0]), t, stage_mode=mode, scaling=None)
+        
+        # 3. Extract Thrust from Dynamics
+        # F_thrust = m * (a_total - g)  (since Drag=0 at v=0)
+        acc_total = dyn[3:6]
+        g_vec = env['gravity']
+        m_curr = state[6]
+        
+        f_net = acc_total * m_curr
+        f_grav = g_vec * m_curr
+        f_thrust_vec = f_net - f_grav
+        f_thrust_mag = np.linalg.norm(f_thrust_vec)
+        
+        # 4. Calculate ISP from m_dot
+        m_dot_act = -dyn[6] # m_dot is negative in dynamics
+        isp_act = f_thrust_mag / (m_dot_act * g0) if m_dot_act > 1e-9 else 0.0
+            
+        # 5. Expected Values
+        # Calculate expected ISP based on actual pressure found
+        isp_exp = stage.isp_vac + (p_act / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+        thr_exp = (stage.thrust_vac / stage.isp_vac) * isp_exp 
+            
+        # 6. Check
+        thr_err = abs(f_thrust_mag - thr_exp) / (thr_exp + 1e-9)
+        status = "OK" if thr_err < 1e-3 else "FAIL"
+        
+        print(f"{name:<15} | {alt/1000:<8.0f} | {p_act:<10.0f} | {isp_act:<8.1f} | {f_thrust_mag/1e6:<12.3f} | {thr_exp/1e6:<12.3f} | {status:<6}")
+
     print("="*40 + "\n")
 
 if __name__ == "__main__":
@@ -806,6 +999,8 @@ if __name__ == "__main__":
     verify_scaling_consistency(StarshipBlock2)
     verify_physics_consistency(veh, StarshipBlock2)
     verify_aerodynamics(veh)
+    verify_propulsion(veh)
+    verify_positioning(veh)
     verify_environment_consistency(veh)
     
     print("--- Running Optimization ---")

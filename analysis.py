@@ -296,13 +296,16 @@ def validate_trajectory(simulation_data, config, environment):
     print(f"TERMINAL STATE (t = {t[-1]:.1f} s)")
     print(f"  Altitude:       {alt_final/1000:.2f} km  (Target: {config.target_altitude/1000:.2f} km)")
     print(f"  Velocity:       {v_mag:.2f} m/s    (Circular: {v_circ:.2f} m/s)")
-    print(f"  Inclination:    {inc_deg:.2f} deg    (Target: {config.target_inclination:.2f} deg)")
+    
+    tgt_inc_str = f"{config.target_inclination:.2f}" if config.target_inclination is not None else "Auto"
+    print(f"  Inclination:    {inc_deg:.2f} deg    (Target: {tgt_inc_str} deg)")
     print(f"  Eccentricity:   {eccentricity:.5f}      (Target: ~0.0)")
     
     # Errors
     alt_err = abs(alt_final - config.target_altitude)
     vel_err = abs(v_mag - v_circ)
-    inc_err = abs(inc_deg - config.target_inclination)
+    # Handle None (Auto) case safely
+    inc_err = abs(inc_deg - config.target_inclination) if config.target_inclination is not None else 0.0
     
     print("-" * 20)
     if alt_err < 1000 and vel_err < 10 and inc_err < 0.1:
