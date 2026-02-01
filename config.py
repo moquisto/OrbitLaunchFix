@@ -14,7 +14,7 @@ class ScalingConfig:
     # Canonical Units (Earth Surface/Orbit)
     length: float = 6378137.0          # [m] Earth Radius
     speed: float = 7910.0              # [m/s] Orbital Velocity
-    mass: float = 5000000.0            # [kg] Approx Launch Mass
+    mass: float = 1000000.0            # [kg] Reference Mass (1000t)
     
     # Derived Units
     time: float = field(init=False)    # [s]
