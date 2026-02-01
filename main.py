@@ -8,7 +8,7 @@ import warnings
 import time
 import guidance
 
-def check_path_constraints(sol, X, U, scaling, config, phase_name):
+def check_path_constraints(sol, X, U, scaling, config, environment, phase_name):
     """
     Checks for violations of path constraints in the optimizer solution.
     """
@@ -18,11 +18,20 @@ def check_path_constraints(sol, X, U, scaling, config, phase_name):
     r = sol.value(X)[0:3, :] * scaling.length
     u_val = sol.value(U)
     
-    # 1. Altitude Constraint
-    r_mags = np.linalg.norm(r, axis=0)
-    min_r = np.min(r_mags)
-    if min_r < scaling.length - 100.0: # Approx check against Earth Radius
-        print(f"    ! ALTITUDE VIOLATION: Min Radius = {min_r:.1f} m")
+    # 1. Altitude Constraint (Ellipsoidal WGS84)
+    R_eq = environment.config.earth_radius_equator
+    f = environment.config.earth_flattening
+    R_pol = R_eq * (1.0 - f)
+    
+    # Ellipsoid equation: (x/a)^2 + (y/a)^2 + (z/b)^2 >= 1
+    val = (r[0,:]/R_eq)**2 + (r[1,:]/R_eq)**2 + (r[2,:]/R_pol)**2
+    min_val = np.min(val)
+    
+    if min_val < 1.0 - 1e-6: # Strict check
+        min_idx = np.argmin(val)
+        # Approx violation in meters (geometric mean radius)
+        violation = (1.0 - np.sqrt(min_val)) * R_eq 
+        print(f"    ! ALTITUDE VIOLATION: Ellipsoid Metric = {min_val:.6f} (~{violation:.1f} m under) at Node {min_idx}")
         
     # 2. Control Constraints
     throttles = u_val[0, :]
@@ -113,8 +122,8 @@ def print_debug_info(opti, sol, scaling, config, environment, X1, U1, T1_scaled,
     print(f"  The optimizer could not find a feasible solution.")
     
     # 5. Path Constraint Check
-    check_path_constraints(sol, X1, U1, scaling, config, "Phase 1")
-    check_path_constraints(sol, X3, U3, scaling, config, "Phase 3")
+    check_path_constraints(sol, X1, U1, scaling, config, environment, "Phase 1")
+    check_path_constraints(sol, X3, U3, scaling, config, environment, "Phase 3")
     print("="*40 + "\n")
 
 def solve_optimal_trajectory(config, vehicle, environment):
@@ -234,10 +243,15 @@ def solve_optimal_trajectory(config, vehicle, environment):
             opti.subject_to(X[:, k+1] == x_next)
             
             # Path Constraints (Safety)
-            # Altitude > -100m (allow slight dip at launch due to numerics)
+            # Altitude > 0m (Strict constraint, no buffer, WGS84 Ellipsoid)
             r_k_scaled = x_k[0:3]
-            R_earth_scaled = R_earth / scaling.length
-            opti.subject_to(ca.norm_2(r_k_scaled) >= R_earth_scaled - (100.0 / scaling.length))
+            Re_s = R_earth / scaling.length
+            f = environment.config.earth_flattening
+            Rp_s = (R_earth * (1.0 - f)) / scaling.length
+            
+            # (x/Re)^2 + (y/Re)^2 + (z/Rp)^2 >= 1
+            ellipsoid_metric = (r_k_scaled[0]/Re_s)**2 + (r_k_scaled[1]/Re_s)**2 + (r_k_scaled[2]/Rp_s)**2
+            opti.subject_to(ellipsoid_metric >= 1.0)
             
             # Mass Constraints (Don't burn more than available)
             m_k_scaled = x_k[6]
@@ -983,6 +997,119 @@ def verify_propulsion(vehicle):
 
     print("="*40 + "\n")
 
+def verify_staging_and_objective(opt_res, config, environment=None):
+    """
+    Verifies that staging mechanics (mass drop, kinematic continuity) 
+    and the optimization objective (fuel minimization) are consistent.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: STAGING & OBJECTIVE CHECK")
+    print("="*40)
+
+    # 1. Staging Continuity (Pos/Vel)
+    # Determine the state just before staging
+    if "X2" in opt_res and opt_res.get("T2", 0.0) > 1e-4:
+        x_prev_end = opt_res["X2"][:, -1]
+        phase_name = "Coast (Phase 2)"
+    else:
+        x_prev_end = opt_res["X1"][:, -1]
+        phase_name = "Boost (Phase 1)"
+    
+    # State just after staging (Start of Phase 3)
+    x_stage3_start = opt_res["X3"][:, 0]
+    
+    # Position/Velocity should match exactly
+    pos_diff = np.linalg.norm(x_prev_end[0:3] - x_stage3_start[0:3])
+    vel_diff = np.linalg.norm(x_prev_end[3:6] - x_stage3_start[3:6])
+    
+    print(f"Staging Continuity ({phase_name} -> Ship):")
+    print(f"  Position Jump: {pos_diff:.4e} m")
+    print(f"  Velocity Jump: {vel_diff:.4e} m/s")
+    
+    if pos_diff < 1e-3 and vel_diff < 1e-3:
+        print("  >>> SUCCESS: Kinematics are continuous across staging.")
+    else:
+        print("  >>> FAILURE: Discontinuity detected at staging!")
+
+    # 1.5 Booster Fuel Check (Did we burn structure?)
+    # In Phase 1/2, Mass = Booster Dry + Booster Prop + Ship Wet
+    m_ship_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+    m_booster_limit = config.stage_1.dry_mass + m_ship_wet
+    
+    m_prev_end = x_prev_end[6]
+    booster_margin = m_prev_end - m_booster_limit
+    
+    prop_1_total = config.stage_1.propellant_mass
+    unused_pct = (booster_margin / prop_1_total) * 100.0
+    
+    print(f"\nBooster Propellant Check:")
+    print(f"  Mass at Staging:     {m_prev_end:,.2f} kg")
+    print(f"  Booster Limit:       {m_booster_limit:,.2f} kg (Struct + Upper Stage)")
+    if booster_margin < -1e-3:
+        print(f"  >>> FAILURE: Booster used more fuel than available! Deficit: {abs(booster_margin):.2f} kg")
+    else:
+        print(f"  >>> SUCCESS: Booster has propellant remaining ({booster_margin:,.2f} kg).")
+        print(f"      Unused Propellant: {unused_pct:.2f}% (Discarded)")
+
+    # 2. Mass Drop Logic
+    m_stage3_start = x_stage3_start[6]
+    
+    # Expected: Mass resets to Ship Wet Mass (Stage 2 Dry + Prop + Payload)
+    
+    print(f"\nMass Logic:")
+    print(f"  Mass before staging: {m_prev_end:,.2f} kg")
+    print(f"  Mass after staging:  {m_stage3_start:,.2f} kg")
+    print(f"  Expected Ship Wet:   {m_ship_wet:,.2f} kg")
+    print(f"  Mass Dropped:        {m_prev_end - m_stage3_start:,.2f} kg")
+    
+    mass_err = abs(m_stage3_start - m_ship_wet)
+    if mass_err < 1e-3:
+        print("  >>> SUCCESS: Mass correctly reset to Ship Wet Mass.")
+    else:
+        print(f"  >>> FAILURE: Mass reset incorrect! Error: {mass_err:.2f} kg")
+
+    # 3. Objective Analysis (Fuel Minimization)
+    # We want to maximize final mass => minimize fuel used.
+    m_final = opt_res["X3"][6, -1]
+    m_dry_s2 = config.stage_2.dry_mass
+    m_payload = config.payload_mass
+    
+    fuel_remaining = m_final - (m_dry_s2 + m_payload)
+    
+    print(f"\nOptimization Objective (Max Final Mass):")
+    print(f"  Final Mass:      {m_final:,.2f} kg")
+    print(f"  Dry Structure:   {m_dry_s2:,.2f} kg")
+    print(f"  Payload:         {m_payload:,.2f} kg")
+    print(f"  Fuel Remaining:  {fuel_remaining:,.2f} kg")
+    
+    # Calculate Delta-V Capacity of the remaining fuel
+    # dV = ISP * g0 * ln(m_final / m_dry)
+    # Use configured g0 if available, else standard
+    g0 = environment.config.g0 if environment else 9.80665
+    
+    m_burnout = m_dry_s2 + m_payload
+    if m_final > m_burnout and m_burnout > 0:
+        dv_rem = config.stage_2.isp_vac * g0 * np.log(m_final / m_burnout)
+        print(f"  Delta-V Capacity: {dv_rem:.1f} m/s (Safety Margin)")
+    
+    if fuel_remaining < -1e-3:
+        print("  >>> WARNING: Negative fuel remaining! Mission infeasible.")
+    elif fuel_remaining < 1000:
+        print("  >>> NOTE: Fuel margins are very tight (<1t).")
+    else:
+        print("  >>> SUCCESS: Positive fuel margin. Optimizer found a valid solution.")
+
+    # 4. Phase Duration Sanity
+    t1 = opt_res.get("T1", 0.0)
+    t3 = opt_res.get("T3", 0.0)
+    print(f"\nPhase Durations:")
+    print(f"  Phase 1 (Boost): {t1:.2f} s")
+    print(f"  Phase 3 (Ship):  {t3:.2f} s")
+    if t1 < 10.0 or t3 < 10.0:
+        print("  >>> WARNING: Phase duration suspiciously short (<10s).")
+
+    print("="*40 + "\n")
+
 if __name__ == "__main__":
     from config import StarshipBlock2, EARTH_CONFIG
     from vehicle import Vehicle
@@ -1005,6 +1132,7 @@ if __name__ == "__main__":
     
     print("--- Running Optimization ---")
     opt_res = solve_optimal_trajectory(StarshipBlock2, veh, env)
+    verify_staging_and_objective(opt_res, StarshipBlock2, env)
     
     print("--- Running Verification Simulation ---")
     sim_res = run_simulation(opt_res, veh, StarshipBlock2)
