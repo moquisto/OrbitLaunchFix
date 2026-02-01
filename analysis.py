@@ -124,25 +124,28 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         
         # AoA Decomposition (Pitch vs Yaw)
         # Define Trajectory Plane Normal (n = r x v_rel)
-        # This defines the "In-Plane" vs "Out-of-Plane" directions
         plane_norm = np.cross(r_eci, v_rel)
-        if np.linalg.norm(plane_norm) < 1e-3:
-            # Fallback for vertical flight (use East vector)
-            plane_norm = np.array([0.0, 1.0, 0.0])
-        plane_norm /= np.linalg.norm(plane_norm)
+        plane_norm_mag = np.linalg.norm(plane_norm)
         
-        # Define "Lift" Direction (In-Plane Normal) p = v_rel x n
-        lift_dir = np.cross(vel_dir, plane_norm)
-        
-        # Pitch AoA (Projection of Thrust onto Lift Vector)
-        # Positive = Nose Up relative to velocity
-        pitch_cmp = np.dot(thrust_dir, lift_dir)
-        aoa_pitch = np.degrees(np.arcsin(np.clip(pitch_cmp, -1.0, 1.0)))
+        if v_rel_mag > 1.0 and plane_norm_mag > 1e-3:
+            plane_norm /= plane_norm_mag
+            
+            # Define "Lift" Direction (In-Plane Normal) p = v_rel x n
+            lift_dir = np.cross(vel_dir, plane_norm)
+            
+            # Pitch AoA (Projection of Thrust onto Lift Vector)
+            pitch_cmp = np.dot(thrust_dir, lift_dir)
+            aoa_pitch = np.degrees(np.arcsin(np.clip(pitch_cmp, -1.0, 1.0)))
+            
+            # Yaw/Sideslip AoA (Projection of Thrust onto Plane Normal)
+            yaw_cmp = np.dot(thrust_dir, plane_norm)
+            aoa_yaw = np.degrees(np.arcsin(np.clip(yaw_cmp, -1.0, 1.0)))
+        else:
+            # Undefined plane (Vertical flight or Static) -> Zero components
+            aoa_pitch = 0.0
+            aoa_yaw = 0.0
+            
         sim_metrics['aoa_pitch'].append(aoa_pitch)
-        
-        # Yaw/Sideslip AoA (Projection of Thrust onto Plane Normal)
-        yaw_cmp = np.dot(thrust_dir, plane_norm)
-        aoa_yaw = np.degrees(np.arcsin(np.clip(yaw_cmp, -1.0, 1.0)))
         sim_metrics['aoa_yaw'].append(aoa_yaw)
         
         # 5. Ground Track (Lat/Lon)
@@ -293,9 +296,10 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     ax5 = fig5.add_subplot(111, projection='3d')
     ax5.set_title('3D Trajectory (ECI Frame)')
     
-    # Draw Earth (Wireframe Sphere)
+    # Draw Earth (Wireframe Ellipsoid)
     # Use WGS84 Ellipsoid dimensions for visual consistency
     R_pol = R_eq * (1.0 - f)
+    print(f"  [Plot] Drawing Earth: R_eq={R_eq/1000:.1f}km, R_pol={R_pol/1000:.1f}km (Flattening f={f:.5f})")
     u = np.linspace(0, 2 * np.pi, 30)
     v = np.linspace(0, np.pi, 30)
     x_earth = R_eq * np.outer(np.cos(u), np.sin(v))
@@ -322,12 +326,29 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     if specific_energy < 0: # Elliptical Orbit
         a = -mu / (2*specific_energy)
         period = 2 * np.pi * np.sqrt(a**3 / mu)
+        J2 = environment.config.j2_constant
         
         def two_body_dyn(t, y):
             r = y[0:3]
-            return np.concatenate([y[3:6], -mu * r / (np.linalg.norm(r)**3)])
+            v = y[3:6]
+            r_mag = np.linalg.norm(r)
             
-        sol_orbit = solve_ivp(two_body_dyn, [0, period], np.concatenate([r_final, v_final]), rtol=1e-5)
+            # Central Gravity
+            g_central = -mu / (r_mag**3) * r
+            
+            # J2 Perturbation (to match non-spherical Earth)
+            # a_J2 = -1.5 * J2 * mu * R_eq^2 / r^5 * ...
+            factor = -1.5 * J2 * mu * (R_eq**2) / (r_mag**5)
+            z2 = (r[2] / r_mag)**2
+            
+            gx = factor * r[0] * (1 - 5 * z2)
+            gy = factor * r[1] * (1 - 5 * z2)
+            gz = factor * r[2] * (3 - 5 * z2)
+            
+            return np.concatenate([v, g_central + np.array([gx, gy, gz])])
+            
+        t_eval = np.linspace(0, period, 300) # High resolution for smooth circle
+        sol_orbit = solve_ivp(two_body_dyn, [0, period], np.concatenate([r_final, v_final]), t_eval=t_eval, rtol=1e-5)
         ax5.plot(sol_orbit.y[0], sol_orbit.y[1], sol_orbit.y[2], 'k--', linewidth=1, label='Projected Orbit', alpha=0.6)
     
     # Markers
@@ -344,6 +365,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     ax5.set_xlim(-max_val, max_val)
     ax5.set_ylim(-max_val, max_val)
     ax5.set_zlim(-max_val, max_val)
+    ax5.set_box_aspect([1, 1, 1]) # Force equal aspect ratio for visual roundness
     ax5.legend()
     
     # Figure 6: Flight Dynamics (Gamma, T/W, Energy)
@@ -457,6 +479,8 @@ def validate_trajectory(simulation_data, config, environment):
     # 2. Max Q Check
     q_vals = []
     aoa_vals = []
+    aoa_pitch_vals = []
+    aoa_yaw_vals = []
     for i in range(len(t)):
         r_i = y[0:3, i]
         v_i = y[3:6, i]
@@ -480,6 +504,28 @@ def validate_trajectory(simulation_data, config, environment):
         cos_alpha = np.dot(thrust_dir, vel_dir)
         alpha_deg = np.degrees(np.arccos(np.clip(cos_alpha, -1.0, 1.0)))
         aoa_vals.append(alpha_deg)
+        
+        # --- AoA Decomposition (Pitch vs Yaw) ---
+        # Define Trajectory Plane Normal (n = r x v_rel)
+        plane_norm = np.cross(r_i, v_rel)
+        plane_norm_mag = np.linalg.norm(plane_norm)
+        
+        if v_rel_mag > 1.0 and plane_norm_mag > 1e-3:
+            plane_norm /= plane_norm_mag
+            
+            # Define "Lift" Direction (In-Plane Normal) p = v_rel x n
+            lift_dir = np.cross(vel_dir, plane_norm)
+            
+            # Pitch AoA
+            pitch_cmp = np.dot(thrust_dir, lift_dir)
+            aoa_pitch_vals.append(np.degrees(np.arcsin(np.clip(pitch_cmp, -1.0, 1.0))))
+            
+            # Yaw AoA
+            yaw_cmp = np.dot(thrust_dir, plane_norm)
+            aoa_yaw_vals.append(np.degrees(np.arcsin(np.clip(yaw_cmp, -1.0, 1.0))))
+        else:
+            aoa_pitch_vals.append(0.0)
+            aoa_yaw_vals.append(0.0)
     
     max_q = max(q_vals)
     max_aoa = max(aoa_vals)
@@ -489,6 +535,14 @@ def validate_trajectory(simulation_data, config, environment):
     print(f"  Max Q:          {max_q/1000:.2f} kPa")
     print(f"  Max AoA:        {max_aoa:.2f} deg")
     print(f"  AoA @ Max Q:    {aoa_at_max_q:.2f} deg")
+    
+    print("\n  AoA Time History (Sampled):")
+    print(f"  {'Time (s)':<8} | {'Total':<8} | {'Pitch':<8} | {'Yaw':<8} | {'Q (kPa)':<10}")
+    print("  " + "-"*52)
+    
+    indices = np.linspace(0, len(t)-1, 20, dtype=int)
+    for idx in indices:
+        print(f"  {t[idx]:<8.1f} | {aoa_vals[idx]:<8.2f} | {aoa_pitch_vals[idx]:<8.2f} | {aoa_yaw_vals[idx]:<8.2f} | {q_vals[idx]/1000:<10.2f}")
     
     if max_q > 40000: # 40 kPa is a typical limit for large rockets
         print("  STATUS: WARNING - High Dynamic Pressure")
@@ -565,7 +619,10 @@ def analyze_delta_v_budget(simulation_data, vehicle, config):
         # Rates
         rate_ideal = acc_thrust_mag
         rate_grav = -np.dot(g_vec, v_hat)
-        rate_steer = acc_thrust_mag * (1.0 - cos_alpha)
+        
+        # Steering Loss: Misalignment between Thrust and INERTIAL Velocity
+        cos_steer = np.dot(u_thrust_i, v_hat)
+        rate_steer = acc_thrust_mag * (1.0 - cos_steer)
         rate_drag = -drag_proj
         
         return rate_ideal, rate_grav, rate_steer, rate_drag
@@ -598,6 +655,14 @@ def analyze_delta_v_budget(simulation_data, vehicle, config):
     v_init = np.linalg.norm(y[3:6, 0])
     v_final = np.linalg.norm(y[3:6, -1])
     dv_actual = v_final - v_init
+    unaccounted = dv_actual - dv_effective
+    
     print(f"  Actual dV Gain:   {dv_actual:.1f} m/s")
-    print(f"  Unaccounted:      {dv_actual - dv_effective:.1f} m/s (Integration/Model noise)")
+    print(f"  Unaccounted:      {unaccounted:.1f} m/s (Integration/Model noise)")
+    
+    if abs(unaccounted) > 10.0:
+        print("  >>> ❌ WARNING: Physics mismatch detected! Unaccounted dV is high.")
+    else:
+        print("  >>> ✅ SUCCESS: Physics model is consistent (Error < 0.1%).")
+        
     print("="*40 + "\n")

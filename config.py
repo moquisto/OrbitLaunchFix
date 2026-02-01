@@ -58,10 +58,10 @@ class EnvConfig:
     atmosphere_step: float = 10.0               # [m] Lookup table resolution (Standard for stability)
     atmosphere_max_alt: float = 1_000_000.0       # [m] Atmosphere cutoff altitude
     
-    # --- Launch Site (Cape Canaveral) ---
-    launch_latitude: float = 28.5721              # [deg]
-    launch_longitude: float = -80.6480            # [deg]
-    launch_altitude: float = 10.0                  # [m]
+    # --- Launch Site
+    launch_latitude: float = 25.997               # [deg] Starbase, TX
+    launch_longitude: float = -97.157             # [deg]
+    launch_altitude: float = 5.0                  # [m]
 
     # --- Physical Constants ---
     # [m/s^2] Standard Gravity. Used ONLY for converting ISP (s) to Exhaust Velocity (m/s).
