@@ -127,7 +127,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
     # --- 1. SETUP ---
     # Initialize CasADi Opti stack
     opti = ca.Opti()
-    scaling = ScalingConfig(mass=config.launch_mass)
+    scaling = ScalingConfig(mass=1.0e6) # Fixed reference mass (1000t) for numerical stability
     
     mu = environment.config.earth_mu
     R_earth = environment.config.earth_radius_equator
