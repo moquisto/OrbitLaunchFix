@@ -380,12 +380,16 @@ def analyze_delta_v_budget(simulation_data, vehicle, config):
         # Determine Phase (Heuristic for Drag/Thrust calc)
         m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
         
-        if throttle < 0.01:
-            mode = "coast"
-        elif m > m_stg2_wet + 1000.0: # Buffer
-            mode = "boost"
-        else:
-            mode = "ship"
+        if m > m_stg2_wet + 1000.0: # Buffer (Stage 1 Attached)
+            if throttle < 0.01:
+                mode = "coast"
+            else:
+                mode = "boost"
+        else: # Stage 2 Only
+            if throttle < 0.01:
+                mode = "coast_2"
+            else:
+                mode = "ship"
             
         # Get Dynamics (Forces)
         # We call vehicle dynamics to ensure consistency with physics engine

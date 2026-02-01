@@ -16,25 +16,55 @@ class Vehicle:
         # Create lookup functions. 'linear' is robust for optimization.
         self.cd_interp_stage_1 = ca.interpolant('cd1', 'linear', [data_s1[:, 0]], data_s1[:, 1])
         self.cd_interp_stage_2 = ca.interpolant('cd2', 'linear', [data_s2[:, 0]], data_s2[:, 1])
+        
+        # 2. COMPILE NUMERIC FUNCTIONS (Ensures 1:1 Parity with Optimizer)
+        self._compile_numeric_dynamics()
+
+    def _compile_numeric_dynamics(self):
+        """Compiles CasADi graphs into callable functions for the simulation."""
+        x = ca.MX.sym('x', 7)
+        u_th = ca.MX.sym('u_th', 1)
+        u_dir = ca.MX.sym('u_dir', 3)
+        t = ca.MX.sym('t', 1)
+        
+        # Compile a function for each distinct flight phase
+        # Scaling is None because simulation runs in physical units
+        dyn_boost = self._get_dynamics_core(x, u_th, u_dir, t, "boost", None)
+        self.sim_dyn_boost = ca.Function('sim_dyn_boost', [x, u_th, u_dir, t], [dyn_boost])
+        
+        dyn_coast_1 = self._get_dynamics_core(x, u_th, u_dir, t, "coast", None)
+        self.sim_dyn_coast_1 = ca.Function('sim_dyn_coast_1', [x, u_th, u_dir, t], [dyn_coast_1])
+        
+        dyn_coast_2 = self._get_dynamics_core(x, u_th, u_dir, t, "coast_2", None)
+        self.sim_dyn_coast_2 = ca.Function('sim_dyn_coast_2', [x, u_th, u_dir, t], [dyn_coast_2])
+        
+        dyn_ship = self._get_dynamics_core(x, u_th, u_dir, t, "ship", None)
+        self.sim_dyn_ship = ca.Function('sim_dyn_ship', [x, u_th, u_dir, t], [dyn_ship])
 
     def get_dynamics(self, state, throttle, thrust_direction, time, stage_mode="boost", scaling=None):
-        # Purpose: Calculate derivatives [dr, dv, dm]. Handles Symbolic (CasADi) & Numeric (NumPy).
-
-        # 0. DISPATCH: SYMBOLIC VS NUMERIC
+        # Purpose: Public interface. Dispatches to Symbolic Core or Compiled Numeric Function.
         is_symbolic = isinstance(state, (ca.MX, ca.SX, ca.DM))
+        
         if is_symbolic:
-            norm, dot, cross = ca.norm_2, ca.dot, ca.cross
-            fmax, fmin, if_else = ca.fmax, ca.fmin, ca.if_else
+            # Build the Symbolic Graph (for Optimizer)
+            return self._get_dynamics_core(state, throttle, thrust_direction, time, stage_mode, scaling)
         else:
-            norm, dot, cross = np.linalg.norm, np.dot, np.cross
-            fmax, fmin = max, min
-            if_else = np.where
-            # Ensure inputs are numpy arrays for numeric operations
-            state = np.array(state)
-            thrust_direction = np.array(thrust_direction)
+            # Call Compiled Function (for Simulation) - Guarantees Bit-Exactness
+            if "boost" in stage_mode:
+                res = self.sim_dyn_boost(state, throttle, thrust_direction, time)
+            elif "coast_2" in stage_mode:
+                res = self.sim_dyn_coast_2(state, throttle, thrust_direction, time)
+            elif "coast" in stage_mode:
+                res = self.sim_dyn_coast_1(state, throttle, thrust_direction, time)
+            else:
+                res = self.sim_dyn_ship(state, throttle, thrust_direction, time)
+            
+            return np.array(res).flatten()
 
+    def _get_dynamics_core(self, state, throttle, thrust_direction, time, stage_mode, scaling):
+        # Internal Physics Logic - Defined ONCE using CasADi operations.
+        
         # 1. SETUP & UNSCALING
-        # Convert solver variables to physical units.
         if scaling:
             r_phys = state[0:3] * scaling.length
             v_phys = state[3:6] * scaling.speed
@@ -44,54 +74,30 @@ class Vehicle:
             r_phys, v_phys, m_phys, t_phys = state[0:3], state[3:6], state[6], time
 
         # 2. ENVIRONMENT LOOKUP
-        # Dispatch to correct environment method.
-        if is_symbolic:
-            env_state = self.env.get_state_opti(r_phys, t_phys)
-        else:
-            env_state = self.env.get_state_sim(r_phys, t_phys)
+        # Always use the symbolic lookup (which compiles to numeric in _compile_numeric_dynamics)
+        env_state = self.env.get_state_opti(r_phys, t_phys)
 
         # 3. AERODYNAMICS
         # Relative Velocity
         v_rel = v_phys - env_state['wind_velocity']
-        if is_symbolic:
-            v_rel_sq = dot(v_rel, v_rel)
-            # v_rel_mag: Used for physics (Q, Mach) and normalization.
-            v_rel_mag = ca.sqrt(fmax(v_rel_sq, 1.0e-12))
-        else:
-            v_rel_mag = norm(v_rel)
+        
+        v_rel_sq = ca.dot(v_rel, v_rel)
+        v_rel_mag = ca.sqrt(ca.fmax(v_rel_sq, 1.0e-12))
 
         # Mach Number (Singularity Protection)
-        # Clamp Speed of Sound to >= 1.0 m/s to avoid div/0 in vacuum.
-        sos_safe = fmax(env_state['speed_of_sound'], 1.0)
+        sos_safe = ca.fmax(env_state['speed_of_sound'], 1.0)
         mach = v_rel_mag / sos_safe
 
         # Dynamic Pressure
         q = 0.5 * env_state['density'] * v_rel_mag**2
 
         # Control Vector
-        # Handle zero-thrust case (Coast) to avoid zero-vector in u_control.
-        if is_symbolic:
-            thrust_sq = dot(thrust_direction, thrust_direction)
-            thrust_mag = ca.sqrt(fmax(thrust_sq, 1.0e-12))
-            # Smooth normalization: Transitions from 0 to Unit Vector smoothly.
-            u_control = thrust_direction / thrust_mag
-        else:
-            thrust_mag = norm(thrust_direction)
-            safe_denom = if_else(thrust_mag > 1e-9, thrust_mag, 1.0)
-            u_control = thrust_direction / safe_denom
+        thrust_sq = ca.dot(thrust_direction, thrust_direction)
+        thrust_mag = ca.sqrt(ca.fmax(thrust_sq, 1.0e-12))
+        u_control = thrust_direction / thrust_mag
 
         # Angle of Attack (AoA) Logic
-        if is_symbolic:
-            # SINGULARITY FIX (Smooth):
-            # Replaced if_else with smooth normalization to ensure continuous derivatives.
-            # v_rel_mag is calculated as sqrt(v^2 + 1e-6), so it never hits zero.
-            # u_vel approaches 0 vector as v -> 0, and Unit vector as v -> infinity.
-            u_vel = v_rel / v_rel_mag
-        else:
-            if v_rel_mag > 1e-9:
-                u_vel = v_rel / (v_rel_mag + 1e-9)
-            else:
-                u_vel = np.zeros(3)
+        u_vel = v_rel / v_rel_mag
 
         # Thrust Orientation
         # Coast Phase: Assume Prograde (u_vel) to minimize drag.
@@ -101,8 +107,8 @@ class Vehicle:
             u_thrust = u_control
 
         # Crossflow Drag (sin^2(alpha))
-        cross_prod = cross(u_thrust, u_vel)
-        sin_alpha_sq = dot(cross_prod, cross_prod)
+        cross_prod = ca.cross(u_thrust, u_vel)
+        sin_alpha_sq = ca.dot(cross_prod, cross_prod)
 
         # Drag Force Calculation
         # Explicitly handle stage modes to allow coasting on either stage.
@@ -115,11 +121,8 @@ class Vehicle:
 
         # Lookup Cd (Clamp Mach to table limit to avoid extrapolation errors)
         max_mach = stage_cfg.aero.mach_cd_table[-1, 0]
-        mach_clamped = fmin(mach, max_mach)
+        mach_clamped = ca.fmin(mach, max_mach)
         cd_base = cd_curve(mach_clamped)
-        # Ensure CasADi DM objects are cast to float in numeric mode.
-        if not is_symbolic: 
-            cd_base = float(cd_base) 
 
         cd_total = cd_base + stage_cfg.aero.cd_crossflow_factor * sin_alpha_sq
         f_drag = -q * stage_cfg.aero.reference_area * cd_total * u_vel
@@ -146,15 +149,9 @@ class Vehicle:
             dr_dtau = v_phys     * (scaling.time / scaling.length)
             dv_dtau = acc_phys   * (scaling.time / scaling.speed)
             dm_dtau = dm_dt_phys * (scaling.time / scaling.mass)
-            if is_symbolic:
-                return ca.vertcat(dr_dtau, dv_dtau, dm_dtau)
-            else:
-                return np.concatenate([dr_dtau, dv_dtau, [dm_dtau]])
+            return ca.vertcat(dr_dtau, dv_dtau, dm_dtau)
         else:
-            if is_symbolic:
-                return ca.vertcat(v_phys, acc_phys, dm_dt_phys)
-            else:
-                return np.concatenate([v_phys, acc_phys, [dm_dt_phys]])
+            return ca.vertcat(v_phys, acc_phys, dm_dt_phys)
 
     def get_aero_properties(self, state, u_control_vec, time, stage_mode="boost", scaling=None):
         # 0. DISPATCH: SYMBOLIC VS NUMERIC
@@ -162,9 +159,11 @@ class Vehicle:
         if is_symbolic:
             norm, dot = ca.norm_2, ca.dot
             if_else = ca.if_else
+            fmax = ca.fmax
         else:
             norm, dot = np.linalg.norm, np.dot
             if_else = np.where
+            fmax = np.maximum
             state = np.array(state); u_control_vec = np.array(u_control_vec)
 
         # 1. SETUP & UNSCALING
@@ -183,22 +182,34 @@ class Vehicle:
 
         # 3. AERODYNAMICS
         v_rel = v_phys - env_state['wind_velocity']
-        v_rel_mag = norm(v_rel)
-        q = 0.5 * env_state['density'] * v_rel_mag**2
+        
+        # MATCH SYMBOLIC EXACTLY: Use sqrt(dot) and max clamping
+        if is_symbolic:
+            v_rel_sq = dot(v_rel, v_rel)
+            v_rel_mag = ca.sqrt(fmax(v_rel_sq, 1.0e-12))
+        else:
+            v_rel_sq = dot(v_rel, v_rel)
+            v_rel_mag = np.sqrt(fmax(v_rel_sq, 1.0e-12))
+            
+        # Use max to avoid zero in q calculation if needed, though less critical here
+        q = 0.5 * env_state['density'] * (v_rel_mag**2)
 
         # 4. ANGLE OF ATTACK
-        thrust_mag = norm(u_control_vec)
-        safe_denom = if_else(thrust_mag > 1e-9, thrust_mag, 1.0)
-        u_thrust = u_control_vec / safe_denom
+        # MATCH SYMBOLIC EXACTLY
+        if is_symbolic:
+            thrust_sq = dot(u_control_vec, u_control_vec)
+            thrust_mag = ca.sqrt(fmax(thrust_sq, 1.0e-12))
+            u_thrust = u_control_vec / thrust_mag
+        else:
+            thrust_sq = dot(u_control_vec, u_control_vec)
+            thrust_mag = np.sqrt(fmax(thrust_sq, 1.0e-12))
+            u_thrust = u_control_vec / thrust_mag
         
         # Velocity Direction (Singularity Check)
         if is_symbolic:
-            u_vel = if_else(v_rel_mag > 0.1, v_rel / (v_rel_mag + 1e-9), u_thrust)
+            u_vel = v_rel / v_rel_mag
         else:
-            if v_rel_mag > 0.1:
-                u_vel = v_rel / (v_rel_mag + 1e-9)
-            else:
-                u_vel = u_thrust
+            u_vel = v_rel / v_rel_mag
 
         if "coast" in stage_mode:
             cos_alpha = 1.0
