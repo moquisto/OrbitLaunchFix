@@ -367,53 +367,107 @@ def verify_physics_consistency(vehicle, config):
     print("DEBUG: PHYSICS ENGINE CONSISTENCY CHECK")
     print("="*40)
     
-    # 1. Define Test State (Mach ~1.5, 10km alt, Pitch 45 deg)
-    # Use a state that exercises all forces: Gravity, Drag, Thrust
     R_e = vehicle.env.config.earth_radius_equator
-    r_test = np.array([R_e + 10000.0, 0, 0]) # 10km Alt
-    v_test = np.array([0, 300.0, 300.0]) # ~424 m/s, 45 deg flight path
-    m_test = config.launch_mass * 0.8
     
-    # Control Inputs
-    throttle_test = 1.0
-    u_dir_test = np.array([0, 0.70710678, 0.70710678]) # 45 deg pitch
-    t_test = 100.0
-    
-    # 2. Run Numeric (Simulation Mode)
-    state_num = np.concatenate([r_test, v_test, [m_test]])
-    dyn_sim = vehicle.get_dynamics(
-        state_num, throttle_test, u_dir_test, t_test, stage_mode="boost", scaling=None
-    )
-    
-    # 3. Run Symbolic (Optimizer Mode)
-    # We must construct a CasADi function to evaluate the symbolic graph
+    # Define Test Scenarios covering edge cases
+    scenarios = [
+        {
+            "name": "Launch Pad (Static)",
+            "r": [R_e, 0, 0],
+            "v": [0, 0, 0],          # Singularity check (v=0)
+            "m": config.launch_mass,
+            "th": 1.0,
+            "dir": [1, 0, 0],
+            "t": 0.0,
+            "mode": "boost"
+        },
+        {
+            "name": "Max Q (Transonic)",
+            "r": [R_e + 12000.0, 0, 0],
+            "v": [0, 300.0, 300.0],  # High Drag
+            "m": config.launch_mass * 0.8,
+            "th": 1.0,
+            "dir": [0, 0.707, 0.707],
+            "t": 60.0,
+            "mode": "boost"
+        },
+        {
+            "name": "Coast (Staging)",
+            "r": [R_e + 80000.0, 0, 0],
+            "v": [0, 2000.0, 1000.0],
+            "m": config.launch_mass * 0.4,
+            "th": 0.0,               # Zero Throttle check
+            "dir": [0, 1, 0],
+            "t": 150.0,
+            "mode": "coast"
+        },
+        {
+            "name": "Ship (Vacuum)",
+            "r": [R_e + 400000.0, 0, 0],
+            "v": [0, 7500.0, 0.0],   # Orbital Velocity
+            "m": config.stage_2.dry_mass + config.stage_2.propellant_mass,
+            "th": 1.0,
+            "dir": [0, 1, 0],
+            "t": 500.0,
+            "mode": "ship"           # Stage 2 Parameters
+        }
+    ]
+
+    # Symbolic placeholders
     x_sym = ca.MX.sym('x', 7)
     u_th_sym = ca.MX.sym('th', 1)
     u_dir_sym = ca.MX.sym('dir', 3)
     t_sym = ca.MX.sym('t', 1)
     
-    dyn_sym = vehicle.get_dynamics(x_sym, u_th_sym, u_dir_sym, t_sym, stage_mode="boost", scaling=None)
-    f_dyn = ca.Function('f_dyn', [x_sym, u_th_sym, u_dir_sym, t_sym], [dyn_sym])
-    
-    # Evaluate with numeric inputs
-    res_sym = np.array(f_dyn(state_num, throttle_test, u_dir_test, t_test)).flatten()
-    
-    # 4. Compare Results
-    labels = ['vx', 'vy', 'vz', 'ax', 'ay', 'az', 'mdot']
-    has_error = False
-    
-    print(f"{'Variable':<10} | {'Simulation':<12} | {'Optimizer':<12} | {'Diff':<10}")
+    overall_success = True
+
+    print(f"{'Scenario':<25} | {'Max Diff':<12} | {'Status':<10}")
     print("-" * 55)
-    
-    for i, label in enumerate(labels):
-        diff = abs(dyn_sim[i] - res_sym[i])
-        if diff > 1e-7: has_error = True
-        print(f"{label:<10} | {dyn_sim[i]:12.4f} | {res_sym[i]:12.4f} | {diff:.2e}")
+
+    for case in scenarios:
+        # 1. Inputs
+        r_test = np.array(case['r'])
+        v_test = np.array(case['v'])
+        m_test = case['m']
+        state_num = np.concatenate([r_test, v_test, [m_test]])
         
-    if has_error:
-        print("\n>>> CRITICAL WARNING: Physics engines disagree! Check vehicle.py logic.")
+        th_test = case['th']
+        dir_test = np.array(case['dir'])
+        t_test = case['t']
+        mode = case['mode']
+        
+        # 2. Run Numeric (Simulation Mode)
+        dyn_sim = vehicle.get_dynamics(
+            state_num, th_test, dir_test, t_test, stage_mode=mode, scaling=None
+        )
+        
+        # 3. Run Symbolic (Optimizer Mode)
+        # Re-build graph for specific mode (drag area changes etc)
+        dyn_sym_expr = vehicle.get_dynamics(x_sym, u_th_sym, u_dir_sym, t_sym, stage_mode=mode, scaling=None)
+        f_dyn = ca.Function('f_dyn', [x_sym, u_th_sym, u_dir_sym, t_sym], [dyn_sym_expr])
+        res_sym = np.array(f_dyn(state_num, th_test, dir_test, t_test)).flatten()
+        
+        # 4. Compare
+        max_diff = np.max(np.abs(dyn_sim - res_sym))
+        
+        status = "PASS"
+        if max_diff > 1e-9:
+            status = "FAIL"
+            overall_success = False
+            
+        print(f"{case['name']:<25} | {max_diff:.2e}     | {status:<10}")
+        
+        if status == "FAIL":
+            labels = ['vx', 'vy', 'vz', 'ax', 'ay', 'az', 'mdot']
+            for i, label in enumerate(labels):
+                d = abs(dyn_sim[i] - res_sym[i])
+                if d > 1e-9:
+                    print(f"    ! {label}: Sim={dyn_sim[i]:.4e} Opt={res_sym[i]:.4e}")
+
+    if overall_success:
+        print("\n>>> SUCCESS: Physics engines are consistent across all regimes.")
     else:
-        print("\n>>> SUCCESS: Physics engines are consistent.")
+        print("\n>>> CRITICAL WARNING: Physics engines disagree!")
     print("="*40 + "\n")
 
 def verify_environment_consistency(vehicle):
@@ -425,12 +479,13 @@ def verify_environment_consistency(vehicle):
     print("DEBUG: ENVIRONMENT MODEL CONSISTENCY CHECK")
     print("="*40)
     
-    # Test points: Surface, Max Q (~12km), Space (~200km)
+    # Test points: Surface, Max Q (~12km), Space (~200km), High Lat
     R_e = vehicle.env.config.earth_radius_equator
     test_points = [
-        ("Surface", 0.0),
-        ("Max Q", 12000.0),
-        ("Space", 200000.0)
+        ("Surface Eq", 0.0, 0.0),
+        ("Max Q Eq", 12000.0, 0.0),
+        ("Space Eq", 200000.0, 0.0),
+        ("Mid Lat", 0.0, 45.0)
     ]
     
     # Construct CasADi Function for Symbolic Evaluation
@@ -446,12 +501,17 @@ def verify_environment_consistency(vehicle):
                              env_sym['gravity'],
                              env_sym['wind_velocity']])
     
-    print(f"{'Location':<10} | {'Var':<8} | {'Simulation':<12} | {'Optimizer':<12} | {'Diff':<10}")
-    print("-" * 65)
+    print(f"{'Location':<15} | {'Var':<8} | {'Simulation':<12} | {'Optimizer':<12} | {'Diff':<10}")
+    print("-" * 70)
     
-    for name, alt in test_points:
-        # Position vector (Equatorial)
-        r_test = np.array([R_e + alt, 0, 0])
+    for name, alt, lat in test_points:
+        # Position vector
+        lat_rad = np.radians(lat)
+        r_test = np.array([
+            (R_e + alt) * np.cos(lat_rad), 
+            0, 
+            (R_e + alt) * np.sin(lat_rad)
+        ])
         t_test = 0.0
         
         # 1. Run Numeric (Simulation Mode)
@@ -468,24 +528,24 @@ def verify_environment_consistency(vehicle):
         # 3. Compare
         # Density
         diff_rho = abs(env_sim['density'] - rho_opt)
-        print(f"{name:<10} | {'rho':<8} | {env_sim['density']:<12.4e} | {rho_opt:<12.4e} | {diff_rho:.2e}")
+        print(f"{name:<15} | {'rho':<8} | {env_sim['density']:<12.4e} | {rho_opt:<12.4e} | {diff_rho:.2e}")
         
         # Pressure
         diff_p = abs(env_sim['pressure'] - p_opt)
-        print(f"{'':<10} | {'p':<8} | {env_sim['pressure']:<12.4e} | {p_opt:<12.4e} | {diff_p:.2e}")
+        print(f"{'':<15} | {'p':<8} | {env_sim['pressure']:<12.4e} | {p_opt:<12.4e} | {diff_p:.2e}")
         
         # Gravity Magnitude
         g_sim_mag = np.linalg.norm(env_sim['gravity'])
         g_opt_mag = np.linalg.norm(g_opt)
         diff_g = abs(g_sim_mag - g_opt_mag)
-        print(f"{'':<10} | {'g_mag':<8} | {g_sim_mag:<12.4f} | {g_opt_mag:<12.4f} | {diff_g:.2e}")
+        print(f"{'':<15} | {'g_mag':<8} | {g_sim_mag:<12.4f} | {g_opt_mag:<12.4f} | {diff_g:.2e}")
         
         # Wind Velocity Magnitude
         w_sim_mag = np.linalg.norm(env_sim['wind_velocity'])
         w_opt_mag = np.linalg.norm(w_opt)
         diff_w = abs(w_sim_mag - w_opt_mag)
-        print(f"{'':<10} | {'w_mag':<8} | {w_sim_mag:<12.4f} | {w_opt_mag:<12.4f} | {diff_w:.2e}")
-        print("-" * 65)
+        print(f"{'':<15} | {'w_mag':<8} | {w_sim_mag:<12.4f} | {w_opt_mag:<12.4f} | {diff_w:.2e}")
+        print("-" * 70)
 
     print("="*40 + "\n")
 
