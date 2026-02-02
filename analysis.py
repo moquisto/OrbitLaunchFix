@@ -84,8 +84,14 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         
         # 2. Altitude (Geodetic Approx)
         r_mag = np.linalg.norm(r_eci)
-        sin_lat_gc = r_eci[2] / r_mag
-        R_local = R_eq * (1.0 - f * sin_lat_gc**2)
+        # Exact WGS84 Ellipsoid Radius (matching environment.py)
+        # R(phi') = sqrt( (Req^2 cos)^2 + (Rpol^2 sin)^2 ) / sqrt( (Req cos)^2 + (Rpol sin)^2 )
+        # Simplified for geocentric coords (x,y,z):
+        R_pol = R_eq * (1.0 - f)
+        rho_sq = r_eci[0]**2 + r_eci[1]**2
+        z_sq = r_eci[2]**2
+        denom = np.sqrt( (R_pol**2) * rho_sq + (R_eq**2) * z_sq )
+        R_local = (R_eq * R_pol * r_mag) / denom
         alt = r_mag - R_local
         sim_metrics['alt'].append(alt)
         
@@ -207,8 +213,14 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     # Altitude
     r_opt = x_opt[0:3, :]
     r_opt_mag = np.linalg.norm(r_opt, axis=0)
-    sin_lat_opt = r_opt[2, :] / (r_opt_mag + 1e-6)
-    R_local_opt = R_eq * (1.0 - f * sin_lat_opt**2)
+    
+    # Exact WGS84 Radius for Optimizer Plot
+    R_pol = R_eq * (1.0 - f)
+    rho_sq_opt = r_opt[0, :]**2 + r_opt[1, :]**2
+    z_sq_opt = r_opt[2, :]**2
+    denom_opt = np.sqrt( (R_pol**2) * rho_sq_opt + (R_eq**2) * z_sq_opt )
+    R_local_opt = (R_eq * R_pol * r_opt_mag) / denom_opt
+    
     alt_opt = r_opt_mag - R_local_opt
     axs1[0].plot(t_opt, alt_opt / 1000.0, 'k--', label='Optimizer', alpha=0.7)
     axs1[0].plot(t_sim, np.array(sim_metrics['alt']) / 1000.0, 'b-', label='Simulation')
@@ -431,8 +443,12 @@ def validate_trajectory(simulation_data, config, environment):
     # Altitude
     R_eq = environment.config.earth_radius_equator
     f = environment.config.earth_flattening
-    sin_lat = r_final[2] / r_mag
-    R_local = R_eq * (1.0 - f * sin_lat**2)
+    R_pol = R_eq * (1.0 - f)
+    
+    rho_sq = r_final[0]**2 + r_final[1]**2
+    z_sq = r_final[2]**2
+    denom = np.sqrt( (R_pol**2) * rho_sq + (R_eq**2) * z_sq )
+    R_local = (R_eq * R_pol * r_mag) / denom
     alt_final = r_mag - R_local
     
     # Orbit Elements
