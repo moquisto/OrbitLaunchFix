@@ -340,38 +340,23 @@ if __name__ == "__main__":
     from simulation import run_simulation
     import analysis
     
-    print("--- Setting up Mission ---")
+    print(f"\n\033[1m--- Setting up Mission ---\033[0m")
     StarshipBlock2.print_summary()
     env = Environment(EARTH_CONFIG)
     veh = Vehicle(StarshipBlock2, env)
     
-    print("--- Verifying Physics Model ---")
-    debug.verify_scaling_consistency(StarshipBlock2)
-    debug.verify_physics_consistency(veh, StarshipBlock2)
-    debug.verify_aerodynamics(veh)
-    debug.verify_propulsion(veh)
-    debug.verify_positioning(veh)
-    debug.verify_environment_consistency(veh)
+    print(f"\033[1m--- Verifying Physics Model ---\033[0m")
+    debug.run_preflight_checks(veh, StarshipBlock2)
     
-    print("--- Running Optimization ---")
+    print(f"\033[1m--- Running Optimization ---\033[0m")
     opt_res = solve_optimal_trajectory(StarshipBlock2, veh, env)
-    debug.verify_staging_and_objective(opt_res, StarshipBlock2, env)
+    debug.run_optimization_analysis(opt_res, StarshipBlock2, env)
     
-    print("--- Running Verification Simulation ---")
+    print(f"\033[1m--- Running Verification Simulation ---\033[0m")
     sim_res = run_simulation(opt_res, veh, StarshipBlock2)
     
-    print("--- Validating Trajectory ---")
-    debug.validate_trajectory(sim_res, StarshipBlock2, env)
+    debug.run_postflight_analysis(sim_res, opt_res, veh, env)
     
-    print("--- Analyzing Efficiency ---")
-    debug.analyze_delta_v_budget(sim_res, veh, StarshipBlock2)
-    debug.analyze_control_slew_rates(sim_res)
-    debug.analyze_energy_balance(sim_res, veh)
-    debug.analyze_instantaneous_orbit(sim_res, env)
-    debug.analyze_trajectory_drift(opt_res, sim_res)
-    debug.analyze_integrator_steps(sim_res)
-    debug.analyze_control_saturation(sim_res, StarshipBlock2)
-    
-    print("--- Plotting Results ---")
+    print(f"\033[1m--- Plotting Results ---\033[0m")
     analysis.plot_mission(opt_res, sim_res, env, StarshipBlock2)
     print("Done.")
