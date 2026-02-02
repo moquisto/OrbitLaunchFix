@@ -280,7 +280,8 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     # Visualize Forbidden Region
     if config:
         min_th = config.sequence.min_throttle
-        axs3[0].axhspan(0.0, min_th, color='red', alpha=0.1, label='Forbidden')
+        if min_th > 0.0:
+            axs3[0].axhspan(0.0, min_th, color='red', alpha=0.2, label='Forbidden')
         
     axs3[0].set_title('Engine Throttle')
     axs3[0].set_ylim(-0.1, 1.1)

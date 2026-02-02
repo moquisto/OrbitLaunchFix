@@ -353,9 +353,9 @@ def solve_optimal_trajectory(config, vehicle, environment):
     set_guess(U3, u3_guess[:, :N])
     
     # --- 6. SOLVE ---
-    print(f"[Optimizer] Starting IPOPT solver (Max Iter={2000})...")
+    print(f"[Optimizer] Starting IPOPT solver (Max Iter={config.max_iter})...")
     t_solve = time.time()
-    opti.solver("ipopt", {"expand": True}, {"max_iter": 2000, "tol": 1e-6, "print_level": 5})
+    opti.solver("ipopt", {"expand": True}, {"max_iter": config.max_iter, "tol": 1e-6, "print_level": 5})
     
     try:
         sol = opti.solve()

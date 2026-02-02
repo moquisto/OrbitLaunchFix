@@ -128,7 +128,8 @@ class TwoStageRocketConfig:
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
     target_inclination: Optional[float] = None   # [deg] Target Inclination. If None, defaults to Launch Latitude (Min Energy).
-    num_nodes: int = 170  # Number of discretization nodes per phase
+    num_nodes: int = 180  # Number of discretization nodes per phase
+    max_iter: int = 2000  # Maximum number of iterations for the optimizer
     
     @property
     def launch_mass(self) -> float:
