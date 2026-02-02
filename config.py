@@ -77,6 +77,15 @@ class SequenceConfig:
     upper_engine_ramp_time: float  # [s] Time to ramp up Ship engines
     separation_delay: float        # [s] Coast time between staging
     min_throttle: float            # [-] Minimum throttle capability (0.0 to 1.0)
+    
+    # Optimization Constraints
+    min_stage_1_burn: float = 60.0 # [s] Minimum burn time for Stage 1
+    min_stage_2_burn: float = 10.0 # [s] Minimum burn time for Stage 2
+    
+    # Guidance Heuristics (Open Loop Pitch)
+    pitch_start_time: float = 10.0 # [s] Time to start pitch maneuver
+    pitch_end_time: float = 25.0   # [s] Time to end pitch maneuver
+    pitch_gain: float = 0.1        # [-] Magnitude of pitch nudge
 
 @dataclass
 class AerodynamicConfig:
@@ -128,8 +137,13 @@ class TwoStageRocketConfig:
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
     target_inclination: Optional[float] = None   # [deg] Target Inclination. If None, defaults to Launch Latitude (Min Energy).
-    num_nodes: int = 180  # Number of discretization nodes per phase
+    num_nodes: int = 150  # Number of discretization nodes per phase
     max_iter: int = 2000  # Maximum number of iterations for the optimizer
+    
+    # Structural Limits
+    max_q_limit: float = 40000.0   # [Pa] Maximum Dynamic Pressure
+    max_g_load: float = 4.0        # [g] Maximum Acceleration
+    max_q_opt_margin: float = 0.99 # [-] Safety margin for optimizer (1.0 = exact limit)
     
     @property
     def launch_mass(self) -> float:
@@ -168,12 +182,22 @@ StarshipBlock2 = TwoStageRocketConfig(
     payload_mass=0.0, # Payload to Orbit
     target_altitude=420000.0,
     target_inclination=None, # Auto-resolve to Min Energy (Latitude)
+    
+    # Structural Limits
+    max_q_limit=35000.0, # 35 kPa
+    max_g_load=4.0,      # 4.0 g
+    max_q_opt_margin=0.99, # 1% buffer for discretization noise
 
     sequence=SequenceConfig(
         main_engine_ramp_time=3.0,     
         upper_engine_ramp_time=2.0,    
         separation_delay=0.0,          # Hot Staging (0s delay)
-        min_throttle=0.40              # 40% Minimum Throttle
+        min_throttle=0.40,             # 40% Minimum Throttle
+        min_stage_1_burn=60.0,
+        min_stage_2_burn=10.0,
+        pitch_start_time=10.0,
+        pitch_end_time=25.0,
+        pitch_gain=0.1
     ),
     
     stage_1=StageConfig(

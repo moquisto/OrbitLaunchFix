@@ -60,14 +60,14 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
         direction = u_vertical # Default
         
         if phase == "boost":
-            if t < 10.0:
+            if t < mission_config.sequence.pitch_start_time:
                 # Vertical Rise (Clear the tower)
                 direction = u_vertical
-            elif 10.0 <= t < 25.0:
+            elif mission_config.sequence.pitch_start_time <= t < mission_config.sequence.pitch_end_time:
                 # Pitch Over Maneuver (Initiate turn)
                 # Nudge thrust vector slightly towards East (Dynamic).
-                # 0.1 is a heuristic gain for the pitch maneuver
-                v_pitch = u_vertical + 0.1 * u_east
+                # Heuristic gain for the pitch maneuver
+                v_pitch = u_vertical + mission_config.sequence.pitch_gain * u_east
                 direction = v_pitch / np.linalg.norm(v_pitch)
             else:
                 # Gravity Turn (Zero Angle of Attack)

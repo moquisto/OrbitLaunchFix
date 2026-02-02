@@ -247,4 +247,4 @@ class Vehicle:
         
         print(f"  [Force Diag] Mass: {m/1000:.1f}t | Alt: {(np.linalg.norm(r)-6378137)/1000:.1f}km")
         print(f"  [Force Diag] G-Force: {np.linalg.norm(f_gravity)/1000:.1f} kN | Net Force: {np.linalg.norm(f_total)/1000:.1f} kN")
-        print(f"  [Force Diag] Accel:   {np.linalg.norm(acc_total):.2f} m/s^2 ({(np.linalg.norm(acc_total)/9.81):.2f} g)")
+        print(f"  [Force Diag] Accel:   {np.linalg.norm(acc_total):.2f} m/s^2 ({(np.linalg.norm(acc_total)/self.env.config.g0):.2f} g)")
