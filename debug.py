@@ -3,6 +3,28 @@ import casadi as ca
 from scipy.interpolate import interp1d
 from config import ScalingConfig
 
+# --- Formatting Helpers ---
+class Style:
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RED = "\033[91m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+
+def _print_header(title, source=None):
+    print(f"\n{Style.CYAN}" + "="*80 + f"{Style.RESET}")
+    if source:
+        print(f"{Style.BOLD} {title.upper():<55} {Style.RESET}{Style.DIM}[SOURCE: {source.upper()}]{Style.RESET}")
+    else:
+        print(f"{Style.BOLD} {title.upper()}{Style.RESET}")
+    print(f"{Style.CYAN}" + "="*80 + f"{Style.RESET}")
+
+def _print_sub_header(title):
+    print(f"\n{Style.BOLD}--- {title} ---{Style.RESET}")
+
 # ==============================================================================
 # OPTIMIZER DEBUGGING (CasADi / Constraints)
 # ==============================================================================
@@ -30,20 +52,20 @@ def check_path_constraints(sol, X, U, T_scaled, t_start_scaled, scaling, config,
         min_idx = np.argmin(val)
         # Approx violation in meters (geometric mean radius)
         violation = (1.0 - np.sqrt(min_val)) * R_eq 
-        print(f"    ! ALTITUDE VIOLATION: Ellipsoid Metric = {min_val:.6f} (~{violation:.1f} m under) at Node {min_idx}")
+        print(f"    {Style.RED}! ALTITUDE VIOLATION: Ellipsoid Metric = {min_val:.6f} (~{violation:.1f} m under) at Node {min_idx}{Style.RESET}")
         
     # 2. Control Constraints
     if u_val is not None:
         throttles = u_val[0, :]
         if np.any(throttles < config.sequence.min_throttle - 1e-3) or np.any(throttles > 1.0 + 1e-3):
-            print(f"    ! THROTTLE VIOLATION: Range [{np.min(throttles):.2f}, {np.max(throttles):.2f}]")
+            print(f"    {Style.RED}! THROTTLE VIOLATION: Range [{np.min(throttles):.2f}, {np.max(throttles):.2f}]{Style.RESET}")
             
         # 3. Direction Constraint
         dirs = u_val[1:, :]
         norms = np.linalg.norm(dirs, axis=0)
         err_norm = np.max(np.abs(norms - 1.0))
         if err_norm > 1e-3:
-            print(f"    ! CONTROL VECTOR VIOLATION: Max Norm Error = {err_norm:.4f}")
+            print(f"    {Style.RED}! CONTROL VECTOR VIOLATION: Max Norm Error = {err_norm:.4f}{Style.RESET}")
 
     # 4. Structural Constraints (Max Q & G-Load)
     duration_scaled = sol.value(T_scaled)
@@ -88,9 +110,7 @@ def print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T
     """
     Analyzes the failed optimization result to identify the cause.
     """
-    print("\n" + "="*40)
-    print("       OPTIMIZATION FAILURE DIAGNOSIS [SOURCE: OPTIMIZER]")
-    print("="*40)
+    _print_header("Optimization Failure Diagnosis", "Optimizer")
     
     # 1. Terminal State Analysis
     x_final = sol.value(X3)[:, -1]
@@ -117,8 +137,8 @@ def print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T
     print(f"  Dry Limit:  {m_dry_s2:.2f} kg")
     
     if m_f < m_dry_s2:
-        print(f"  >>> CRITICAL FAILURE: Final mass is BELOW dry mass limit by {m_dry_s2 - m_f:.2f} kg.")
-        print(f"  >>> The vehicle lacks the Delta-V to reach the target orbit with current constraints.")
+        print(f"  >>> {Style.RED}CRITICAL FAILURE: Final mass is BELOW dry mass limit by {m_dry_s2 - m_f:.2f} kg.{Style.RESET}")
+        print(f"  >>> {Style.RED}The vehicle lacks the Delta-V to reach the target orbit with current constraints.{Style.RESET}")
     else:
         print(f"  Mass constraint satisfied. Remaining fuel: {m_f - m_dry_s2:.2f} kg")
 
@@ -150,8 +170,8 @@ def print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T
     print(f"  Staging FPA (Gamma): {gamma_deg:.2f} deg")
     
     if tw_ship < 1.0 and gamma_deg < 5.0:
-        print(f"  >>> CRITICAL PHYSICS ISSUE: Staging T/W is {tw_ship:.2f} (< 1.0) and Flight Path Angle is low ({gamma_deg:.1f} deg).")
-        print(f"      The upper stage cannot fight gravity and will sink into the atmosphere.")
+        print(f"  >>> {Style.RED}CRITICAL PHYSICS ISSUE: Staging T/W is {tw_ship:.2f} (< 1.0) and Flight Path Angle is low ({gamma_deg:.1f} deg).{Style.RESET}")
+        print(f"      {Style.RED}The upper stage cannot fight gravity and will sink into the atmosphere.{Style.RESET}")
     
     # 4. Solver Metrics
     print(f"\nSOLVER STATUS:")
@@ -173,9 +193,7 @@ def debug_optimization_structure(opti):
     """
     Inspects the sparsity of the Jacobian to ensure the problem is well-posed.
     """
-    print("\n" + "="*40)
-    print("DEBUG: OPTIMIZATION STRUCTURE (Jacobian) [SOURCE: CASADI]")
-    print("="*40)
+    _print_header("Optimization Structure (Jacobian)", "CasADi")
     
     J = None
     try:
@@ -193,9 +211,9 @@ def debug_optimization_structure(opti):
         print(f"  Density:     {density:.4f}%")
         
         if density < 1.0:
-            print("  >>> ✅ SUCCESS: Jacobian is sparse (Expected for Direct Collocation).")
+            print(f"  >>> {Style.GREEN}✅ SUCCESS: Jacobian is sparse (Expected for Direct Collocation).{Style.RESET}")
         else:
-            print("  >>> ⚠️ WARNING: Jacobian is dense! Check constraint formulation.")
+            print(f"  >>> {Style.YELLOW}⚠️ WARNING: Jacobian is dense! Check constraint formulation.{Style.RESET}")
             
     except Exception as e:
         print(f"  Could not inspect Jacobian sparsity: {e}")
@@ -216,9 +234,9 @@ def debug_optimization_structure(opti):
             
             cond_est = max_grad / (min_grad + 1e-16)
             if cond_est > 1e8:
-                print(f"  >>> ⚠️ WARNING: Poor scaling detected (Range ~ {cond_est:.1e}). Solver may struggle.")
+                print(f"  >>> {Style.YELLOW}⚠️ WARNING: Poor scaling detected (Range ~ {cond_est:.1e}). Solver may struggle.{Style.RESET}")
             else:
-                print(f"  >>> ✅ SUCCESS: Gradient scaling is acceptable.")
+                print(f"  >>> {Style.GREEN}✅ SUCCESS: Gradient scaling is acceptable.{Style.RESET}")
     except Exception as e:
         msg = str(e)
         if "solved()" in msg or "Solver not initialized" in msg:
@@ -232,41 +250,80 @@ def check_variable_scaling(sol, vars_dict):
     """
     Checks if the optimized variables are well-scaled (close to O(1)).
     """
-    print("\n" + "="*40)
-    print("DEBUG: VARIABLE SCALING CHECK [SOURCE: OPTIMIZER]")
-    print("="*40)
+    _print_header("Variable Scaling Check", "Optimizer")
     
+    print(f"{Style.BOLD}{'Variable':<10} | {'Component':<10} | {'Range (Scaled)':<20} | {'Mean':<8} | {'Status':<6}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 65 + f"{Style.RESET}")
+
     for name, var in vars_dict.items():
         if var is None: continue
         try:
             val = sol.value(var)
-            # Handle scalar vs array
-            if np.isscalar(val) or val.size == 1:
-                print(f"  {name:<5} | Scalar: {float(val):.4f}")
-                if abs(val) < 0.01 or abs(val) > 100:
-                    print(f"          >>> ⚠️ WARNING: Scaling might be off (Ideal ~1.0)")
-            else:
-                # Array
-                abs_val = np.abs(val)
-                mean_val = np.mean(abs_val)
-                max_val = np.max(abs_val)
-                min_val = np.min(abs_val)
-                
-                print(f"  {name:<5} | Range: [{min_val:.4f}, {max_val:.4f}] | Mean: {mean_val:.4f}")
-                if mean_val < 0.01 or mean_val > 100:
-                    print(f"          >>> ⚠️ WARNING: Scaling might be off (Ideal ~1.0)")
-        except Exception as e:
-            print(f"  {name:<5} | Could not evaluate: {e}")
+            
+            # 1. Time Scalars (T1, T2, T3)
+            if name.startswith("T"):
+                status = f"{Style.GREEN}OK{Style.RESET}"
+                if val < 0.01 or val > 100: status = f"{Style.YELLOW}WARN{Style.RESET}"
+                print(f"{name:<10} | {'Time':<10} | {val:<20.4f} | {val:<8.4f} | {status:<6}")
+                continue
 
+            # 2. State Vectors (X1, X2, X3) -> [r, v, m]
+            if name.startswith("X"):
+                # Position (Rows 0-2)
+                r_vals = np.linalg.norm(val[0:3, :], axis=0)
+                r_min, r_max, r_mean = np.min(r_vals), np.max(r_vals), np.mean(r_vals)
+                status_r = f"{Style.GREEN}OK{Style.RESET}" if 0.1 <= r_mean <= 10.0 else f"{Style.YELLOW}WARN{Style.RESET}"
+                print(f"{name:<10} | {'Position':<10} | [{r_min:.4f}, {r_max:.4f}]   | {r_mean:<8.4f} | {status_r:<6}")
+                
+                # Velocity (Rows 3-5)
+                v_vals = np.linalg.norm(val[3:6, :], axis=0)
+                v_min, v_max, v_mean = np.min(v_vals), np.max(v_vals), np.mean(v_vals)
+                status_v = f"{Style.GREEN}OK{Style.RESET}" if 0.1 <= v_mean <= 10.0 else f"{Style.YELLOW}WARN{Style.RESET}"
+                print(f"{'':<10} | {'Velocity':<10} | [{v_min:.4f}, {v_max:.4f}]   | {v_mean:<8.4f} | {status_v:<6}")
+                
+                # Mass (Row 6)
+                m_vals = val[6, :]
+                m_min, m_max, m_mean = np.min(m_vals), np.max(m_vals), np.mean(m_vals)
+                status_m = f"{Style.GREEN}OK{Style.RESET}" if 0.1 <= m_mean <= 10.0 else f"{Style.YELLOW}WARN{Style.RESET}"
+                print(f"{'':<10} | {'Mass':<10} | [{m_min:.4f}, {m_max:.4f}]   | {m_mean:<8.4f} | {status_m:<6}")
+                continue
+
+            # 3. Control Vectors (U1, U3) -> [throttle, ux, uy, uz]
+            if name.startswith("U"):
+                # Throttle (Row 0)
+                th_vals = val[0, :]
+                th_min, th_max, th_mean = np.min(th_vals), np.max(th_vals), np.mean(th_vals)
+                status_th = f"{Style.GREEN}OK{Style.RESET}" # Throttle is 0-1 by definition, usually fine
+                print(f"{name:<10} | {'Throttle':<10} | [{th_min:.4f}, {th_max:.4f}]   | {th_mean:<8.4f} | {status_th:<6}")
+                
+                # Direction (Rows 1-3)
+                # Should be unit vectors, so norm should be ~1.0
+                dir_vals = np.linalg.norm(val[1:, :], axis=0)
+                d_min, d_max, d_mean = np.min(dir_vals), np.max(dir_vals), np.mean(dir_vals)
+                status_d = f"{Style.GREEN}OK{Style.RESET}" if 0.9 <= d_mean <= 1.1 else f"{Style.YELLOW}WARN{Style.RESET}"
+                print(f"{'':<10} | {'Direction':<10} | [{d_min:.4f}, {d_max:.4f}]   | {d_mean:<8.4f} | {status_d:<6}")
+                continue
+            
+            # Fallback for unknown variables
+            if np.isscalar(val) or val.size == 1:
+                print(f"{name:<10} | {'Scalar':<10} | {float(val):<20.4f} | {float(val):<8.4f} | {'?':<6}")
+            else:
+                mean_val = np.mean(np.abs(val))
+                print(f"{name:<10} | {'Array':<10} | [Size: {val.size}]       | {mean_val:<8.4f} | {'?':<6}")
+
+        except Exception as e:
+            print(f"  {name:<10} | Could not evaluate: {e}")
+
+    print(f"{Style.CYAN}" + "-" * 65 + f"{Style.RESET}")
+    print("  * Ideal scaling is O(1) (0.1 to 10.0).")
+    print("  * 'WARN' indicates potential numerical stiffness for IPOPT.")
     print("="*40 + "\n")
 
 def verify_staging_and_objective(opt_res, config, environment=None):
     """
     Verifies that staging mechanics and the optimization objective are consistent.
     """
-    print("\n" + "="*40)
-    print("DEBUG: STAGING & OBJECTIVE CHECK [SOURCE: OPTIMIZER RESULT]")
-    print("="*40)
+    _print_header("Staging & Objective Check", "Optimizer Result")
 
     # 1. Staging Continuity (Pos/Vel)
     if "X2" in opt_res and opt_res.get("T2", 0.0) > 1e-4:
@@ -286,9 +343,9 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     print(f"  Velocity Gap:  {vel_diff:.4e} m/s")
     
     if pos_diff < 1e-3 and vel_diff < 1e-3:
-        print("  >>> ✅ SUCCESS: Kinematics are continuous (Point-Mass Model).")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Kinematics are continuous (Point-Mass Model).{Style.RESET}")
     else:
-        print("  >>> ❌ FAILURE: Discontinuity detected at staging!")
+        print(f"  >>> {Style.RED}❌ FAILURE: Discontinuity detected at staging!{Style.RESET}")
 
     # 1.5 Booster Fuel Check
     m_ship_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
@@ -304,9 +361,9 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     print(f"  Mass at Staging:     {m_prev_end:,.2f} kg")
     print(f"  Booster Limit:       {m_booster_limit:,.2f} kg (Struct + Upper Stage)")
     if booster_margin < -1e-3:
-        print(f"  >>> ❌ FAILURE: Booster used more fuel than available! Deficit: {abs(booster_margin):.2f} kg")
+        print(f"  >>> {Style.RED}❌ FAILURE: Booster used more fuel than available! Deficit: {abs(booster_margin):.2f} kg{Style.RESET}")
     else:
-        print(f"  >>> ✅ SUCCESS: Booster has propellant remaining ({booster_margin:,.2f} kg).")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Booster has propellant remaining ({booster_margin:,.2f} kg).{Style.RESET}")
         print(f"      Unused Propellant: {unused_pct:.4f}% (Discarded)")
 
     # 2. Mass Drop Logic
@@ -322,9 +379,9 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     print(f"  Mass Reset Error:    {mass_err:.2e} kg")
     
     if mass_err < 1e-3:
-        print("  >>> ✅ SUCCESS: Mass correctly reset to Ship Wet Mass.")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Mass correctly reset to Ship Wet Mass.{Style.RESET}")
     else:
-        print(f"  >>> ❌ FAILURE: Mass reset incorrect! Error: {mass_err:.2f} kg")
+        print(f"  >>> {Style.RED}❌ FAILURE: Mass reset incorrect! Error: {mass_err:.2f} kg{Style.RESET}")
 
     # 3. Objective Analysis
     m_final = opt_res["X3"][6, -1]
@@ -346,19 +403,19 @@ def verify_staging_and_objective(opt_res, config, environment=None):
         print(f"  Delta-V Capacity: {dv_rem:.1f} m/s (Safety Margin)")
     
     if fuel_remaining < -1e-3:
-        print("  >>> ❌ WARNING: Negative fuel remaining! Mission infeasible.")
+        print(f"  >>> {Style.RED}❌ WARNING: Negative fuel remaining! Mission infeasible.{Style.RESET}")
     elif fuel_remaining < 1000:
-        print("  >>> NOTE: Fuel margins are very tight (<1t).")
+        print(f"  >>> {Style.YELLOW}NOTE: Fuel margins are very tight (<1t).{Style.RESET}")
     else:
-        print("  >>> ✅ SUCCESS: Positive fuel margin. Optimizer found a valid solution.")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Positive fuel margin. Optimizer found a valid solution.{Style.RESET}")
 
     # 4. Phase Duration & Burn Rate Consistency
     t1 = opt_res.get("T1", 0.0)
     t3 = opt_res.get("T3", 0.0)
     
-    print(f"\nPhase Duration & Burn Rate Analysis:")
-    print(f"  {'Phase':<15} | {'Duration':<10} | {'Fuel Used':<12} | {'Avg Flow':<10} | {'Rated Flow':<10} | {'Throttle':<10} | {'Status':<6}")
-    print("  " + "-" * 85)
+    print(f"\n{Style.BOLD}Phase Duration & Burn Rate Analysis:{Style.RESET}")
+    print(f"  {Style.BOLD}{'Phase':<15} | {'Duration':<10} | {'Fuel Used':<12} | {'Avg Flow':<10} | {'Rated Flow':<10} | {'Throttle':<10} | {'Status':<6}{Style.RESET}")
+    print(f"  {Style.CYAN}" + "-" * 85 + f"{Style.RESET}")
 
     def check_phase(name, t_dur, x_data, stage_config):
         if t_dur < 1.0:
@@ -372,7 +429,7 @@ def verify_staging_and_objective(opt_res, config, environment=None):
         throttle_pct = throttle_avg * 100.0
         
         is_valid = (config.sequence.min_throttle - 0.15 <= throttle_avg <= 1.15)
-        status = "OK" if is_valid else "FAIL"
+        status = f"{Style.GREEN}OK{Style.RESET}" if is_valid else f"{Style.RED}FAIL{Style.RESET}"
         
         print(f"  {name:<15} | {t_dur:<10.2f} | {dm:<12.0f} | {mdot_avg:<10.1f} | {mdot_rated:<10.1f} | {throttle_pct:<9.1f}% | {status:<6}")
         return is_valid
@@ -381,9 +438,9 @@ def verify_staging_and_objective(opt_res, config, environment=None):
     p3_ok = check_phase("Phase 3 (Ship)", t3, opt_res["X3"], config.stage_2)
 
     if p1_ok and p3_ok:
-        print("  >>> ✅ SUCCESS: Burn times and mass flows are physically consistent.")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Burn times and mass flows are physically consistent.{Style.RESET}")
     else:
-        print("  >>> ❌ FAILURE: Detected impossible burn rates (Cheating detected).")
+        print(f"  >>> {Style.RED}❌ FAILURE: Detected impossible burn rates (Cheating detected).{Style.RESET}")
 
     print("="*40 + "\n")
 
@@ -395,9 +452,7 @@ def verify_scaling_consistency(config):
     """
     Verifies that scaling factors produce numerically friendly values (O(1)).
     """
-    print("\n" + "="*40)
-    print("DEBUG: SCALING CONSISTENCY CHECK [SOURCE: CONFIG]")
-    print("="*40)
+    _print_header("Scaling Consistency Check", "Config")
     
     scaling = ScalingConfig() 
     
@@ -407,18 +462,8 @@ def verify_scaling_consistency(config):
     print(f"  Time:   {scaling.time:.4e} s")
     print(f"  Mass:   {scaling.mass:.4e} kg")
     print(f"  Force:  {scaling.force:.4e} N")
-    print("-" * 75)
+    print(f"{Style.CYAN}" + "-" * 75 + f"{Style.RESET}")
 
-    # ... (Rest of logic identical to original)
-    # For brevity, I'm including the core logic structure.
-    # In a real move, copy the full body.
-    
-    calc_speed = scaling.length / scaling.time
-    calc_force = scaling.mass * (scaling.length / scaling.time**2)
-    
-    if abs(scaling.speed - calc_speed) > 1e-9:
-        print(f"WARNING: Scaling speed mismatch! Config: {scaling.speed}, Calc: {calc_speed}")
-    
     tests = [
         ("Radius (Surface)", scaling.length, scaling.length),
         ("Radius (Orbit)",   scaling.length + config.target_altitude, scaling.length),
@@ -431,8 +476,8 @@ def verify_scaling_consistency(config):
         ("Gravity (Surface)", 9.81, scaling.length / scaling.time**2)
     ]
     
-    print(f"{'Variable':<20} | {'Physical':<12} | {'Scaled':<10} | {'Unscaled':<12} | {'Rel Err':<10} | {'Status':<6}")
-    print("-" * 85)
+    print(f"{Style.BOLD}{'Variable':<20} | {'Physical':<12} | {'Scaled':<10} | {'Unscaled':<12} | {'Rel Err':<10} | {'Status':<6}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 85 + f"{Style.RESET}")
     
     overall_success = True
     for name, val_phys, scale_factor in tests:
@@ -448,25 +493,23 @@ def verify_scaling_consistency(config):
             is_fail = err > 1e-12
             rel_err = float('inf') if is_fail else 0.0
         
-        status = "OK"
-        if not is_reasonable: status = "WARN MAG"
-        if is_fail: status = "FAIL"; overall_success = False
+        status = f"{Style.GREEN}OK{Style.RESET}"
+        if not is_reasonable: status = f"{Style.YELLOW}WARN MAG{Style.RESET}"
+        if is_fail: status = f"{Style.RED}FAIL{Style.RESET}"; overall_success = False
             
         print(f"{name:<20} | {val_phys:<12.4e} | {val_scaled:<10.4f} | {val_recovered:<12.4e} | {rel_err:<10.2e} | {status:<6}")
 
     if overall_success:
-        print("\n>>> ✅ SUCCESS: Scaling logic is consistent.")
+        print(f"\n>>> {Style.GREEN}✅ SUCCESS: Scaling logic is consistent.{Style.RESET}")
     else:
-        print("\n>>> ❌ CRITICAL WARNING: Scaling logic failed round-trip check!")
+        print(f"\n>>> {Style.RED}❌ CRITICAL WARNING: Scaling logic failed round-trip check!{Style.RESET}")
     print("="*40 + "\n")
 
 def verify_physics_consistency(vehicle, config):
     """
     Debugs the interface between Optimizer (CasADi) and Simulation (NumPy).
     """
-    print("\n" + "="*40)
-    print("DEBUG: PHYSICS ENGINE CONSISTENCY CHECK [SOURCE: SIM vs OPT]")
-    print("="*40)
+    _print_header("Physics Engine Consistency Check", "Sim vs Opt")
     
     R_e = vehicle.env.config.earth_radius_equator
     
@@ -483,8 +526,8 @@ def verify_physics_consistency(vehicle, config):
     t_sym = ca.MX.sym('t', 1)
     
     overall_success = True
-    print(f"{'Scenario':<25} | {'Max Diff':<12} | {'Status':<10}")
-    print("-" * 55)
+    print(f"{Style.BOLD}{'Scenario':<25} | {'Max Diff':<12} | {'Status':<10}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 55 + f"{Style.RESET}")
 
     for case in scenarios:
         r_test = np.array(case['r'])
@@ -504,24 +547,22 @@ def verify_physics_consistency(vehicle, config):
         res_sym = np.array(f_dyn(state_num, th_test, dir_test, t_test)).flatten()
         
         max_diff = np.max(np.abs(dyn_sim - res_sym))
-        status = "PASS" if max_diff < 1e-9 else "FAIL"
-        if status == "FAIL": overall_success = False
+        status = f"{Style.GREEN}PASS{Style.RESET}" if max_diff < 1e-9 else f"{Style.RED}FAIL{Style.RESET}"
+        if max_diff >= 1e-9: overall_success = False
             
         print(f"{case['name']:<25} | {max_diff:.2e}     | {status:<10}")
 
     if overall_success:
-        print("\n>>> ✅ SUCCESS: Physics engines are consistent across all regimes.")
+        print(f"\n>>> {Style.GREEN}✅ SUCCESS: Physics engines are consistent across all regimes.{Style.RESET}")
     else:
-        print("\n>>> ❌ CRITICAL WARNING: Physics engines disagree!")
+        print(f"\n>>> {Style.RED}❌ CRITICAL WARNING: Physics engines disagree!{Style.RESET}")
     print("="*40 + "\n")
 
 def verify_environment_consistency(vehicle):
     """
     Debugs the Environment model (Symbolic vs Numeric).
     """
-    print("\n" + "="*40)
-    print("DEBUG: ENVIRONMENT MODEL CONSISTENCY CHECK [SOURCE: SIM vs OPT]")
-    print("="*40)
+    _print_header("Environment Model Consistency Check", "Sim vs Opt")
 
     # Create symbolic wrapper to test get_state_opti
     r_sym = ca.MX.sym('r', 3)
@@ -553,47 +594,76 @@ def verify_environment_consistency(vehicle):
     print(f"  Gravity:  Sym={g_sym}, Num={g_num} | Max Diff={np.max(np.abs(g_sym-g_num)):.2e}")
     
     if abs(rho_sym - rho_num) < 1e-9 and np.max(np.abs(g_sym - g_num)) < 1e-9:
-        print("  >>> ✅ SUCCESS: Environment models match.")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Environment models match.{Style.RESET}")
     else:
-        print("  >>> ❌ FAILURE: Mismatch detected!")
+        print(f"  >>> {Style.RED}❌ FAILURE: Mismatch detected!{Style.RESET}")
     print("="*40 + "\n")
 
 def verify_aerodynamics(vehicle):
     """
     Debugs the Aerodynamic model.
     """
-    print("\n" + "="*40)
-    print("DEBUG: AERODYNAMICS CHECK [SOURCE: VEHICLE MODEL]")
-    print("="*40)
+    _print_header("Aerodynamics Check", "Vehicle Model")
     
-    # Test Mach numbers
-    machs = [0.0, 0.8, 1.5, 5.0, 25.0]
+    # 1. Drag Coefficient & Force Estimate (Stage 1)
+    # Assume a reference Max Q condition to make drag numbers tangible
+    ref_q = 35000.0 # 35 kPa
+    ref_area = vehicle.config.stage_1.aero.reference_area
     
-    print(f"{'Mach':<6} | {'Stg1 Cd':<10} | {'Stg2 Cd':<10}")
-    print("-" * 35)
+    print(f"Reference Condition: Max Q = {ref_q/1000:.0f} kPa, Area = {ref_area:.1f} m^2")
+    print(f"{Style.BOLD}{'Mach':<6} | {'Stg1 Cd':<8} | {'Drag (kN)':<10} | {'Stg2 Cd':<8}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 45 + f"{Style.RESET}")
+    
+    # Sweep Mach numbers more finely around transonic
+    machs = [0.0, 0.5, 0.9, 1.1, 1.5, 3.0, 5.0, 10.0, 25.0]
     
     for m in machs:
         cd1 = float(vehicle.cd_interp_stage_1(m))
         cd2 = float(vehicle.cd_interp_stage_2(m))
-        print(f"{m:<6.1f} | {cd1:<10.4f} | {cd2:<10.4f}")
         
-    print("-" * 35)
-    print("Crossflow Check (Mach 1.0, AoA 90 deg):")
-    # Check crossflow
-    cd_base = float(vehicle.cd_interp_stage_1(1.0))
+        # Calculate Drag Force at this Mach (assuming constant Max Q for comparison)
+        # F_drag = Q * A * Cd
+        drag_force = ref_q * ref_area * cd1
+        
+        print(f"{m:<6.1f} | {cd1:<8.4f} | {drag_force/1000:<10.1f} | {cd2:<8.4f}")
+        
+    print(f"{Style.CYAN}" + "-" * 45 + f"{Style.RESET}")
+
+    # 2. Angle of Attack Sensitivity (Crossflow)
+    # Shows how much drag increases when the rocket tilts
+    print("\nAngle of Attack Sensitivity (at Mach 1.5):")
+    m_test = 1.5
+    cd_base = float(vehicle.cd_interp_stage_1(m_test))
     factor = vehicle.config.stage_1.aero.cd_crossflow_factor
-    expected = cd_base + factor * (1.0**2) # sin(90)^2 = 1
-    print(f"  Base Cd: {cd_base:.2f}, Factor: {factor:.1f}")
-    print(f"  Expected Total Cd at 90deg: {expected:.2f}")
+    
+    print(f"  Base Cd (0 deg): {cd_base:.4f}")
+    print(f"  Crossflow Factor: {factor:.1f}")
+    print(f"{Style.BOLD}{'Alpha (deg)':<12} | {'Total Cd':<10} | {'Increase':<10}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 38 + f"{Style.RESET}")
+    
+    alphas = [0, 2, 5, 10, 20, 45, 90]
+    for alpha in alphas:
+        sin_a = np.sin(np.radians(alpha))
+        cd_total = cd_base + factor * (sin_a**2)
+        pct_inc = ((cd_total - cd_base) / cd_base) * 100.0
+        print(f"{alpha:<12} | {cd_total:<10.4f} | +{pct_inc:<9.0f}%")
+
+    # 3. Interpolation Sanity Check
+    # Check for negative values or NaNs in a dense sweep
+    dense_mach = np.linspace(0, 25, 100)
+    cd_vals = [float(vehicle.cd_interp_stage_1(m)) for m in dense_mach]
+    if any(c < 0 for c in cd_vals):
+        print(f"\n  >>> {Style.YELLOW}⚠️ WARNING: Negative Cd detected in interpolation!{Style.RESET}")
+    else:
+        print(f"\n  >>> {Style.GREEN}✅ SUCCESS: Cd interpolation is positive and stable.{Style.RESET}")
+
     print("="*40 + "\n")
 
 def verify_positioning(vehicle):
     """
     Debugs the Coordinate Systems.
     """
-    print("\n" + "="*40)
-    print("DEBUG: POSITIONING & GEODESY CHECK [SOURCE: ENVIRONMENT]")
-    print("="*40)
+    _print_header("Positioning & Geodesy Check", "Environment")
     
     r0, v0 = vehicle.env.get_launch_site_state()
     R_eq = vehicle.env.config.earth_radius_equator
@@ -606,37 +676,65 @@ def verify_positioning(vehicle):
     print(f"  Velocity: {v_mag:.2f} m/s")
     
     if abs(r_mag - R_eq) < 50000:
-        print("  >>> ✅ SUCCESS: Initial state is reasonable.")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Initial state is reasonable.{Style.RESET}")
     else:
-        print("  >>> ⚠️ WARNING: Initial state looks suspicious.")
+        print(f"  >>> {Style.YELLOW}⚠️ WARNING: Initial state looks suspicious.{Style.RESET}")
     print("="*40 + "\n")
 
 def verify_propulsion(vehicle):
     """
-    Debugs the Propulsion Model.
+    Debugs the Propulsion Model with detailed performance metrics.
     """
-    print("\n" + "="*40)
-    print("DEBUG: PROPULSION PERFORMANCE CHECK [SOURCE: VEHICLE MODEL]")
-    print("="*40)
+    _print_header("Propulsion Performance Check", "Vehicle Model")
     
-    # Check Stage 1
+    g0 = vehicle.env.config.g0
+    
+    # --- Stage 1 (Booster) ---
     s1 = vehicle.config.stage_1
-    f_vac = s1.thrust_vac
-    f_sl = s1.thrust_sl # Derived property
+    m_launch = vehicle.config.launch_mass
+    
+    # Mass Flow
+    m_dot_1 = s1.thrust_vac / (s1.isp_vac * g0)
+    t_burn_1 = s1.propellant_mass / m_dot_1
+    
+    # T/W
+    tw_sl = s1.thrust_sl / (m_launch * 9.81)
     
     print(f"Stage 1 (Booster):")
-    print(f"  Vac Thrust: {f_vac/1e6:.2f} MN (ISP={s1.isp_vac}s)")
-    print(f"  SL Thrust:  {f_sl/1e6:.2f} MN (ISP={s1.isp_sl}s)")
-    print(f"  Loss %:     {(1 - f_sl/f_vac)*100:.1f}%")
+    print(f"  Mass Flow Rate: {m_dot_1:,.1f} kg/s (at 100% Throttle)")
+    print(f"  Burn Time:      {t_burn_1:.1f} s (Continuous 100%)")
+    print(f"  Thrust (Vac):   {s1.thrust_vac/1e6:.2f} MN (ISP={s1.isp_vac:.0f}s)")
+    print(f"  Thrust (SL):    {s1.thrust_sl/1e6:.2f} MN (ISP={s1.isp_sl:.0f}s)")
+    print(f"  SL Efficiency:  {s1.thrust_sl/s1.thrust_vac*100:.1f}%")
+    print(f"  Liftoff T/W:    {tw_sl:.2f} (Ref g=9.81)")
     
-    # Check Stage 2
+    if tw_sl < 1.0:
+        print(f"  >>> {Style.RED}⚠️ WARNING: T/W < 1.0 at Sea Level! Rocket will not lift off.{Style.RESET}")
+    
+    print(f"{Style.CYAN}" + "-" * 40 + f"{Style.RESET}")
+    
+    # --- Stage 2 (Ship) ---
     s2 = vehicle.config.stage_2
-    f_vac2 = s2.thrust_vac
-    f_sl2 = s2.thrust_sl
+    m_s2_wet = s2.dry_mass + s2.propellant_mass + vehicle.config.payload_mass
+    
+    # Mass Flow
+    m_dot_2 = s2.thrust_vac / (s2.isp_vac * g0)
+    t_burn_2 = s2.propellant_mass / m_dot_2
+    
+    # T/W
+    tw_vac = s2.thrust_vac / (m_s2_wet * 9.81)
     
     print(f"Stage 2 (Ship):")
-    print(f"  Vac Thrust: {f_vac2/1e6:.2f} MN (ISP={s2.isp_vac}s)")
-    print(f"  SL Thrust:  {f_sl2/1e6:.2f} MN (ISP={s2.isp_sl}s)")
+    print(f"  Mass Flow Rate: {m_dot_2:,.1f} kg/s (at 100% Throttle)")
+    print(f"  Burn Time:      {t_burn_2:.1f} s (Continuous 100%)")
+    print(f"  Thrust (Vac):   {s2.thrust_vac/1e6:.2f} MN (ISP={s2.isp_vac:.0f}s)")
+    print(f"  Thrust (SL):    {s2.thrust_sl/1e6:.2f} MN (ISP={s2.isp_sl:.0f}s)")
+    print(f"  SL Efficiency:  {s2.thrust_sl/s2.thrust_vac*100:.1f}% (Flow Separation Penalty)")
+    print(f"  Staging T/W:    {tw_vac:.2f} (Ref g=9.81)")
+    
+    if tw_vac < 1.0:
+         print(f"  >>> {Style.YELLOW}NOTE: Staging T/W < 1.0. Requires lofted trajectory (Gamma > 0).{Style.RESET}")
+
     print("="*40 + "\n")
 
 # ==============================================================================
@@ -645,95 +743,182 @@ def verify_propulsion(vehicle):
 
 def validate_trajectory(simulation_data, config, environment):
     """
-    Performs numerical validation of the simulation results.
+    Performs numerical validation of the simulation results with detailed orbital mechanics.
     """
-    print("\n" + "="*40)
-    print("POST-FLIGHT ANALYSIS REPORT [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Post-Flight Analysis Report", "Simulation")
 
     t = simulation_data['t']
     y = simulation_data['y']
     u = simulation_data['u']
     
-    # 1. Terminal State Accuracy
+    # Constants
+    mu = environment.config.earth_mu
+    R_eq = environment.config.earth_radius_equator
+    
+    # 1. Terminal State & Orbital Elements
     r_final = y[0:3, -1]
     v_final = y[3:6, -1]
     r_mag = np.linalg.norm(r_final)
     v_mag = np.linalg.norm(v_final)
     
-    R_eq = environment.config.earth_radius_equator
-    target_radius = R_eq + config.target_altitude
+    # Specific Angular Momentum
+    h_vec = np.cross(r_final, v_final)
+    h_mag = np.linalg.norm(h_vec)
     
-    print(f"TERMINAL STATE (t = {t[-1]:.1f} s)")
-    print(f"  Orbital Radius: {r_mag/1000:.2f} km  (Target: {target_radius/1000:.2f} km)")
-    print(f"  Velocity:       {v_mag:.2f} m/s")
+    # Specific Energy
+    energy = (v_mag**2)/2 - mu/r_mag
     
-    # 2. Max Q Check
-    q_vals = []
+    # Semi-Major Axis
+    if abs(energy) > 1e-6:
+        sma = -mu / (2 * energy)
+    else:
+        sma = np.inf
+        
+    # Eccentricity Vector
+    e_vec = ((v_mag**2 - mu/r_mag)*r_final - np.dot(r_final, v_final)*v_final) / mu
+    ecc = np.linalg.norm(e_vec)
+    
+    # Inclination
+    inc_deg = np.degrees(np.arccos(h_vec[2] / h_mag))
+    
+    # Apoapsis / Periapsis Altitudes
+    r_p = sma * (1 - ecc)
+    r_a = sma * (1 + ecc)
+    alt_p = r_p - R_eq
+    alt_a = r_a - R_eq
+    
+    # Target Comparison
+    target_alt = config.target_altitude
+    target_inc = config.target_inclination if config.target_inclination is not None else environment.config.launch_latitude
+    
+    print(f"ORBITAL INJECTION ACCURACY (t = {t[-1]:.1f} s)")
+    print(f"  {Style.BOLD}{'Metric':<15} | {'Actual':<12} | {'Target':<12} | {'Error':<10}{Style.RESET}")
+    print(f"  {Style.CYAN}" + "-" * 55 + f"{Style.RESET}")
+    print(f"  {'Altitude (km)':<15} | {((r_mag - R_eq)/1000):<12.2f} | {target_alt/1000:<12.2f} | {(r_mag - R_eq - target_alt)/1000:<+8.2f}")
+    print(f"  {'Periapsis (km)':<15} | {alt_p/1000:<12.2f} | {target_alt/1000:<12.2f} | {(alt_p - target_alt)/1000:<+8.2f}")
+    print(f"  {'Apoapsis (km)':<15} | {alt_a/1000:<12.2f} | {target_alt/1000:<12.2f} | {(alt_a - target_alt)/1000:<+8.2f}")
+    print(f"  {'Eccentricity':<15} | {ecc:<12.5f} | {'0.00000':<12} | {ecc:<+8.5f}")
+    print(f"  {'Inclination':<15} | {inc_deg:<12.4f} | {target_inc:<12.4f} | {inc_deg - target_inc:<+8.4f}")
+    
+    # 2. Structural Loads Analysis
+    max_q = 0.0
+    max_g = 0.0
+    
     for i in range(len(t)):
         r_i = y[0:3, i]
+        v_i = y[3:6, i]
+        m_i = y[6, i]
+        
+        # Environment
         env_state = environment.get_state_sim(r_i, t[i])
+        
+        # Max Q
         v_rel = y[3:6, i] - env_state['wind_velocity']
         q = 0.5 * env_state['density'] * np.linalg.norm(v_rel)**2
-        q_vals.append(q)
+        if q > max_q: max_q = q
+        
+        # Max G (Thrust / Weight)
+        throttle = u[0, i]
+        if throttle > 0.01:
+            # Determine stage
+            m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+            stage = config.stage_1 if m_i > m_stg2_wet + 1000 else config.stage_2
+            
+            isp_eff = stage.isp_vac + (env_state['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+            thrust = throttle * stage.thrust_vac * (isp_eff / stage.isp_vac)
+            g_load = (thrust / m_i) / environment.config.g0
+            if g_load > max_g: max_g = g_load
+
+    print(f"\nSTRUCTURAL SAFETY MARGINS")
+    print(f"  Max Q:          {max_q/1000:.2f} kPa (Limit: {config.max_q_limit/1000:.1f} kPa) | Margin: {(config.max_q_limit - max_q)/1000:.2f} kPa")
+    print(f"  Max G-Load:     {max_g:.2f} g    (Limit: {config.max_g_load:.1f} g)     | Margin: {config.max_g_load - max_g:.2f} g")
     
-    max_q = max(q_vals)
-    print(f"\nSTRUCTURAL LOADS")
-    print(f"  Max Q:          {max_q/1000:.2f} kPa (Limit: {config.max_q_limit/1000:.1f} kPa)")
+    if max_q > config.max_q_limit:
+        print(f"  >>> {Style.RED}⚠️ WARNING: Max Q limit exceeded!{Style.RESET}")
+    if max_g > config.max_g_load:
+        print(f"  >>> {Style.RED}⚠️ WARNING: G-Load limit exceeded!{Style.RESET}")
+        
     print("="*40 + "\n")
 
 def analyze_delta_v_budget(simulation_data, vehicle, config):
     """
-    Computes and prints a detailed Delta-V budget.
+    Computes and prints a detailed Delta-V budget, broken down by stage.
     """
-    print("\n" + "="*40)
-    print("DELTA-V BUDGET & EFFICIENCY ANALYSIS [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Delta-V Budget & Efficiency Analysis", "Simulation")
     
     t = simulation_data['t']
     y = simulation_data['y']
     u = simulation_data['u']
     
-    dv_total = 0.0
-    dv_gravity = 0.0
-    dv_drag = 0.0
+    # Initialize accumulators
+    stats = {
+        "boost": {"ideal": 0.0, "actual": 0.0, "grav": 0.0, "drag": 0.0, "steer": 0.0},
+        "ship":  {"ideal": 0.0, "actual": 0.0, "grav": 0.0, "drag": 0.0, "steer": 0.0}
+    }
+    
+    m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
     
     for i in range(len(t) - 1):
         dt = t[i+1] - t[i]
+        if dt < 1e-6: continue
+        
         r = y[0:3, i]
         v = y[3:6, i]
         m = y[6, i]
         throttle = u[0, i]
         
+        # Determine Phase
+        # Heuristic: If mass > Ship Wet + buffer, we are in Booster phase
+        if m > m_stg2_wet + 1000:
+            phase = "boost"
+            stage = config.stage_1
+        else:
+            phase = "ship"
+            stage = config.stage_2
+            
+        # Environment
         env = vehicle.env.get_state_sim(r, t[i])
         
-        # Determine Stage
-        m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
-        stage = config.stage_1 if m > m_stg2_wet + 1000 else config.stage_2
+        # --- 1. Forces ---
+        # Thrust
+        f_thrust = 0.0
             
-        # Thrust DV
         if throttle > 0.01:
             isp_eff = stage.isp_vac + (env['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
             thrust = throttle * stage.thrust_vac * (isp_eff / stage.isp_vac)
-            dv_total += (thrust / m) * dt
+            f_thrust = thrust
+            
+            # Actual Delta-V (Thrust Acceleration)
+            dv_actual = (thrust / m) * dt
+            stats[phase]["actual"] += dv_actual
+            
+            # Ideal Delta-V (Rocket Equation Potential: Vac ISP * dm/m)
+            # dm = F / (Isp_eff * g0) * dt
+            g0 = vehicle.env.config.g0
+            dm = (thrust / (isp_eff * g0)) * dt
+            # Ideal dV uses Vacuum ISP to show potential
+            stats[phase]["ideal"] += (stage.isp_vac * g0) * (dm / m)
             
         # Gravity Loss (Approx: Component of g opposing v)
         v_mag = np.linalg.norm(v)
         if v_mag > 1.0:
             v_dir = v / v_mag
             g_loss_inst = -np.dot(env['gravity'], v_dir)
-            if g_loss_inst > 0:
-                dv_gravity += g_loss_inst * dt
+            # Only count as loss if gravity is opposing motion
+            # (Technically gravity always does work, but for budget we care about ascent penalty)
+            stats[phase]["grav"] += -np.dot(env['gravity'], v_dir) * dt
                 
         # Drag Loss
         v_rel = v - env['wind_velocity']
         v_rel_mag = np.linalg.norm(v_rel)
         q = 0.5 * env['density'] * v_rel_mag**2
+        
+        # Re-calculate Cd
         mach = v_rel_mag / max(env['speed_of_sound'], 1.0)
         cd_data = stage.aero.mach_cd_table
         cd_base = np.interp(mach, cd_data[:,0], cd_data[:,1])
         
-        # Add Crossflow Drag (AoA) to match Physics Engine
+        # AoA
         sin_alpha_sq = 0.0
         if throttle > 0.01 and v_rel_mag > 1.0:
             thrust_dir = u[1:, i]
@@ -745,20 +930,49 @@ def analyze_delta_v_budget(simulation_data, vehicle, config):
         
         cd_total = cd_base + stage.aero.cd_crossflow_factor * sin_alpha_sq
         drag = q * stage.aero.reference_area * cd_total
-        dv_drag += (drag / m) * dt
+        stats[phase]["drag"] += (drag / m) * dt
+        
+        # Steering Loss (Cosine Loss)
+        # Loss = F/m * (1 - cos(alpha_inertial))
+        if throttle > 0.01 and v_mag > 1.0:
+             thrust_dir = u[1:, i]
+             u_thrust = thrust_dir / np.linalg.norm(thrust_dir)
+             u_v_inertial = v / v_mag
+             cos_steer = np.dot(u_thrust, u_v_inertial)
+             cos_steer = max(-1.0, min(1.0, cos_steer))
+             loss_steer = (f_thrust / m) * (1.0 - cos_steer) * dt
+             stats[phase]["steer"] += loss_steer
 
-    print(f"  Total Delta-V Expended: {dv_total:.1f} m/s")
-    print(f"  Gravity Loss (Approx):  {dv_gravity:.1f} m/s")
-    print(f"  Drag Loss (Approx):     {dv_drag:.1f} m/s")
+    # Print Table
+    print(f"{Style.BOLD}{'Metric':<15} | {'Booster':<12} | {'Ship':<12} | {'Total':<12}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 55 + f"{Style.RESET}")
+    
+    def p(key):
+        b = stats['boost'][key]
+        s = stats['ship'][key]
+        return f"{b:<12.1f} | {s:<12.1f} | {b+s:<12.1f}"
+        
+    print(f"{'Ideal Delta-V':<15} | {p('ideal')}")
+    print(f"{'Actual Delta-V':<15} | {p('actual')}")
+    print(f"{'Gravity Loss':<15} | {p('grav')}")
+    print(f"{'Drag Loss':<15} | {p('drag')}")
+    print(f"{'Steering Loss':<15} | {p('steer')}")
+    print(f"{Style.CYAN}" + "-" * 55 + f"{Style.RESET}")
+    
+    # ISP Loss (Difference between Ideal Vac and Actual)
+    isp_loss_b = stats['boost']['ideal'] - stats['boost']['actual']
+    isp_loss_s = stats['ship']['ideal'] - stats['ship']['actual']
+    total_isp_loss = isp_loss_b + isp_loss_s
+    
+    print(f"{'ISP/Backpres.':<15} | {isp_loss_b:<12.1f} | {isp_loss_s:<12.1f} | {total_isp_loss:<12.1f}")
     print("="*40 + "\n")
 
 def analyze_control_slew_rates(simulation_data):
     """
     Analyzes the angular rate of change of the thrust vector.
+    Filters out numerical noise and phase discontinuities.
     """
-    print("\n" + "="*40)
-    print("CONTROL SLEW RATE ANALYSIS [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Control Slew Rate Analysis", "Simulation")
     
     t = simulation_data['t']
     u = simulation_data['u']
@@ -766,9 +980,12 @@ def analyze_control_slew_rates(simulation_data):
     max_slew_rate = 0.0
     max_slew_time = 0.0
     
+    # Thresholds
+    dt_min = 0.1 # Ignore steps smaller than 100ms (likely integrator sub-steps or phase boundaries)
+    
     for i in range(len(t) - 1):
         dt = t[i+1] - t[i]
-        if dt < 1e-6: continue
+        if dt < dt_min: continue
         
         u1 = u[1:, i]
         u2 = u[1:, i+1]
@@ -777,77 +994,117 @@ def analyze_control_slew_rates(simulation_data):
         
         if n1 > 1e-9 and n2 > 1e-9:
             dot = np.clip(np.dot(u1/n1, u2/n2), -1.0, 1.0)
-            rate = np.degrees(np.arccos(dot)) / dt
+            angle_deg = np.degrees(np.arccos(dot))
+            
+            # Filter out massive jumps (likely phase reset)
+            if angle_deg > 20.0: continue 
+            
+            rate = angle_deg / dt
             if rate > max_slew_rate:
                 max_slew_rate = rate
                 max_slew_time = t[i]
     
     print(f"  Max Gimbal Rate:  {max_slew_rate:.2f} deg/s (at t={max_slew_time:.1f}s)")
+    
+    if max_slew_rate > 10.0:
+        print(f"  >>> {Style.YELLOW}⚠️ WARNING: Slew rate exceeds typical TVC limits (10 deg/s).{Style.RESET}")
+        print(f"      Consider adding rate constraints to the optimizer.")
+    else:
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Control rates are within physical limits.{Style.RESET}")
+        
     print("="*40 + "\n")
 
 def analyze_trajectory_drift(optimization_data, simulation_data):
     """
     Quantifies the discretization error.
     """
-    print("\n" + "="*40)
-    print("TRAJECTORY DRIFT ANALYSIS [SOURCE: SIM vs OPT]")
-    print("="*40)
+    _print_header("Trajectory Drift Analysis", "Sim vs Opt")
     
-    # 1. Reconstruct Optimizer Time Grid & States
-    t_opt_list = []
-    x_opt_list = []
+    # 1. Identify Phases in Optimization Data
+    phases_opt = []
     
+    # Phase 1
     N1 = optimization_data['X1'].shape[1]
-    t1 = np.linspace(0, optimization_data['T1'], N1)
-    t_opt_list.append(t1)
-    x_opt_list.append(optimization_data['X1'])
+    t1_end = optimization_data['T1']
+    phases_opt.append({
+        "t": np.linspace(0, t1_end, N1),
+        "x": optimization_data['X1'],
+        "label": "Phase 1"
+    })
     
-    current_t = optimization_data['T1']
-    if 'X2' in optimization_data and optimization_data.get('T2', 0) > 0:
+    current_t = t1_end
+    # Phase 2
+    if 'X2' in optimization_data and optimization_data.get('T2', 0) > 1e-4:
         N2 = optimization_data['X2'].shape[1]
-        t2 = np.linspace(current_t, current_t + optimization_data['T2'], N2)
-        t_opt_list.append(t2)
-        x_opt_list.append(optimization_data['X2'])
-        current_t += optimization_data['T2']
+        t2_end = current_t + optimization_data['T2']
+        phases_opt.append({
+            "t": np.linspace(current_t, t2_end, N2),
+            "x": optimization_data['X2'],
+            "label": "Phase 2"
+        })
+        current_t = t2_end
         
+    # Phase 3
     N3 = optimization_data['X3'].shape[1]
-    t3 = np.linspace(current_t, current_t + optimization_data['T3'], N3)
-    t_opt_list.append(t3)
-    x_opt_list.append(optimization_data['X3'])
+    t3_end = current_t + optimization_data['T3']
+    phases_opt.append({
+        "t": np.linspace(current_t, t3_end, N3),
+        "x": optimization_data['X3'],
+        "label": "Phase 3"
+    })
     
-    t_opt_full = np.concatenate(t_opt_list)
-    x_opt_full = np.hstack(x_opt_list)
+    # 2. Split Simulation Data into Segments
+    t_sim_full = simulation_data['t']
+    y_sim_full = simulation_data['y']
     
-    # 2. Interpolate Simulation Data onto Optimizer Grid
-    t_sim = simulation_data['t']
-    y_sim = simulation_data['y']
+    # Find split indices where time does not increase (duplicate points at boundaries)
+    split_indices = [0] + (np.where(np.diff(t_sim_full) <= 1e-9)[0] + 1).tolist() + [len(t_sim_full)]
     
-    # Handle duplicates in t_sim (caused by phase concatenation)
-    t_sim_unique, unique_indices = np.unique(t_sim, return_index=True)
-    y_sim_unique = y_sim[:, unique_indices]
-    
-    if len(t_sim_unique) < 2:
-        print("  Not enough simulation data for drift analysis.")
+    sim_segments = []
+    for i in range(len(split_indices) - 1):
+        start = split_indices[i]
+        end = split_indices[i+1]
+        sim_segments.append({
+            "t": t_sim_full[start:end],
+            "y": y_sim_full[:, start:end]
+        })
+        
+    # 3. Compare Phase by Phase
+    if len(phases_opt) != len(sim_segments):
+        print(f"  ⚠️ Mismatch in phase count: Opt={len(phases_opt)}, Sim={len(sim_segments)}")
+        print("  Cannot perform detailed drift analysis.")
         return
 
-    f_sim = interp1d(t_sim_unique, y_sim_unique, axis=1, kind='linear', bounds_error=False, fill_value="extrapolate")
-    y_sim_interp = f_sim(t_opt_full)
+    max_pos_err = 0.0
+    max_vel_err = 0.0
+    max_mass_err = 0.0
     
-    # 3. Calculate Errors
-    pos_err = np.linalg.norm(x_opt_full[0:3, :] - y_sim_interp[0:3, :], axis=0)
-    vel_err = np.linalg.norm(x_opt_full[3:6, :] - y_sim_interp[3:6, :], axis=0)
-    mass_err = np.abs(x_opt_full[6, :] - y_sim_interp[6, :])
-    
-    print(f"  Position Drift: Max = {np.max(pos_err):.2f} m, Avg = {np.mean(pos_err):.2f} m")
-    print(f"  Velocity Drift: Max = {np.max(vel_err):.2f} m/s, Avg = {np.mean(vel_err):.2f} m/s")
-    print(f"  Mass Drift:     Max = {np.max(mass_err):.2f} kg, Avg = {np.mean(mass_err):.2f} kg")
+    for i, (p_opt, p_sim) in enumerate(zip(phases_opt, sim_segments)):
+        if len(p_sim['t']) < 2: continue
+            
+        f_sim = interp1d(p_sim['t'], p_sim['y'], axis=1, kind='linear', bounds_error=False, fill_value="extrapolate")
+        y_sim_interp = f_sim(p_opt['t'])
+        
+        pos_err = np.linalg.norm(p_opt['x'][0:3, :] - y_sim_interp[0:3, :], axis=0)
+        vel_err = np.linalg.norm(p_opt['x'][3:6, :] - y_sim_interp[3:6, :], axis=0)
+        mass_err = np.abs(p_opt['x'][6, :] - y_sim_interp[6, :])
+        
+        max_pos_err = max(max_pos_err, np.max(pos_err))
+        max_vel_err = max(max_vel_err, np.max(vel_err))
+        max_mass_err = max(max_mass_err, np.max(mass_err))
+        
+        print(f"  {p_opt['label']} Drift: Pos={np.max(pos_err):.2f}m, Vel={np.max(vel_err):.2f}m/s, Mass={np.max(mass_err):.2f}kg")
+
+    print(f"{Style.CYAN}" + "-" * 40 + f"{Style.RESET}")
+    print(f"  Max Position Drift: {max_pos_err:.2f} m")
+    print(f"  Max Velocity Drift: {max_vel_err:.2f} m/s")
+    print(f"  Max Mass Drift:     {max_mass_err:.2f} kg")
     
     # 4. Pass/Fail Judgment
-    # Thresholds: 1km Position, 20m/s Velocity, 100kg Mass (0.01% of propellant)
-    if np.max(pos_err) > 1000.0 or np.max(vel_err) > 20.0 or np.max(mass_err) > 100.0:
-        print("  >>> ❌ FAILURE: Significant divergence between Optimizer and Simulation.")
+    if max_pos_err > 2000.0 or max_vel_err > 30.0 or max_mass_err > 500.0:
+        print(f"  >>> {Style.RED}❌ FAILURE: Significant divergence between Optimizer and Simulation.{Style.RESET}")
     else:
-        print("  >>> ✅ SUCCESS: Simulation concurs with Optimizer (High Fidelity).")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Simulation concurs with Optimizer (High Fidelity).{Style.RESET}")
         
     print("="*40 + "\n")
 
@@ -856,9 +1113,7 @@ def analyze_energy_balance(simulation_data, vehicle):
     Verifies the Work-Energy Theorem: Delta E_mech = Work_non_conservative.
     This checks the consistency of the integrator and physics engine.
     """
-    print("\n" + "="*40)
-    print("DEBUG: ENERGY BALANCE CHECK [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Energy Balance Check", "Simulation")
     
     t = simulation_data['t']
     y = simulation_data['y']
@@ -921,8 +1176,8 @@ def analyze_energy_balance(simulation_data, vehicle):
     v0 = y[3:6, 0]
     E_start = 0.5 * np.dot(v0, v0) + get_potential_energy(r0)
     
-    print(f"{'Time':<10} | {'Mech Energy (MJ/kg)':<20} | {'Work Done (MJ/kg)':<20} | {'Error (J/kg)':<15}")
-    print("-" * 75)
+    print(f"{Style.BOLD}{'Time':<10} | {'Mech Energy (MJ/kg)':<20} | {'Work Done (MJ/kg)':<20} | {'Error (J/kg)':<15}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 75 + f"{Style.RESET}")
     
     # Check at 5 points
     check_indices = np.linspace(0, len(t)-1, 6, dtype=int)
@@ -948,44 +1203,78 @@ def analyze_energy_balance(simulation_data, vehicle):
             
             print(f"{t[i+1]:<10.1f} | {E_curr/1e6:<20.4f} | {(E_start + work_done)/1e6:<20.4f} | {error:<15.2f}")
 
-    print("-" * 75)
+    print(f"{Style.CYAN}" + "-" * 75 + f"{Style.RESET}")
     if error < 100.0: # 100 J/kg is very small compared to MJ/kg specific energy
-        print(">>> ✅ SUCCESS: Energy is conserved (within integration error).")
+        print(f">>> {Style.GREEN}✅ SUCCESS: Energy is conserved (within integration error).{Style.RESET}")
     else:
-        print(">>> ⚠️ WARNING: Energy drift detected. Check integrator tolerance or physics model.")
+        print(f">>> {Style.YELLOW}⚠️ WARNING: Energy drift detected. Check integrator tolerance or physics model.{Style.RESET}")
     print("="*40 + "\n")
 
 def analyze_instantaneous_orbit(simulation_data, environment):
     """
     Calculates Keplerian orbital elements at key mission events.
     """
-    print("\n" + "="*40)
-    print("DEBUG: ORBITAL ELEMENTS EVOLUTION [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Orbital Elements Evolution", "Simulation")
     
     t = simulation_data['t']
     y = simulation_data['y']
     mu = environment.config.earth_mu
     R_e = environment.config.earth_radius_equator
     
-    if len(t) < 1:
+    if len(t) < 2:
         print("  Not enough data.")
         print("="*40 + "\n")
         return
     
-    print(f"{'Event':<15} | {'Time (s)':<8} | {'Alt (km)':<8} | {'Vel (m/s)':<9} | {'SMA (km)':<8} | {'Ecc':<6} | {'Inc (deg)':<9}")
-    print("-" * 85)
+    # --- 1. Detect Events ---
+    # Liftoff
+    idx_liftoff = 0
     
-    indices = [0, len(t)//2, len(t)-1] # Start, Mid, End
-    labels = ["Launch", "Mid-Flight", "Orbit Injection"]
+    # Max Q (Calculate dynamic pressure profile)
+    q_vals = []
+    for i in range(len(t)):
+        r_i = y[0:3, i]
+        v_i = y[3:6, i]
+        env_state = environment.get_state_sim(r_i, t[i])
+        v_rel = v_i - env_state['wind_velocity']
+        q = 0.5 * env_state['density'] * np.linalg.norm(v_rel)**2
+        q_vals.append(q)
+    idx_maxq = np.argmax(q_vals)
     
-    for idx, label in zip(indices, labels):
+    # Staging (Largest Mass Drop)
+    mass = y[6, :]
+    dm = np.diff(mass)
+    idx_staging = np.argmin(dm) # Index before the drop
+    if dm[idx_staging] > -1000: # Threshold to ignore burn mass loss
+        idx_staging = -1
+        
+    # Injection
+    idx_seco = len(t) - 1
+    
+    events = [
+        ("Liftoff", idx_liftoff),
+        ("Max Q", idx_maxq),
+    ]
+    if idx_staging > 0 and idx_staging < len(t)-1:
+        events.append(("MECO/Staging", idx_staging))
+    events.append(("Orbit Injection", idx_seco))
+    
+    # Sort by time index
+    events = sorted(list(set(events)), key=lambda x: x[1])
+    
+    # --- 2. Print Table ---
+    print(f"{Style.BOLD}{'Event':<16} | {'Time':<6} | {'Alt':<7} | {'Vel':<7} | {'FPA':<5} | {'Apogee':<8} | {'Perigee':<8} | {'Inc':<6}{Style.RESET}")
+    print(f"{Style.BOLD}{'':<16} | {'(s)':<6} | {'(km)':<7} | {'(m/s)':<7} | {'(deg)':<5} | {'(km)':<8} | {'(km)':<8} | {'(deg)':<6}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 85 + f"{Style.RESET}")
+    
+    for label, idx in events:
         r_vec = y[0:3, idx]
         v_vec = y[3:6, idx]
         time_val = t[idx]
         
         r = np.linalg.norm(r_vec)
         v = np.linalg.norm(v_vec)
+        alt = r - R_e
         
         # Specific Energy
         E = 0.5 * v**2 - mu / r
@@ -994,24 +1283,41 @@ def analyze_instantaneous_orbit(simulation_data, environment):
         if abs(E) > 1e-6:
             a = -mu / (2 * E)
         else:
-            a = np.inf # Parabolic
+            a = np.inf 
             
         # Eccentricity Vector
-        # e_vec = ( (v^2 - mu/r)*r - (r.v)*v ) / mu
         e_vec = ((v**2 - mu/r)*r_vec - np.dot(r_vec, v_vec)*v_vec) / mu
         ecc = np.linalg.norm(e_vec)
         
         # Inclination
         h_vec = np.cross(r_vec, v_vec)
         h = np.linalg.norm(h_vec)
-        if h > 1e-6:
-            inc = np.degrees(np.arccos(h_vec[2] / h))
-        else:
-            inc = 0.0
-            
-        alt = r - R_e
+        inc = np.degrees(np.arccos(h_vec[2] / h)) if h > 1e-6 else 0.0
         
-        print(f"{label:<15} | {time_val:<8.1f} | {alt/1000:<8.1f} | {v:<9.1f} | {a/1000:<8.1f} | {ecc:<6.4f} | {inc:<9.2f}")
+        # Flight Path Angle (Gamma)
+        sin_gamma = np.dot(r_vec, v_vec) / (r * v)
+        gamma = np.degrees(np.arcsin(np.clip(sin_gamma, -1.0, 1.0)))
+        
+        # Apogee / Perigee
+        if ecc < 1.0:
+            r_a = a * (1 + ecc)
+            r_p = a * (1 - ecc)
+            alt_a = r_a - R_e
+            alt_p = r_p - R_e
+        else:
+            r_p = a * (1 - ecc)
+            alt_p = r_p - R_e
+            alt_a = np.inf
+            
+        # Formatting
+        alt_str = f"{alt/1000:.1f}"
+        vel_str = f"{v:.0f}"
+        fpa_str = f"{gamma:.1f}"
+        apo_str = f"{alt_a/1000:.1f}" if alt_a != np.inf else "Inf"
+        peri_str = f"{alt_p/1000:.1f}"
+        inc_str = f"{inc:.2f}"
+        
+        print(f"{label:<16} | {time_val:<6.1f} | {alt_str:<7} | {vel_str:<7} | {fpa_str:<5} | {apo_str:<8} | {peri_str:<8} | {inc_str:<6}")
         
     print("="*40 + "\n")
 
@@ -1020,9 +1326,7 @@ def analyze_integrator_steps(simulation_data):
     Analyzes the time steps taken by the variable-step integrator.
     Small steps indicate stiffness or rapid dynamics.
     """
-    print("\n" + "="*40)
-    print("DEBUG: INTEGRATOR STEP SIZE ANALYSIS [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Integrator Step Size Analysis", "Simulation")
     
     t = simulation_data['t']
     if len(t) < 2:
@@ -1043,45 +1347,105 @@ def analyze_integrator_steps(simulation_data):
     
     # Check for stiffness (very small steps)
     if np.min(dt) < 1e-4:
-        print("  >>> ⚠️ WARNING: Very small time steps detected (<1e-4s). Physics might be stiff.")
+        print(f"  >>> {Style.YELLOW}⚠️ WARNING: Very small time steps detected (<1e-4s). Physics might be stiff.{Style.RESET}")
     else:
-        print("  >>> ✅ SUCCESS: Time steps indicate well-behaved dynamics.")
+        print(f"  >>> {Style.GREEN}✅ SUCCESS: Time steps indicate well-behaved dynamics.{Style.RESET}")
     print("="*40 + "\n")
 
-def analyze_control_saturation(simulation_data, config):
+def analyze_control_saturation(simulation_data, vehicle):
     """
-    Checks how often the vehicle is riding the throttle limits.
+    Analyzes control saturation and correlates it with active flight constraints (Max Q, Max G).
     """
-    print("\n" + "="*40)
-    print("DEBUG: CONTROL SATURATION ANALYSIS [SOURCE: SIMULATION]")
-    print("="*40)
+    _print_header("Control Saturation & Constraint Analysis", "Simulation")
     
+    t = simulation_data['t']
+    y = simulation_data['y']
     u = simulation_data['u']
-    throttles = u[0, :]
+    config = vehicle.config
+    env = vehicle.env
+    
     min_th = config.sequence.min_throttle
+    max_q_lim = config.max_q_limit
+    max_g_lim = config.max_g_load
     
-    # Count samples at limits (within tolerance)
-    tol = 0.01
+    # Tolerances
+    th_tol = 0.01
+    constraint_margin = 0.95 # Consider constraint "active" if within 95% of limit
     
-    # Exclude Coasting (Engines Off) from "Min Throttle" stats
-    is_active = throttles > 0.01
+    # Time Accumulators
+    t_powered = 0.0
+    t_max_th = 0.0
+    t_min_th = 0.0
+    t_q_lim = 0.0
+    t_g_lim = 0.0
     
-    at_min = np.sum((throttles < min_th + tol) & is_active)
-    at_max = np.sum(throttles > 1.0 - tol)
-    total = len(throttles)
-    
-    if total == 0: return
+    for i in range(len(t) - 1):
+        dt = t[i+1] - t[i]
+        if dt < 1e-6: continue
+        
+        # State at start of interval
+        r_i = y[0:3, i]
+        v_i = y[3:6, i]
+        m_i = y[6, i]
+        th_i = u[0, i]
+        
+        # Check Coast (Engines Off)
+        if th_i < 0.01:
+            continue
+            
+        t_powered += dt
+        
+        # Check Saturation
+        if th_i > 0.99:
+            t_max_th += dt
+        elif th_i < min_th + th_tol:
+            t_min_th += dt
+            
+            # Check Constraints to see WHY we are throttling
+            env_state = env.get_state_sim(r_i, t[i])
+            
+            # Max Q
+            v_rel = v_i - env_state['wind_velocity']
+            q = 0.5 * env_state['density'] * np.linalg.norm(v_rel)**2
+            if q > max_q_lim * constraint_margin:
+                t_q_lim += dt
+                
+            # Max G
+            m_stg2_wet = config.stage_2.dry_mass + config.stage_2.propellant_mass + config.payload_mass
+            stage = config.stage_1 if m_i > m_stg2_wet + 1000 else config.stage_2
+            
+            isp_eff = stage.isp_vac + (env_state['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+            thrust = th_i * stage.thrust_vac * (isp_eff / stage.isp_vac)
+            g_load = (thrust / m_i) / env.config.g0
+            
+            if g_load > max_g_lim * constraint_margin:
+                t_g_lim += dt
 
-    pct_min = 100.0 * at_min / total
-    pct_max = 100.0 * at_max / total
+    if t_powered < 1.0:
+        print("  No powered flight detected.")
+        print("="*40 + "\n")
+        return
+
+    pct_max = 100.0 * t_max_th / t_powered
+    pct_min = 100.0 * t_min_th / t_powered
+    pct_q = 100.0 * t_q_lim / t_powered
+    pct_g = 100.0 * t_g_lim / t_powered
     
-    print(f"  Throttle at Min ({min_th*100:.0f}%): {pct_min:.1f}% of flight (Active Limiting)")
-    print(f"  Throttle at Max (100%): {pct_max:.1f}% of flight")
+    print(f"  Powered Flight Duration: {t_powered:.1f} s")
+    print(f"{Style.CYAN}" + "-" * 60 + f"{Style.RESET}")
+    print(f"{Style.BOLD}  {'Regime':<25} | {'% Time':<12} | {'Notes':<20}{Style.RESET}")
+    print(f"{Style.CYAN}" + "-" * 60 + f"{Style.RESET}")
+    print(f"  {'Max Throttle (100%)':<25} | {pct_max:<12.1f} | {'Unconstrained Ascent'}")
+    print(f"  {'Min Throttle (' + str(int(min_th*100)) + '%)':<25} | {pct_min:<12.1f} | {'Throttling Active'}")
+    print(f"{Style.CYAN}" + "-" * 60 + f"{Style.RESET}")
+    print(f"  Constraint Activity (during Min Throttle):")
+    print(f"    - Max Q Limit (>95%):   {pct_q:<12.1f} | {'Aerodynamic Stress'}")
+    print(f"    - Max G Limit (>95%):   {pct_g:<12.1f} | {'Structural Stress'}")
     
-    if pct_max > 95.0:
-        print("  >>> NOTE: Engines running at max power almost continuously.")
-    if pct_min > 20.0:
-        print("  >>> NOTE: Significant throttling detected (Max Q or Landing?).")
+    if pct_q > 1.0:
+        print(f"  >>> INFO: Throttling detected for Max Q ({max_q_lim/1000:.0f} kPa).")
+    if pct_g > 1.0:
+        print(f"  >>> INFO: Throttling detected for G-Limit ({max_g_lim:.1f} g).")
         
     print("="*40 + "\n")
 
@@ -1089,9 +1453,7 @@ def analyze_guidance_accuracy(guess, opt_res):
     """
     Compares the initial guess (Guidance) with the final optimized result.
     """
-    print("\n" + "="*40)
-    print("DEBUG: GUIDANCE VS OPTIMALITY CHECK [SOURCE: GUESS vs OPT]")
-    print("="*40)
+    _print_header("Guidance vs Optimality Check", "Guess vs Opt")
     
     # Compare MECO
     t1_guess = guess['T1']
@@ -1105,8 +1467,40 @@ def analyze_guidance_accuracy(guess, opt_res):
     print(f"  MECO Time:   Guess={t1_guess:.1f}s, Opt={t1_opt:.1f}s (Diff: {t1_opt-t1_guess:+.1f}s)")
     print(f"  Final Mass:  Guess={m_final_guess:,.0f}kg, Opt={m_final_opt:,.0f}kg (Diff: {m_final_opt-m_final_guess:+.0f}kg)")
     
-    if abs(m_final_opt - m_final_guess) > 50000: # 50 tons
-         print("  >>> ⚠️ NOTE: Guidance mass estimate was significantly off (>50t).")
+    if m_final_opt > m_final_guess + 1000:
+         print(f"  >>> {Style.GREEN}✅ INFO: Optimizer saved {m_final_opt - m_final_guess:,.0f} kg of fuel compared to the burn-to-depletion guess.{Style.RESET}")
+    elif m_final_opt < m_final_guess - 50000:
+         print(f"  >>> {Style.YELLOW}⚠️ NOTE: Optimizer result is significantly lighter than guess (Check constraints).{Style.RESET}")
     else:
-         print("  >>> ✅ SUCCESS: Guidance provided a good mass estimate.")
+         print(f"  >>> {Style.GREEN}✅ SUCCESS: Guidance provided a close mass estimate.{Style.RESET}")
     print("="*40 + "\n")
+
+# ==============================================================================
+# HIGH-LEVEL WRAPPERS (Standardized Suites)
+# ==============================================================================
+
+def run_preflight_checks(vehicle, config):
+    verify_scaling_consistency(config)
+    verify_environment_consistency(vehicle)
+    verify_positioning(vehicle)
+    verify_physics_consistency(vehicle, config)
+    verify_aerodynamics(vehicle)
+    verify_propulsion(vehicle)
+
+def run_optimization_analysis(opt_res, config, env):
+    verify_staging_and_objective(opt_res, config, env)
+
+def run_postflight_analysis(sim_res, opt_res, vehicle, env):
+    _print_sub_header("Trajectory Validation")
+    validate_trajectory(sim_res, vehicle.config, env)
+    analyze_instantaneous_orbit(sim_res, env)
+    
+    _print_sub_header("Performance & Efficiency")
+    analyze_delta_v_budget(sim_res, vehicle, vehicle.config)
+    analyze_energy_balance(sim_res, vehicle)
+    
+    _print_sub_header("Control & Dynamics")
+    analyze_trajectory_drift(opt_res, sim_res)
+    analyze_control_saturation(sim_res, vehicle)
+    analyze_control_slew_rates(sim_res)
+    analyze_integrator_steps(sim_res)

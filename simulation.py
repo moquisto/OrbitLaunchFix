@@ -29,18 +29,14 @@ def run_simulation(optimization_result, vehicle, config):
                            fill_value="extrapolate", bounds_error=False)
 
     # --- DEBUG: Verify Control Handoff ---
-    print(f"[Debug] Verifying Control Signal Handoff (Phase 1)...")
-    # Check a few points to ensure the optimizer's plan is faithfully reproduced
-    test_indices = [0, N1 // 2, N1 - 1]
-    for idx in test_indices:
-        # Sample time: slightly into the interval to check the "Hold" behavior
-        t_sample = t_grid_1[idx] + 1e-3 
-        u_opt = U1[:, idx]
-        u_sim = ctrl_func_1(t_sample)
-        
-        diff = np.linalg.norm(u_opt - u_sim)
-        if diff > 1e-5:
-             print(f"  ! CONTROL MISMATCH at Node {idx}: Opt={u_opt} vs Sim={u_sim}")
+    # Calculate max reconstruction error to ensure fidelity
+    max_err_1 = 0.0
+    for i in range(N1):
+        t_sample = t_grid_1[i] + 1e-5
+        u_val = ctrl_func_1(t_sample)
+        err = np.linalg.norm(u_val - U1[:, i])
+        if err > max_err_1: max_err_1 = err
+    print(f"  > Control Reconstruction (Phase 1): Max Error = {max_err_1:.1e}")
 
     # Phase 3
     N3 = U3.shape[1]
@@ -49,17 +45,13 @@ def run_simulation(optimization_result, vehicle, config):
                            fill_value="extrapolate", bounds_error=False)
 
     # --- DEBUG: Verify Control Handoff (Phase 3) ---
-    print(f"[Debug] Verifying Control Signal Handoff (Phase 3)...")
-    test_indices_3 = [0, N3 // 2, N3 - 1]
-    for idx in test_indices_3:
-        # Sample time: slightly into the interval
-        t_sample = t_grid_3[idx] + 1e-3 
-        u_opt = U3[:, idx]
-        u_sim = ctrl_func_3(t_sample)
-        
-        diff = np.linalg.norm(u_opt - u_sim)
-        if diff > 1e-5:
-             print(f"  ! CONTROL MISMATCH at Node {idx}: Opt={u_opt} vs Sim={u_sim}")
+    max_err_3 = 0.0
+    for i in range(N3):
+        t_sample = t_grid_3[i] + 1e-5
+        u_val = ctrl_func_3(t_sample)
+        err = np.linalg.norm(u_val - U3[:, i])
+        if err > max_err_3: max_err_3 = err
+    print(f"  > Control Reconstruction (Phase 3): Max Error = {max_err_3:.1e}")
 
     # --- 3. DEFINE DYNAMICS WRAPPER ---
     def sim_dynamics(t, y, phase_mode, t_start_phase, ctrl_func):
@@ -103,14 +95,22 @@ def run_simulation(optimization_result, vehicle, config):
     y0 = np.concatenate([r0, v0, [m0]])
     
     print(f"[Simulation] Phase 1 (Boost): 0.0s -> {T1:.2f}s")
+    
+    # DIAGNOSE LIFTOFF
+    print("  [Liftoff Check]")
+    vehicle.diagnose_forces(y0, U1[0,0], U1[1:,0], 0.0, "boost")
+
     res1 = solve_ivp(
         fun=lambda t, y: sim_dynamics(t, y, "boost", 0.0, ctrl_func_1),
         t_span=(0, T1),
         y0=y0,
         events=altitude_event,
-        rtol=1e-6, atol=1e-9,
+        rtol=1e-9, atol=1e-12,
         method='RK45'
     )
+    
+    steps_1 = len(res1.t)
+    print(f"  > Integrator: {steps_1} steps, Success={res1.success}, Msg='{res1.message}'")
 
     if not res1.success and res1.status == -1:
         print("[Simulation] ERROR: Simulation stopped early in Phase 1 (Crash or Error).")
@@ -128,6 +128,7 @@ def run_simulation(optimization_result, vehicle, config):
         drift_mass = opt_mass - sim_mass
         print(f"[Debug] MECO Drift: Pos={drift_pos:.1f}m, Mass={drift_mass:.2f}kg")
         # Diagnose forces at MECO
+        print("  [MECO Check]")
         u_meco = U1[:, -1]
         vehicle.diagnose_forces(res1.y[:, -1], u_meco[0], u_meco[1:], res1.t[-1], "boost")
 
@@ -145,7 +146,7 @@ def run_simulation(optimization_result, vehicle, config):
             t_span=(t_current, t_current + T2),
             y0=y_current,
             events=altitude_event,
-            rtol=1e-6, atol=1e-9,
+            rtol=1e-9, atol=1e-12,
             method='RK45'
         )
         results_list.append(res2)
@@ -159,15 +160,23 @@ def run_simulation(optimization_result, vehicle, config):
     
     # --- 8. PHASE 3: SHIP ASCENT ---
     print(f"[Simulation] Phase 3 (Ship): {t_current:.2f}s -> {t_current + T3:.2f}s")
+    
+    # DIAGNOSE STAGING
+    print("  [Staging Check]")
+    vehicle.diagnose_forces(y_current, U3[0,0], U3[1:,0], t_current, "ship")
+
     res3 = solve_ivp(
         fun=lambda t, y: sim_dynamics(t, y, "ship", t_current, ctrl_func_3),
         t_span=(t_current, t_current + T3),
         y0=y_current,
         events=altitude_event,
-        rtol=1e-6, atol=1e-9,
+        rtol=1e-9, atol=1e-12,
         method='RK45'
     )
     results_list.append(res3)
+    
+    steps_3 = len(res3.t)
+    print(f"  > Integrator: {steps_3} steps, Success={res3.success}, Msg='{res3.message}'")
     
     alt_3 = (np.linalg.norm(res3.y[0:3, -1]) - vehicle.env.config.earth_radius_equator) / 1000.0
     print(f"[Simulation] Phase 3 End: Alt={alt_3:.1f}km, Vel={np.linalg.norm(res3.y[3:6, -1]):.1f}m/s")
@@ -181,6 +190,11 @@ def run_simulation(optimization_result, vehicle, config):
         sim_mass = res3.y[6, -1]
         drift_mass = opt_mass - sim_mass
         print(f"[Debug] SECO Drift: Pos={drift_pos/1000:.2f}km, Mass={drift_mass:.2f}kg")
+        
+        # DIAGNOSE INJECTION
+        print("  [Injection Check]")
+        u_seco = U3[:, -1]
+        vehicle.diagnose_forces(res3.y[:, -1], u_seco[0], u_seco[1:], res3.t[-1], "ship")
 
     # --- 9. CONSOLIDATE RESULTS ---
     t_full = np.concatenate([res.t for res in results_list])
