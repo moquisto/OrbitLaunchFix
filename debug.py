@@ -822,15 +822,33 @@ def analyze_trajectory_drift(optimization_data, simulation_data):
     t_sim = simulation_data['t']
     y_sim = simulation_data['y']
     
-    f_sim = interp1d(t_sim, y_sim, axis=1, kind='linear', bounds_error=False, fill_value="extrapolate")
+    # Handle duplicates in t_sim (caused by phase concatenation)
+    t_sim_unique, unique_indices = np.unique(t_sim, return_index=True)
+    y_sim_unique = y_sim[:, unique_indices]
+    
+    if len(t_sim_unique) < 2:
+        print("  Not enough simulation data for drift analysis.")
+        return
+
+    f_sim = interp1d(t_sim_unique, y_sim_unique, axis=1, kind='linear', bounds_error=False, fill_value="extrapolate")
     y_sim_interp = f_sim(t_opt_full)
     
     # 3. Calculate Errors
     pos_err = np.linalg.norm(x_opt_full[0:3, :] - y_sim_interp[0:3, :], axis=0)
     vel_err = np.linalg.norm(x_opt_full[3:6, :] - y_sim_interp[3:6, :], axis=0)
+    mass_err = np.abs(x_opt_full[6, :] - y_sim_interp[6, :])
     
     print(f"  Position Drift: Max = {np.max(pos_err):.2f} m, Avg = {np.mean(pos_err):.2f} m")
     print(f"  Velocity Drift: Max = {np.max(vel_err):.2f} m/s, Avg = {np.mean(vel_err):.2f} m/s")
+    print(f"  Mass Drift:     Max = {np.max(mass_err):.2f} kg, Avg = {np.mean(mass_err):.2f} kg")
+    
+    # 4. Pass/Fail Judgment
+    # Thresholds: 1km Position, 20m/s Velocity, 100kg Mass (0.01% of propellant)
+    if np.max(pos_err) > 1000.0 or np.max(vel_err) > 20.0 or np.max(mass_err) > 100.0:
+        print("  >>> ❌ FAILURE: Significant divergence between Optimizer and Simulation.")
+    else:
+        print("  >>> ✅ SUCCESS: Simulation concurs with Optimizer (High Fidelity).")
+        
     print("="*40 + "\n")
 
 def analyze_energy_balance(simulation_data, vehicle):
@@ -846,8 +864,29 @@ def analyze_energy_balance(simulation_data, vehicle):
     y = simulation_data['y']
     u = simulation_data['u']
     
+    if len(t) < 2:
+        print("  Not enough data for energy analysis.")
+        print("="*40 + "\n")
+        return
+    
     # Constants
     mu = vehicle.env.config.earth_mu
+    R_e = vehicle.env.config.earth_radius_equator
+    J2 = vehicle.env.config.j2_constant
+    use_j2 = vehicle.env.config.use_j2_perturbation
+
+    def get_potential_energy(r_vec):
+        r = np.linalg.norm(r_vec)
+        pe = -mu / r
+        
+        if use_j2:
+            z = r_vec[2]
+            sin_phi = z / r
+            # J2 Potential: U_j2 = (mu * J2 * Re^2 / (2 * r^3)) * (3 * sin_phi^2 - 1)
+            term_j2 = (mu * J2 * R_e**2) / (2 * r**3) * (3 * sin_phi**2 - 1)
+            pe += term_j2
+            
+        return pe
     
     def get_specific_power(idx):
         r_i = y[0:3, idx]
@@ -875,11 +914,12 @@ def analyze_energy_balance(simulation_data, vehicle):
 
     # Arrays for integration
     work_done = 0.0
+    error = 0.0 # Initialize to ensure scope validity
     
     # Initial Energy
     r0 = y[0:3, 0]
     v0 = y[3:6, 0]
-    E_start = 0.5 * np.dot(v0, v0) - mu / np.linalg.norm(r0)
+    E_start = 0.5 * np.dot(v0, v0) + get_potential_energy(r0)
     
     print(f"{'Time':<10} | {'Mech Energy (MJ/kg)':<20} | {'Work Done (MJ/kg)':<20} | {'Error (J/kg)':<15}")
     print("-" * 75)
@@ -901,7 +941,7 @@ def analyze_energy_balance(simulation_data, vehicle):
             # Calculate Energy at i+1
             r_next = y[0:3, i+1]
             v_next = y[3:6, i+1]
-            E_curr = 0.5 * np.dot(v_next, v_next) - mu / np.linalg.norm(r_next)
+            E_curr = 0.5 * np.dot(v_next, v_next) + get_potential_energy(r_next)
             
             delta_E = E_curr - E_start
             error = abs(delta_E - work_done)
@@ -927,6 +967,11 @@ def analyze_instantaneous_orbit(simulation_data, environment):
     y = simulation_data['y']
     mu = environment.config.earth_mu
     R_e = environment.config.earth_radius_equator
+    
+    if len(t) < 1:
+        print("  Not enough data.")
+        print("="*40 + "\n")
+        return
     
     print(f"{'Event':<15} | {'Time (s)':<8} | {'Alt (km)':<8} | {'Vel (m/s)':<9} | {'SMA (km)':<8} | {'Ecc':<6} | {'Inc (deg)':<9}")
     print("-" * 85)
@@ -986,6 +1031,10 @@ def analyze_integrator_steps(simulation_data):
 
     dt = np.diff(t)
     dt = dt[dt > 1e-9] # Filter out zero-length steps caused by phase concatenation
+    
+    if len(dt) == 0:
+        print("  Not enough valid time steps.")
+        return
     
     print(f"  Total Steps: {len(t)}")
     print(f"  Min Step:    {np.min(dt):.2e} s")

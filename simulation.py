@@ -123,7 +123,10 @@ def run_simulation(optimization_result, vehicle, config):
         opt_pos = optimization_result["X1"][0:3, -1]
         sim_pos = res1.y[0:3, -1]
         drift_pos = np.linalg.norm(opt_pos - sim_pos)
-        print(f"[Debug] MECO Drift (Opt vs Sim): {drift_pos:.1f} meters")
+        opt_mass = optimization_result["X1"][6, -1]
+        sim_mass = res1.y[6, -1]
+        drift_mass = opt_mass - sim_mass
+        print(f"[Debug] MECO Drift: Pos={drift_pos:.1f}m, Mass={drift_mass:.2f}kg")
         # Diagnose forces at MECO
         u_meco = U1[:, -1]
         vehicle.diagnose_forces(res1.y[:, -1], u_meco[0], u_meco[1:], res1.t[-1], "boost")
@@ -174,7 +177,10 @@ def run_simulation(optimization_result, vehicle, config):
         opt_pos = optimization_result["X3"][0:3, -1]
         sim_pos = res3.y[0:3, -1]
         drift_pos = np.linalg.norm(opt_pos - sim_pos)
-        print(f"[Debug] SECO Drift (Opt vs Sim): {drift_pos/1000:.1f} km")
+        opt_mass = optimization_result["X3"][6, -1]
+        sim_mass = res3.y[6, -1]
+        drift_mass = opt_mass - sim_mass
+        print(f"[Debug] SECO Drift: Pos={drift_pos/1000:.2f}km, Mass={drift_mass:.2f}kg")
 
     # --- 9. CONSOLIDATE RESULTS ---
     t_full = np.concatenate([res.t for res in results_list])

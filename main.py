@@ -301,11 +301,14 @@ def solve_optimal_trajectory(config, vehicle, environment):
         debug.print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T1_scaled, X3, U3, T3_scaled)
     
     # --- 6b. CHECK SCALING ---
-    debug.check_variable_scaling(sol, {
+    scaling_vars = {
         "T1": T1_scaled, "T3": T3_scaled,
         "X1": X1, "X3": X3,
         "U1": U1, "U3": U3
-    })
+    }
+    if use_coast:
+        scaling_vars.update({"T2": T2_scaled, "X2": X2})
+    debug.check_variable_scaling(sol, scaling_vars)
 
     # --- 7. OUTPUT ---
     res = {}
