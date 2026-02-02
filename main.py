@@ -284,14 +284,14 @@ def solve_optimal_trajectory(config, vehicle, environment):
     u3_guess = np.vstack([np.atleast_2d(guess["TH3"]), guess["TD3"]])
     set_guess(U3, u3_guess[:, :N])
     
+    # --- 6. SOLVE ---
+    print(f"[Optimizer] Starting IPOPT solver (Max Iter={config.max_iter})...")
+    opti.solver("ipopt", {"expand": True}, {"max_iter": config.max_iter, "tol": 1e-6, "print_level": 5})
+    
     # --- 6a. DEBUG STRUCTURE ---
     debug.debug_optimization_structure(opti)
     
-    # --- 6. SOLVE ---
-    print(f"[Optimizer] Starting IPOPT solver (Max Iter={config.max_iter})...")
     t_solve = time.time()
-    opti.solver("ipopt", {"expand": True}, {"max_iter": config.max_iter, "tol": 1e-6, "print_level": 5})
-    
     try:
         sol = opti.solve()
         print(f"[Optimizer] SUCCESS: Optimal solution found in {time.time() - t_solve:.2f}s.")
@@ -300,6 +300,13 @@ def solve_optimal_trajectory(config, vehicle, environment):
         sol = opti.debug
         debug.print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T1_scaled, X3, U3, T3_scaled)
     
+    # --- 6b. CHECK SCALING ---
+    debug.check_variable_scaling(sol, {
+        "T1": T1_scaled, "T3": T3_scaled,
+        "X1": X1, "X3": X3,
+        "U1": U1, "U3": U3
+    })
+
     # --- 7. OUTPUT ---
     res = {}
     res["T1"] = sol.value(T1_scaled) * scaling.time
@@ -315,6 +322,9 @@ def solve_optimal_trajectory(config, vehicle, environment):
     res["T3"] = sol.value(T3_scaled) * scaling.time
     res["X3"] = sol.value(X3) * s_vec[:, None]
     res["U3"] = sol.value(U3)
+    
+    # --- 7a. DEBUG GUIDANCE ---
+    debug.analyze_guidance_accuracy(guess, res)
     
     print(f"[Optimizer] Total optimization time: {time.time() - t_start:.2f}s")
     
@@ -353,7 +363,11 @@ if __name__ == "__main__":
     print("--- Analyzing Efficiency ---")
     debug.analyze_delta_v_budget(sim_res, veh, StarshipBlock2)
     debug.analyze_control_slew_rates(sim_res)
+    debug.analyze_energy_balance(sim_res, veh)
+    debug.analyze_instantaneous_orbit(sim_res, env)
     debug.analyze_trajectory_drift(opt_res, sim_res)
+    debug.analyze_integrator_steps(sim_res)
+    debug.analyze_control_saturation(sim_res, StarshipBlock2)
     
     print("--- Plotting Results ---")
     analysis.plot_mission(opt_res, sim_res, env, StarshipBlock2)
