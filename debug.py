@@ -177,6 +177,7 @@ def debug_optimization_structure(opti):
     print("DEBUG: OPTIMIZATION STRUCTURE (Jacobian) [SOURCE: CASADI]")
     print("="*40)
     
+    J = None
     try:
         # Get Jacobian of Constraints (g) w.r.t Variables (x)
         J = ca.jacobian(opti.g, opti.x)
@@ -196,8 +197,16 @@ def debug_optimization_structure(opti):
         else:
             print("  >>> ⚠️ WARNING: Jacobian is dense! Check constraint formulation.")
             
-        # Check magnitude of non-zeros to detect scaling issues
-        J_eval = opti.value(J)
+    except Exception as e:
+        print(f"  Could not inspect Jacobian sparsity: {e}")
+        print("="*40 + "\n")
+        return
+
+    # Check magnitude of non-zeros to detect scaling issues
+    try:
+        # Evaluate via Function to avoid Opti context assertion errors on derived expressions
+        f_J = ca.Function('f_J', [opti.x], [J])
+        J_eval = f_J(opti.debug.value(opti.x))
         J_vals = np.abs(J_eval.nonzeros())
         
         if len(J_vals) > 0:
@@ -211,8 +220,44 @@ def debug_optimization_structure(opti):
             else:
                 print(f"  >>> ✅ SUCCESS: Gradient scaling is acceptable.")
     except Exception as e:
-        print(f"  Could not inspect Jacobian: {e}")
+        msg = str(e)
+        if "solved()" in msg or "Solver not initialized" in msg:
+             pass # Scaling check skipped (requires solution)
+        else:
+             print(f"  Note: Could not inspect Jacobian values (Gradient Range). Error: {msg}")
         
+    print("="*40 + "\n")
+
+def check_variable_scaling(sol, vars_dict):
+    """
+    Checks if the optimized variables are well-scaled (close to O(1)).
+    """
+    print("\n" + "="*40)
+    print("DEBUG: VARIABLE SCALING CHECK [SOURCE: OPTIMIZER]")
+    print("="*40)
+    
+    for name, var in vars_dict.items():
+        if var is None: continue
+        try:
+            val = sol.value(var)
+            # Handle scalar vs array
+            if np.isscalar(val) or val.size == 1:
+                print(f"  {name:<5} | Scalar: {float(val):.4f}")
+                if abs(val) < 0.01 or abs(val) > 100:
+                    print(f"          >>> ⚠️ WARNING: Scaling might be off (Ideal ~1.0)")
+            else:
+                # Array
+                abs_val = np.abs(val)
+                mean_val = np.mean(abs_val)
+                max_val = np.max(abs_val)
+                min_val = np.min(abs_val)
+                
+                print(f"  {name:<5} | Range: [{min_val:.4f}, {max_val:.4f}] | Mean: {mean_val:.4f}")
+                if mean_val < 0.01 or mean_val > 100:
+                    print(f"          >>> ⚠️ WARNING: Scaling might be off (Ideal ~1.0)")
+        except Exception as e:
+            print(f"  {name:<5} | Could not evaluate: {e}")
+
     print("="*40 + "\n")
 
 def verify_staging_and_objective(opt_res, config, environment=None):
@@ -786,4 +831,233 @@ def analyze_trajectory_drift(optimization_data, simulation_data):
     
     print(f"  Position Drift: Max = {np.max(pos_err):.2f} m, Avg = {np.mean(pos_err):.2f} m")
     print(f"  Velocity Drift: Max = {np.max(vel_err):.2f} m/s, Avg = {np.mean(vel_err):.2f} m/s")
+    print("="*40 + "\n")
+
+def analyze_energy_balance(simulation_data, vehicle):
+    """
+    Verifies the Work-Energy Theorem: Delta E_mech = Work_non_conservative.
+    This checks the consistency of the integrator and physics engine.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: ENERGY BALANCE CHECK [SOURCE: SIMULATION]")
+    print("="*40)
+    
+    t = simulation_data['t']
+    y = simulation_data['y']
+    u = simulation_data['u']
+    
+    # Constants
+    mu = vehicle.env.config.earth_mu
+    
+    def get_specific_power(idx):
+        r_i = y[0:3, idx]
+        v_i = y[3:6, idx]
+        m_i = y[6, idx]
+        th_i = u[0, idx]
+        dir_i = u[1:, idx]
+        t_i = t[idx]
+        
+        # Determine phase for correct drag model
+        m_ship_wet = vehicle.config.stage_2.dry_mass + vehicle.config.stage_2.propellant_mass + vehicle.config.payload_mass
+        
+        if m_i > m_ship_wet + 1000:
+            phase = "coast" if th_i < 0.01 else "boost"
+        else:
+            phase = "coast_2" if th_i < 0.01 else "ship"
+        
+        dyn = vehicle.get_dynamics(y[:, idx], th_i, dir_i, t_i, stage_mode=phase, scaling=None)
+        acc_total = dyn[3:6]
+        
+        env = vehicle.env.get_state_sim(r_i, t_i)
+        acc_nc = acc_total - env['gravity']
+        
+        return np.dot(acc_nc, v_i)
+
+    # Arrays for integration
+    work_done = 0.0
+    
+    # Initial Energy
+    r0 = y[0:3, 0]
+    v0 = y[3:6, 0]
+    E_start = 0.5 * np.dot(v0, v0) - mu / np.linalg.norm(r0)
+    
+    print(f"{'Time':<10} | {'Mech Energy (MJ/kg)':<20} | {'Work Done (MJ/kg)':<20} | {'Error (J/kg)':<15}")
+    print("-" * 75)
+    
+    # Check at 5 points
+    check_indices = np.linspace(0, len(t)-1, 6, dtype=int)
+    
+    power_prev = get_specific_power(0)
+    
+    for i in range(len(t) - 1):
+        dt = t[i+1] - t[i]
+        power_curr = get_specific_power(i+1)
+        
+        # Trapezoidal Integration (Higher accuracy than Euler)
+        work_done += 0.5 * (power_prev + power_curr) * dt
+        power_prev = power_curr
+        
+        if i+1 in check_indices:
+            # Calculate Energy at i+1
+            r_next = y[0:3, i+1]
+            v_next = y[3:6, i+1]
+            E_curr = 0.5 * np.dot(v_next, v_next) - mu / np.linalg.norm(r_next)
+            
+            delta_E = E_curr - E_start
+            error = abs(delta_E - work_done)
+            
+            print(f"{t[i+1]:<10.1f} | {E_curr/1e6:<20.4f} | {(E_start + work_done)/1e6:<20.4f} | {error:<15.2f}")
+
+    print("-" * 75)
+    if error < 100.0: # 100 J/kg is very small compared to MJ/kg specific energy
+        print(">>> ✅ SUCCESS: Energy is conserved (within integration error).")
+    else:
+        print(">>> ⚠️ WARNING: Energy drift detected. Check integrator tolerance or physics model.")
+    print("="*40 + "\n")
+
+def analyze_instantaneous_orbit(simulation_data, environment):
+    """
+    Calculates Keplerian orbital elements at key mission events.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: ORBITAL ELEMENTS EVOLUTION [SOURCE: SIMULATION]")
+    print("="*40)
+    
+    t = simulation_data['t']
+    y = simulation_data['y']
+    mu = environment.config.earth_mu
+    R_e = environment.config.earth_radius_equator
+    
+    print(f"{'Event':<15} | {'Time (s)':<8} | {'Alt (km)':<8} | {'Vel (m/s)':<9} | {'SMA (km)':<8} | {'Ecc':<6} | {'Inc (deg)':<9}")
+    print("-" * 85)
+    
+    indices = [0, len(t)//2, len(t)-1] # Start, Mid, End
+    labels = ["Launch", "Mid-Flight", "Orbit Injection"]
+    
+    for idx, label in zip(indices, labels):
+        r_vec = y[0:3, idx]
+        v_vec = y[3:6, idx]
+        time_val = t[idx]
+        
+        r = np.linalg.norm(r_vec)
+        v = np.linalg.norm(v_vec)
+        
+        # Specific Energy
+        E = 0.5 * v**2 - mu / r
+        
+        # Semi-Major Axis
+        if abs(E) > 1e-6:
+            a = -mu / (2 * E)
+        else:
+            a = np.inf # Parabolic
+            
+        # Eccentricity Vector
+        # e_vec = ( (v^2 - mu/r)*r - (r.v)*v ) / mu
+        e_vec = ((v**2 - mu/r)*r_vec - np.dot(r_vec, v_vec)*v_vec) / mu
+        ecc = np.linalg.norm(e_vec)
+        
+        # Inclination
+        h_vec = np.cross(r_vec, v_vec)
+        h = np.linalg.norm(h_vec)
+        if h > 1e-6:
+            inc = np.degrees(np.arccos(h_vec[2] / h))
+        else:
+            inc = 0.0
+            
+        alt = r - R_e
+        
+        print(f"{label:<15} | {time_val:<8.1f} | {alt/1000:<8.1f} | {v:<9.1f} | {a/1000:<8.1f} | {ecc:<6.4f} | {inc:<9.2f}")
+        
+    print("="*40 + "\n")
+
+def analyze_integrator_steps(simulation_data):
+    """
+    Analyzes the time steps taken by the variable-step integrator.
+    Small steps indicate stiffness or rapid dynamics.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: INTEGRATOR STEP SIZE ANALYSIS [SOURCE: SIMULATION]")
+    print("="*40)
+    
+    t = simulation_data['t']
+    if len(t) < 2:
+        print("  Not enough data points.")
+        return
+
+    dt = np.diff(t)
+    dt = dt[dt > 1e-9] # Filter out zero-length steps caused by phase concatenation
+    
+    print(f"  Total Steps: {len(t)}")
+    print(f"  Min Step:    {np.min(dt):.2e} s")
+    print(f"  Max Step:    {np.max(dt):.2e} s")
+    print(f"  Mean Step:   {np.mean(dt):.2e} s")
+    
+    # Check for stiffness (very small steps)
+    if np.min(dt) < 1e-4:
+        print("  >>> ⚠️ WARNING: Very small time steps detected (<1e-4s). Physics might be stiff.")
+    else:
+        print("  >>> ✅ SUCCESS: Time steps indicate well-behaved dynamics.")
+    print("="*40 + "\n")
+
+def analyze_control_saturation(simulation_data, config):
+    """
+    Checks how often the vehicle is riding the throttle limits.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: CONTROL SATURATION ANALYSIS [SOURCE: SIMULATION]")
+    print("="*40)
+    
+    u = simulation_data['u']
+    throttles = u[0, :]
+    min_th = config.sequence.min_throttle
+    
+    # Count samples at limits (within tolerance)
+    tol = 0.01
+    
+    # Exclude Coasting (Engines Off) from "Min Throttle" stats
+    is_active = throttles > 0.01
+    
+    at_min = np.sum((throttles < min_th + tol) & is_active)
+    at_max = np.sum(throttles > 1.0 - tol)
+    total = len(throttles)
+    
+    if total == 0: return
+
+    pct_min = 100.0 * at_min / total
+    pct_max = 100.0 * at_max / total
+    
+    print(f"  Throttle at Min ({min_th*100:.0f}%): {pct_min:.1f}% of flight (Active Limiting)")
+    print(f"  Throttle at Max (100%): {pct_max:.1f}% of flight")
+    
+    if pct_max > 95.0:
+        print("  >>> NOTE: Engines running at max power almost continuously.")
+    if pct_min > 20.0:
+        print("  >>> NOTE: Significant throttling detected (Max Q or Landing?).")
+        
+    print("="*40 + "\n")
+
+def analyze_guidance_accuracy(guess, opt_res):
+    """
+    Compares the initial guess (Guidance) with the final optimized result.
+    """
+    print("\n" + "="*40)
+    print("DEBUG: GUIDANCE VS OPTIMALITY CHECK [SOURCE: GUESS vs OPT]")
+    print("="*40)
+    
+    # Compare MECO
+    t1_guess = guess['T1']
+    t1_opt = opt_res['T1']
+    
+    # Compare Final Mass
+    # X3 is [7, N]
+    m_final_guess = guess['X3'][6, -1]
+    m_final_opt = opt_res['X3'][6, -1]
+    
+    print(f"  MECO Time:   Guess={t1_guess:.1f}s, Opt={t1_opt:.1f}s (Diff: {t1_opt-t1_guess:+.1f}s)")
+    print(f"  Final Mass:  Guess={m_final_guess:,.0f}kg, Opt={m_final_opt:,.0f}kg (Diff: {m_final_opt-m_final_guess:+.0f}kg)")
+    
+    if abs(m_final_opt - m_final_guess) > 50000: # 50 tons
+         print("  >>> ⚠️ NOTE: Guidance mass estimate was significantly off (>50t).")
+    else:
+         print("  >>> ✅ SUCCESS: Guidance provided a good mass estimate.")
     print("="*40 + "\n")
