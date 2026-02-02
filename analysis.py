@@ -276,6 +276,12 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     axs3[0].step(t_opt, u_opt[0, :], 'k--', label='Opt', where='post', alpha=0.7)
     axs3[0].plot(t_sim, u_sim[0, :], 'b-', label='Sim')
     axs3[0].set_ylabel('Throttle')
+    
+    # Visualize Forbidden Region
+    if config:
+        min_th = config.sequence.min_throttle
+        axs3[0].axhspan(0.0, min_th, color='red', alpha=0.1, label='Forbidden')
+        
     axs3[0].set_title('Engine Throttle')
     axs3[0].set_ylim(-0.1, 1.1)
     axs3[0].grid(True)
