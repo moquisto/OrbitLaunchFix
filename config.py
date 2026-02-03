@@ -215,7 +215,7 @@ class TwoStageRocketConfig:
 
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(
-    name="SpaceX Starship Block 2 (Flight Proven)",
+    name="SpaceX Starship IFT-6 (Booster 13 / Ship 31)",
     
     payload_mass=0.0, # Payload to Orbit
     target_altitude=420000.0,
@@ -239,13 +239,13 @@ StarshipBlock2 = TwoStageRocketConfig(
     ),
     
     stage_1=StageConfig(
-        dry_mass=283_000.0,          
+        dry_mass=275_000.0,          
         propellant_mass=3_400_000.0, 
         
         # Propulsion (Raptor 2/3 Cluster)
-        # Note: Thrust values are derived from ISP in simulation.
-        # Calculated SL Thrust ~78.7 MN based on ISP ratio.
-        thrust_vac=83_490_000.0,     # 33 Engines * ~2.53 MN
+        # IFT-6 Data: 74.4 MN Sea Level Thrust.
+        # F_vac = F_sl * (ISP_vac / ISP_sl) = 74.4 * (347/327) = ~78.95 MN
+        thrust_vac=78_950_000.0,
         isp_sl=327.0,
         isp_vac=347.0,
         p_sl=101325.0,
@@ -262,15 +262,15 @@ StarshipBlock2 = TwoStageRocketConfig(
     ),
 
     stage_2=StageConfig(
-        dry_mass=164_000.0,          
-        propellant_mass=1_500_000.0, 
+        dry_mass=100_000.0,          
+        propellant_mass=1_200_000.0, 
         
         # Propulsion (Raptor Vacuum + Sea Level)
         # Note: Ship engines are optimized for vacuum.
         # isp_sl is low to penalize low-altitude operation.
         thrust_vac=14_700_000.0,    # 6 Engines (3 Vac + 3 SL)
         isp_sl=100.0,               # Flow separation penalty at SL
-        isp_vac=365.0,
+        isp_vac=380.0,
         p_sl=101325.0,
         
         aero=AerodynamicConfig(

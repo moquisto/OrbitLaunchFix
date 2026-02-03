@@ -698,7 +698,7 @@ def verify_propulsion(vehicle):
     t_burn_1 = s1.propellant_mass / m_dot_1
     
     # T/W
-    tw_sl = s1.thrust_sl / (m_launch * 9.81)
+    tw_sl = s1.thrust_sl / (m_launch * g0)
     
     print(f"Stage 1 (Booster):")
     print(f"  Mass Flow Rate: {m_dot_1:,.1f} kg/s (at 100% Throttle)")
@@ -706,7 +706,7 @@ def verify_propulsion(vehicle):
     print(f"  Thrust (Vac):   {s1.thrust_vac/1e6:.2f} MN (ISP={s1.isp_vac:.0f}s)")
     print(f"  Thrust (SL):    {s1.thrust_sl/1e6:.2f} MN (ISP={s1.isp_sl:.0f}s)")
     print(f"  SL Efficiency:  {s1.thrust_sl/s1.thrust_vac*100:.1f}%")
-    print(f"  Liftoff T/W:    {tw_sl:.2f} (Ref g=9.81)")
+    print(f"  Liftoff T/W:    {tw_sl:.2f} (Ref g={g0:.3f})")
     
     if tw_sl < 1.0:
         print(f"  >>> {Style.RED}⚠️ WARNING: T/W < 1.0 at Sea Level! Rocket will not lift off.{Style.RESET}")
@@ -722,7 +722,13 @@ def verify_propulsion(vehicle):
     t_burn_2 = s2.propellant_mass / m_dot_2
     
     # T/W
-    tw_vac = s2.thrust_vac / (m_s2_wet * 9.81)
+    tw_vac = s2.thrust_vac / (m_s2_wet * g0)
+    
+    # Local T/W (at approx staging altitude of 70km)
+    # Gravity decreases with altitude: g ~ g0 * (Re / (Re+h))^2
+    r_staging = vehicle.env.config.earth_radius_equator + 70000.0
+    g_local = np.linalg.norm(vehicle.env.get_state_sim([r_staging,0,0], 0)['gravity'])
+    tw_local = s2.thrust_vac / (m_s2_wet * g_local)
     
     print(f"Stage 2 (Ship):")
     print(f"  Mass Flow Rate: {m_dot_2:,.1f} kg/s (at 100% Throttle)")
@@ -730,7 +736,8 @@ def verify_propulsion(vehicle):
     print(f"  Thrust (Vac):   {s2.thrust_vac/1e6:.2f} MN (ISP={s2.isp_vac:.0f}s)")
     print(f"  Thrust (SL):    {s2.thrust_sl/1e6:.2f} MN (ISP={s2.isp_sl:.0f}s)")
     print(f"  SL Efficiency:  {s2.thrust_sl/s2.thrust_vac*100:.1f}% (Flow Separation Penalty)")
-    print(f"  Staging T/W:    {tw_vac:.2f} (Ref g=9.81)")
+    print(f"  Staging T/W:    {tw_vac:.2f} (Ref g={g0:.3f})")
+    print(f"  Local T/W:      {tw_local:.2f} (at 70km, g={g_local:.2f})")
     
     if tw_vac < 1.0:
          print(f"  >>> {Style.YELLOW}NOTE: Staging T/W < 1.0. Requires lofted trajectory (Gamma > 0).{Style.RESET}")

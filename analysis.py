@@ -43,8 +43,19 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         
         # Align dummy direction with velocity to show 0 AoA in plots
         v2 = x2_val[3:6, :]
-        v2_norm = np.linalg.norm(v2, axis=0)
-        v2_dir = np.divide(v2, v2_norm, out=np.zeros_like(v2), where=v2_norm > 1e-9)
+        r2 = x2_val[0:3, :]
+        
+        # Calculate Wind (Omega x R)
+        omega_vec = environment.config.earth_omega_vector
+        wind_x = omega_vec[1]*r2[2,:] - omega_vec[2]*r2[1,:]
+        wind_y = omega_vec[2]*r2[0,:] - omega_vec[0]*r2[2,:]
+        wind_z = omega_vec[0]*r2[1,:] - omega_vec[1]*r2[0,:]
+        wind_vel = np.vstack([wind_x, wind_y, wind_z])
+        
+        v_rel = v2 - wind_vel
+        v2_norm = np.linalg.norm(v_rel, axis=0)
+        
+        v2_dir = np.divide(v_rel, v2_norm, out=np.zeros_like(v_rel), where=v2_norm > 1e-9)
         v2_dir[:, v2_norm <= 1e-9] = np.array([1,0,0])[:, None] # Fallback
         u2[1:, :] = v2_dir
         
@@ -290,6 +301,11 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     ax4.set_aspect('equal')
     ax4.plot(sim_metrics['lon'][0], sim_metrics['lat'][0], 'go', label='Launch')
     ax4.plot(sim_metrics['lon'][-1], sim_metrics['lat'][-1], 'rx', label='Orbit')
+    
+    # Mark Staging Event (Booster Impact Zone)
+    t_meco = optimization_data['T1']
+    idx_meco = np.abs(t_sim - t_meco).argmin()
+    ax4.plot(sim_metrics['lon'][idx_meco], sim_metrics['lat'][idx_meco], 'k^', label='Staging')
     ax4.legend()
     
     # 5. Ascent Profile
