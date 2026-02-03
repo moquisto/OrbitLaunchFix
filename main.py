@@ -29,16 +29,19 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # Resolve Target Inclination
     if config.target_inclination is None:
-        print(f"[Optimizer] Target Inclination not set. Defaulting to Launch Latitude ({environment.config.launch_latitude:.2f} deg) for min-energy orbit.")
-        config.target_inclination = environment.config.launch_latitude
+        # For minimum energy, target inclination is the absolute value of the launch latitude.
+        abs_lat = abs(environment.config.launch_latitude)
+        print(f"[Optimizer] Target Inclination not set. Defaulting to absolute Launch Latitude ({abs_lat:.2f} deg) for min-energy orbit.")
+        config.target_inclination = abs_lat
         
     Target_Inc_Deg = config.target_inclination
     
-    # Ensure Target Inclination is physically possible (>= Latitude)
+    # Ensure Target Inclination is physically possible (>= |Latitude|)
     lat_deg = environment.config.launch_latitude
-    if Target_Inc_Deg < lat_deg - 1e-6:
-        warnings.warn(f"Target inclination {Target_Inc_Deg:.2f} deg is less than launch latitude {lat_deg:.2f} deg. Clamping to latitude.")
-        Target_Inc = np.radians(lat_deg)
+    min_inc = abs(lat_deg)
+    if Target_Inc_Deg < min_inc - 1e-6:
+        warnings.warn(f"Target inclination {Target_Inc_Deg:.2f} deg is less than min inclination {min_inc:.2f} deg (Launch Lat: {lat_deg:.2f}). Clamping.")
+        Target_Inc = np.radians(min_inc)
     else:
         Target_Inc = np.radians(Target_Inc_Deg)
 

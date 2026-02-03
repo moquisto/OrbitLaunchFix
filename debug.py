@@ -796,7 +796,7 @@ def validate_trajectory(simulation_data, config, environment):
     
     # Target Comparison
     target_alt = config.target_altitude
-    target_inc = config.target_inclination if config.target_inclination is not None else environment.config.launch_latitude
+    target_inc = config.target_inclination if config.target_inclination is not None else abs(environment.config.launch_latitude)
     
     print(f"ORBITAL INJECTION ACCURACY (t = {t[-1]:.1f} s)")
     print(f"  {Style.BOLD}{'Metric':<15} | {'Actual':<12} | {'Target':<12} | {'Error':<10}{Style.RESET}")
