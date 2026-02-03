@@ -975,13 +975,54 @@ def analyze_delta_v_budget(simulation_data, vehicle, config):
     print(f"{'ISP/Backpres.':<15} | {isp_loss_b:<12.1f} | {isp_loss_s:<12.1f} | {total_isp_loss:<12.1f}")
     print("="*40 + "\n")
 
-def analyze_control_slew_rates(simulation_data):
+def analyze_control_slew_rates(simulation_data, optimization_data=None):
     """
     Analyzes the angular rate of change of the thrust vector.
     Filters out numerical noise and phase discontinuities.
     """
-    _print_header("Control Slew Rate Analysis", "Simulation")
+    _print_header("Control Slew Rate Analysis", "Optimizer Nodes" if optimization_data else "Simulation")
     
+    if optimization_data:
+        # --- Node-based Analysis (Correct for Zero-Order Hold) ---
+        max_slew_rate = 0.0
+        max_slew_time = 0.0
+        
+        def check_phase_nodes(U, T, t_start):
+            nonlocal max_slew_rate, max_slew_time
+            N = U.shape[1]
+            dt = T / N
+            for k in range(N - 1):
+                u_curr = U[1:, k]
+                u_next = U[1:, k+1]
+                
+                n_c = np.linalg.norm(u_curr)
+                n_n = np.linalg.norm(u_next)
+                if n_c > 1e-9 and n_n > 1e-9:
+                    dot = np.clip(np.dot(u_curr/n_c, u_next/n_n), -1.0, 1.0)
+                    angle = np.degrees(np.arccos(dot))
+                    rate = angle / dt
+                    if rate > max_slew_rate:
+                        max_slew_rate = rate
+                        max_slew_time = t_start + k * dt
+
+        # Phase 1
+        check_phase_nodes(np.array(optimization_data['U1']), optimization_data['T1'], 0.0)
+        
+        # Phase 3
+        t_start_3 = optimization_data['T1'] + optimization_data.get('T2', 0.0)
+        check_phase_nodes(np.array(optimization_data['U3']), optimization_data['T3'], t_start_3)
+        
+        print(f"  Max Slew Rate (Node-to-Node): {max_slew_rate:.2f} deg/s (at t~{max_slew_time:.1f}s)")
+        
+        if max_slew_rate > 10.0:
+            print(f"  >>> {Style.YELLOW}⚠️ WARNING: High slew rate detected between nodes (>10 deg/s).{Style.RESET}")
+        else:
+            print(f"  >>> {Style.GREEN}✅ SUCCESS: Control rates are within physical limits.{Style.RESET}")
+            
+        print("="*40 + "\n")
+        return
+
+    # --- Fallback: Simulation-based Analysis ---
     t = simulation_data['t']
     u = simulation_data['u']
     
@@ -1591,5 +1632,5 @@ def run_postflight_analysis(sim_res, opt_res, vehicle, env):
     _print_sub_header("Control & Dynamics")
     analyze_trajectory_drift(opt_res, sim_res)
     analyze_control_saturation(sim_res, vehicle)
-    analyze_control_slew_rates(sim_res)
+    analyze_control_slew_rates(sim_res, opt_res)
     analyze_integrator_steps(sim_res)
