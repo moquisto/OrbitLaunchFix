@@ -455,6 +455,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     
     # Draw Earth (Wireframe Ellipsoid)
     # Use WGS84 Ellipsoid dimensions for visual consistency
+    R_pol = R_eq * (1.0 - f)
     print(f"  [Plot] Drawing Earth: R_eq={R_eq/1000:.1f}km, R_pol={R_pol/1000:.1f}km (Flattening f={f:.5f})")
     u = np.linspace(0, 2 * np.pi, 30)
     v = np.linspace(0, np.pi, 30)
