@@ -37,8 +37,8 @@ def run_heatmap_analysis():
     results = []
     
     print(f"\nStarting Latitude Sweep: {len(lat_values)} Runs (Results replicated longitudinally)")
-    print(f"{'Run':<5} | {'Lat':<8} | {'Fuel Used (kg)':<15} | {'Final Mass (kg)':<15}")
-    print("-" * 65)
+    print(f"{'Run':<5} | {'Lat':<8} | {'Fuel Used (kg)':<15} | {'Final Mass (kg)':<15} | {'V_rot (m/s)':<12}")
+    print("-" * 80)
     
     for i, lat in enumerate(lat_values):
         # 1. Update Configuration
@@ -64,24 +64,32 @@ def run_heatmap_analysis():
             m_final = res['X3'][6, -1]
             fuel_used = StarshipBlock2.launch_mass - m_final
             
-            print(f"{i+1:<5} | {lat:<8.1f} | {fuel_used:<15.1f} | {m_final:<15.1f}")
+            # Calculate Earth Rotation Velocity at this latitude
+            # v = omega * R * cos(lat)
+            R_eq = EARTH_CONFIG.earth_radius_equator
+            omega = EARTH_CONFIG.earth_omega_vector[2]
+            v_rot = omega * R_eq * np.cos(np.radians(lat))
+            
+            print(f"{i+1:<5} | {lat:<8.1f} | {fuel_used:<15.1f} | {m_final:<15.1f} | {v_rot:<12.1f}")
             
         except Exception as e:
-            print(f"{i+1:<5} | {lat:<8.1f} | {'FAILED':<15} | {'-':<15}")
+            print(f"{i+1:<5} | {lat:<8.1f} | {'FAILED':<15} | {'-':<15} | {'-':<12}")
+            v_rot = 0.0
             
         # 4. Replicate result for all longitudes to create the heatmap surface
         for lon in lon_values_plot:
-            results.append((lat, lon, fuel_used))
+            results.append((lat, lon, fuel_used, v_rot, m_final))
 
     # --- PLOTTING ---
-    print("\nGenerating 3D Plot...")
-    plot_3d_heatmap(results)
+    print("\nGenerating Analysis Dashboard...")
+    plot_analysis_dashboard(results)
 
-def plot_3d_heatmap(results):
+def plot_analysis_dashboard(results):
     # Extract data
     lats_raw = np.array([r[0] for r in results])
     lons_raw = np.array([r[1] for r in results])
     fuels_raw = np.array([r[2] for r in results])
+    v_rots_raw = np.array([r[3] for r in results])
     
     # Identify unique grid points
     unique_lats = np.unique(lats_raw)
@@ -106,8 +114,8 @@ def plot_3d_heatmap(results):
     lon_grid, lat_grid = np.meshgrid(unique_lons, unique_lats)
     
     fig = plt.figure(figsize=(12, 10))
-    ax = fig.add_subplot(111, projection='3d')
     
+    ax = fig.add_subplot(111, projection='3d')
     # Convert Lat/Lon to Cartesian coordinates on a unit sphere
     rad_lat = np.radians(lat_grid)
     rad_lon = np.radians(lon_grid)
@@ -139,9 +147,37 @@ def plot_3d_heatmap(results):
     m.set_array([])
     
     # Labels & Colorbar
-    ax.set_title(f"Minimum Fuel to LEO ({StarshipBlock2.target_altitude/1000:.0f}km)\nMin-Energy Inclination", fontsize=14)
+    ax.set_title(f"Global Launch Cost & Earth Rotation Assist\nTarget: {StarshipBlock2.target_altitude/1000:.0f}km LEO", fontsize=14)
     cbar = plt.colorbar(m, ax=ax, shrink=0.6, pad=0.05)
     cbar.set_label("Fuel Consumed (kg)", fontsize=12)
+    
+    # --- ADD EARTH ROTATION VECTORS ---
+    # Visualize the "Free Boost" from Earth's rotation
+    # Subsample grid for arrows (plot every 4th point to avoid clutter)
+    step = 4
+    q_lats = lat_grid[::step, ::step]
+    q_lons = lon_grid[::step, ::step]
+    
+    rad_q_lat = np.radians(q_lats)
+    rad_q_lon = np.radians(q_lons)
+    
+    # Arrow Origins (Unit Sphere)
+    qx = np.cos(rad_q_lat) * np.cos(rad_q_lon)
+    qy = np.cos(rad_q_lat) * np.sin(rad_q_lon)
+    qz = np.sin(rad_q_lat)
+    
+    # Arrow Vectors (Eastward Direction, Magnitude ~ cos(lat))
+    scale = 0.15 # Visual scale factor
+    mag = np.cos(rad_q_lat) * scale
+    
+    vx = -np.sin(rad_q_lon) * mag
+    vy = np.cos(rad_q_lon) * mag
+    vz = np.zeros_like(vx)
+    
+    ax.quiver(qx, qy, qz, vx, vy, vz, color='white', alpha=0.6, 
+              arrow_length_ratio=0.3, linewidth=1.5, label='Earth Rotation Velocity')
+    
+    ax.legend(loc='lower right')
     
     # Clean up axes
     ax.set_box_aspect([1,1,1])
