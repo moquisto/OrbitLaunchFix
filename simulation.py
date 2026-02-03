@@ -6,11 +6,11 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 
-def run_simulation(optimization_result, vehicle, config):
+def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
     """
     Verifies the optimization result using forward integration.
     """
-    print(f"\n[Simulation] Starting Verification Simulation...")
+    print(f"\n[Simulation] Starting Verification Simulation (rtol={rtol}, atol={atol})...")
     # --- 1. UNPACK OPTIMIZATION RESULTS ---
     T1 = float(optimization_result["T1"])
     T2 = float(optimization_result.get("T2", 0.0))
@@ -105,7 +105,7 @@ def run_simulation(optimization_result, vehicle, config):
         t_span=(0, T1),
         y0=y0,
         events=altitude_event,
-        rtol=1e-9, atol=1e-12,
+        rtol=rtol, atol=atol,
         method='RK45'
     )
     
@@ -146,7 +146,7 @@ def run_simulation(optimization_result, vehicle, config):
             t_span=(t_current, t_current + T2),
             y0=y_current,
             events=altitude_event,
-            rtol=1e-9, atol=1e-12,
+            rtol=rtol, atol=atol,
             method='RK45'
         )
         results_list.append(res2)
@@ -170,7 +170,7 @@ def run_simulation(optimization_result, vehicle, config):
         t_span=(t_current, t_current + T3),
         y0=y_current,
         events=altitude_event,
-        rtol=1e-9, atol=1e-12,
+        rtol=rtol, atol=atol,
         method='RK45'
     )
     results_list.append(res3)

@@ -9,7 +9,7 @@ import time
 import guidance
 import debug
 
-def solve_optimal_trajectory(config, vehicle, environment):
+def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
     """
     Formulates and solves the trajectory optimization problem using CasADi.
     """
@@ -308,7 +308,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
     
     # --- 6. SOLVE ---
     print(f"[Optimizer] Starting IPOPT solver (Max Iter={config.max_iter})...")
-    opti.solver("ipopt", {"expand": True}, {"max_iter": config.max_iter, "tol": 1e-6, "print_level": 5})
+    opti.solver("ipopt", {"expand": True}, {"max_iter": config.max_iter, "tol": 1e-6, "print_level": print_level})
     
     # --- 6a. DEBUG STRUCTURE ---
     debug.debug_optimization_structure(opti)
@@ -316,9 +316,11 @@ def solve_optimal_trajectory(config, vehicle, environment):
     t_solve = time.time()
     try:
         sol = opti.solve()
+        success = True
         print(f"[Optimizer] SUCCESS: Optimal solution found in {time.time() - t_solve:.2f}s.")
     except:
         print(f"[Optimizer] FAILURE: Solver did not converge after {time.time() - t_solve:.2f}s. Returning debug values.")
+        success = False
         sol = opti.debug
         debug.print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T1_scaled, X3, U3, T3_scaled)
     
@@ -347,6 +349,11 @@ def solve_optimal_trajectory(config, vehicle, environment):
     res["T3"] = sol.value(T3_scaled) * scaling.time
     res["X3"] = sol.value(X3) * s_vec[:, None]
     res["U3"] = sol.value(U3)
+    res["success"] = success
+    
+    # Reliability Analysis Data
+    res["lam_g"] = sol.value(opti.lam_g) # Lagrange Multipliers (Constraint Sensitivity)
+    res["g"] = sol.value(opti.g)         # Constraint Values
     
     # --- 7a. DEBUG GUIDANCE ---
     debug.analyze_guidance_accuracy(guess, res)

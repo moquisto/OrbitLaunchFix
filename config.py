@@ -52,6 +52,9 @@ class EnvConfig:
     # Wind Model
     use_wind_model: bool = False 
     
+    # Monte Carlo Dispersion Factor (Default 1.0)
+    density_multiplier: float = 1.0
+    
     # --- Atmosphere Constants ---
     air_gamma: float = 1.4                        # [-] Heat capacity ratio
     air_gas_constant: float = 287.058             # [J/(kg·K)] Specific gas constant

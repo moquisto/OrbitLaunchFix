@@ -155,7 +155,7 @@ class Environment:
         
         # Log-space interpolation for density (stable & positive)
         log_rho = self.log_rho_interp(alt_clamped)
-        rho = ca.exp(log_rho)
+        rho = ca.exp(log_rho) * self.config.density_multiplier
         press = self.p_interp(alt_clamped)
         sos = self.sos_interp(alt_clamped)
 
