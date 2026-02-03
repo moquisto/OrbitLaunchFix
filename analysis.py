@@ -87,6 +87,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         'aoa_pitch': [], 'aoa_yaw': [],
         'lat': [], 'lon': [],
         'gamma': [], 'energy': [], 'heating': [], 'tw': [], 'g_load': [],
+        'pitch': [],
         'downrange': [],
         'drag': [], 'thrust': []
     }
@@ -105,17 +106,11 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         # 1. Environment State
         env_state = environment.get_state_sim(r_eci, t)
         
-        # 2. Altitude (Geodetic Approx)
+        # 2. Altitude (Spherical)
         r_mag = np.linalg.norm(r_eci)
-        # Exact WGS84 Ellipsoid Radius (matching environment.py)
-        # R(phi') = sqrt( (Req^2 cos)^2 + (Rpol^2 sin)^2 ) / sqrt( (Req cos)^2 + (Rpol sin)^2 )
-        # Simplified for geocentric coords (x,y,z):
-        R_pol = R_eq * (1.0 - f)
-        rho_sq = r_eci[0]**2 + r_eci[1]**2
-        z_sq = r_eci[2]**2
-        denom = np.sqrt( (R_pol**2) * rho_sq + (R_eq**2) * z_sq )
-        R_local = (R_eq * R_pol * r_mag) / denom
-        alt = r_mag - R_local
+        # Use Spherical Altitude to match Optimizer Target and Debug Report
+        # (Optimizer targets r_mag == R_eq + 420km)
+        alt = r_mag - R_eq
         sim_metrics['alt'].append(alt)
         
         # 3. Velocity (Inertial Magnitude)
@@ -209,6 +204,15 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         sin_gamma = np.dot(r_eci, v_eci) / (r_mag * vel + 1e-9)
         gamma = np.degrees(np.arcsin(np.clip(sin_gamma, -1.0, 1.0)))
         sim_metrics['gamma'].append(gamma)
+        
+        # Pitch Angle (Theta) - Angle of Thrust Vector above local horizon
+        # sin(theta) = (r . u_thrust) / |r|
+        if np.linalg.norm(thrust_dir) > 1e-9:
+            sin_pitch = np.dot(r_eci, thrust_dir) / (r_mag * 1.0)
+            pitch = np.degrees(np.arcsin(np.clip(sin_pitch, -1.0, 1.0)))
+        else:
+            pitch = 0.0
+        sim_metrics['pitch'].append(pitch)
 
         # Specific Mechanical Energy (per kg)
         # E = v^2/2 - mu/r
@@ -250,122 +254,205 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     # --- 4. PLOTTING ---
     
     # WINDOW 1: MISSION OVERVIEW
-    fig1 = plt.figure(figsize=(18, 10), constrained_layout=True)
+    fig1 = plt.figure(figsize=(14, 10), constrained_layout=True)
     fig1.suptitle('Mission Overview: Kinematics & Trajectory', fontsize=16)
-    gs1 = fig1.add_gridspec(2, 3)
+    gs1 = fig1.add_gridspec(2, 2)
     
     # 1. Altitude
     ax1 = fig1.add_subplot(gs1[0, 0])
     r_opt = x_opt[0:3, :]
     r_opt_mag = np.linalg.norm(r_opt, axis=0)
     
-    R_pol = R_eq * (1.0 - f)
-    rho_sq_opt = r_opt[0, :]**2 + r_opt[1, :]**2
-    z_sq_opt = r_opt[2, :]**2
-    denom_opt = np.sqrt( (R_pol**2) * rho_sq_opt + (R_eq**2) * z_sq_opt )
-    R_local_opt = (R_eq * R_pol * r_opt_mag) / denom_opt
+    # Use Spherical Altitude for consistency
+    alt_opt = r_opt_mag - R_eq
     
-    alt_opt = r_opt_mag - R_local_opt
-    ax1.plot(t_opt, alt_opt / 1000.0, 'k--', label='Optimizer', alpha=0.7)
-    ax1.plot(t_sim, np.array(sim_metrics['alt']) / 1000.0, 'b-', label='Simulation')
+    lns1 = ax1.plot(t_opt, alt_opt / 1000.0, 'k--', label='Optimizer', alpha=0.7)
+    lns2 = ax1.plot(t_sim, np.array(sim_metrics['alt']) / 1000.0, 'b-', label='Simulation')
     ax1.set_ylabel('Altitude (km)')
     ax1.grid(True)
-    ax1.set_title('Altitude Profile')
-    ax1.legend()
+    ax1.set_title('Altitude & Velocity')
     
-    # 2. Velocity
+    # Combine Velocity onto this plot (Twin Axis)
+    ax1_vel = ax1.twinx()
+    lns3 = ax1_vel.plot(t_sim, sim_metrics['vel'], 'orange', alpha=0.4, label='Velocity')
+    ax1_vel.set_ylabel('Velocity (m/s)', color='orange')
+    ax1_vel.tick_params(axis='y', labelcolor='orange')
+    
+    # Combined Legend
+    lns = lns1 + lns2 + lns3
+    labs = [l.get_label() for l in lns]
+    ax1.legend(lns, labs, loc='upper left')
+
+    # 2. Mass
     ax2 = fig1.add_subplot(gs1[0, 1])
-    v_opt_mag = np.linalg.norm(x_opt[3:6, :], axis=0)
-    ax2.plot(t_opt, v_opt_mag, 'k--', alpha=0.7)
-    ax2.plot(t_sim, sim_metrics['vel'], 'b-')
-    ax2.set_ylabel('Velocity (m/s)')
-    ax2.set_title('Inertial Velocity')
+    ax2.plot(t_opt, x_opt[6, :] / 1000.0, 'k--', alpha=0.7)
+    ax2.plot(t_sim, y_sim[6, :] / 1000.0, 'b-')
+    ax2.set_ylabel('Mass (tonnes)')
+    ax2.set_title('Vehicle Mass')
+    ax2.set_xlabel('Time (s)')
     ax2.grid(True)
     
-    # 3. Mass
-    ax3 = fig1.add_subplot(gs1[0, 2])
-    ax3.plot(t_opt, x_opt[6, :] / 1000.0, 'k--', alpha=0.7)
-    ax3.plot(t_sim, y_sim[6, :] / 1000.0, 'b-')
-    ax3.set_ylabel('Mass (tonnes)')
-    ax3.set_title('Vehicle Mass')
-    ax3.set_xlabel('Time (s)')
+    # 3. Ground Track
+    ax3 = fig1.add_subplot(gs1[1, 0])
+    ax3.set_title('Ground Track')
+    ax3.plot(sim_metrics['lon'], sim_metrics['lat'], 'b-')
+    ax3.set_xlabel('Longitude (deg)')
+    ax3.set_ylabel('Latitude (deg)')
     ax3.grid(True)
-    
-    # 4. Ground Track
-    ax4 = fig1.add_subplot(gs1[1, 0])
-    ax4.set_title('Ground Track')
-    ax4.plot(sim_metrics['lon'], sim_metrics['lat'], 'b-')
-    ax4.set_xlabel('Longitude (deg)')
-    ax4.set_ylabel('Latitude (deg)')
-    ax4.grid(True)
-    ax4.set_aspect('equal')
-    ax4.plot(sim_metrics['lon'][0], sim_metrics['lat'][0], 'go', label='Launch')
-    ax4.plot(sim_metrics['lon'][-1], sim_metrics['lat'][-1], 'rx', label='Orbit')
+    ax3.set_aspect('equal')
+    ax3.plot(sim_metrics['lon'][0], sim_metrics['lat'][0], 'go', label='Launch')
+    ax3.plot(sim_metrics['lon'][-1], sim_metrics['lat'][-1], 'rx', label='Orbit')
     
     # Mark Staging Event (Booster Impact Zone)
     t_meco = optimization_data['T1']
     idx_meco = np.abs(t_sim - t_meco).argmin()
-    ax4.plot(sim_metrics['lon'][idx_meco], sim_metrics['lat'][idx_meco], 'k^', label='Staging')
-    ax4.legend()
+    ax3.plot(sim_metrics['lon'][idx_meco], sim_metrics['lat'][idx_meco], 'k^', label='Staging')
+    ax3.legend()
     
-    # 5. Ascent Profile
-    ax5 = fig1.add_subplot(gs1[1, 1])
-    ax5.set_title('Ascent Profile (Color = AoA)')
-    ax5.plot(sim_metrics['downrange'], np.array(sim_metrics['alt']) / 1000.0, 'k-', linewidth=0.5, alpha=0.3)
-    ax5.fill_between(sim_metrics['downrange'], 0, np.array(sim_metrics['alt']) / 1000.0, color='skyblue', alpha=0.1)
-    sc = ax5.scatter(sim_metrics['downrange'], np.array(sim_metrics['alt']) / 1000.0, c=sim_metrics['aoa'], cmap='plasma', s=15)
-    cbar = plt.colorbar(sc, ax=ax5)
+    # 4. Ascent Profile
+    ax4 = fig1.add_subplot(gs1[1, 1])
+    ax4.set_title('Ascent Profile (Color = AoA)')
+    ax4.plot(sim_metrics['downrange'], np.array(sim_metrics['alt']) / 1000.0, 'k-', linewidth=0.5, alpha=0.3)
+    ax4.fill_between(sim_metrics['downrange'], 0, np.array(sim_metrics['alt']) / 1000.0, color='skyblue', alpha=0.1)
+    sc = ax4.scatter(sim_metrics['downrange'], np.array(sim_metrics['alt']) / 1000.0, c=sim_metrics['aoa'], cmap='plasma', s=15)
+    cbar = plt.colorbar(sc, ax=ax4)
     cbar.set_label('AoA (deg)')
-    ax5.set_xlabel('Downrange (km)')
-    ax5.set_ylabel('Altitude (km)')
-    ax5.grid(True)
-    
-    # 6. 3D Trajectory
-    ax6 = fig1.add_subplot(gs1[1, 2], projection='3d')
-    ax6.set_title('3D Trajectory (ECI)')
-    # ... (3D plotting logic below) ...
+    ax4.set_xlabel('Downrange (km)')
+    ax4.set_ylabel('Altitude (km)')
+    ax4.grid(True)
     
     # WINDOW 2: DYNAMICS
-    fig2 = plt.figure(figsize=(18, 10), constrained_layout=True)
+    fig2 = plt.figure(figsize=(14, 10), constrained_layout=True)
     fig2.suptitle('Aerodynamics & Flight Dynamics', fontsize=16)
-    gs2 = fig2.add_gridspec(2, 3)
+    gs2 = fig2.add_gridspec(2, 2)
     
-    # 1. Max Q
+    # 1. Max Q & Mach (Combined)
     ax2_1 = fig2.add_subplot(gs2[0, 0])
-    ax2_1.plot(t_sim, sim_metrics['q'], 'r-')
-    ax2_1.set_title('Dynamic Pressure (Max Q)')
-    ax2_1.set_ylabel('kPa')
+    lns1 = ax2_1.plot(t_sim, sim_metrics['q'], 'r-', label='Dynamic Pressure')
+    ax2_1.set_title('Dynamic Pressure & Mach')
+    ax2_1.set_ylabel('Q (kPa)', color='r')
+    ax2_1.tick_params(axis='y', labelcolor='r')
     ax2_1.grid(True)
     
-    # 2. Mach
-    ax2_2 = fig2.add_subplot(gs2[0, 1])
-    ax2_2.plot(t_sim, sim_metrics['mach'], 'g-')
-    ax2_2.set_title('Mach Number')
-    ax2_2.grid(True)
+    ax2_1_m = ax2_1.twinx()
+    lns2 = ax2_1_m.plot(t_sim, sim_metrics['mach'], 'g--', label='Mach', alpha=0.6)
+    ax2_1_m.set_ylabel('Mach Number', color='g')
+    ax2_1_m.tick_params(axis='y', labelcolor='g')
     
-    # 3. AoA
-    ax2_3 = fig2.add_subplot(gs2[0, 2])
-    ax2_3.plot(t_sim, sim_metrics['aoa'], 'k-', label='Total', linewidth=1.5)
-    ax2_3.plot(t_sim, sim_metrics['aoa_pitch'], 'b--', label='Pitch', linewidth=1.0, alpha=0.8)
-    ax2_3.plot(t_sim, sim_metrics['aoa_yaw'], 'r:', label='Yaw', linewidth=1.0, alpha=0.8)
-    ax2_3.set_title('Angle of Attack (deg)')
+    # Combined Legend
+    lns = lns1 + lns2
+    labs = [l.get_label() for l in lns]
+    ax2_1.legend(lns, labs, loc='upper left')
+    
+    # 2. AoA
+    ax2_2 = fig2.add_subplot(gs2[0, 1])
+    ax2_2.plot(t_sim, sim_metrics['aoa'], 'k-', label='Total', linewidth=1.5)
+    ax2_2.plot(t_sim, sim_metrics['aoa_pitch'], 'b--', label='Pitch', linewidth=1.0, alpha=0.8)
+    ax2_2.plot(t_sim, sim_metrics['aoa_yaw'], 'r:', label='Yaw', linewidth=1.0, alpha=0.8)
+    ax2_2.set_title('Angle of Attack (deg)')
+    ax2_2.grid(True)
+    ax2_2.legend()
+    
+    # 3. Gamma & Pitch (Attitude vs Trajectory)
+    ax2_3 = fig2.add_subplot(gs2[1, 0])
+    ax2_3.plot(t_sim, sim_metrics['gamma'], 'b-', label='Flight Path (Gamma)')
+    ax2_3.plot(t_sim, sim_metrics['pitch'], 'm--', label='Pitch Attitude (Theta)', alpha=0.7)
+    ax2_3.set_ylabel('Angle (deg)')
+    ax2_3.set_title('Pitch vs Flight Path')
     ax2_3.grid(True)
     ax2_3.legend()
+
+    # 4. Heating
+    ax2_4 = fig2.add_subplot(gs2[1, 1])
+    ax2_4.plot(t_sim, sim_metrics['heating'], 'orange')
+    ax2_4.set_ylabel('MW/m^2')
+    ax2_4.set_title('Aerodynamic Heating Proxy')
+    ax2_4.grid(True)
     
     # WINDOW 3: CONTROLS & LOADS
-    fig3 = plt.figure(figsize=(18, 10), constrained_layout=True)
+    fig3 = plt.figure(figsize=(14, 10), constrained_layout=True)
     fig3.suptitle('Controls, Loads & Constraints', fontsize=16)
-    gs3 = fig3.add_gridspec(2, 3)
+    gs3 = fig3.add_gridspec(2, 2)
     
-    # 1. Throttle
+    # 1. Throttle & G-Load
     ax3_1 = fig3.add_subplot(gs3[0, 0])
-    ax3_1.step(t_opt, u_opt[0, :], 'k--', label='Opt', where='post', alpha=0.7)
-    ax3_1.plot(t_sim, u_sim[0, :], 'b-', label='Sim')
-    ax3_1.set_title('Throttle')
+    lns1 = ax3_1.step(t_opt, u_opt[0, :], 'k--', label='Opt Throttle', where='post', alpha=0.7)
+    lns2 = ax3_1.plot(t_sim, u_sim[0, :], 'b-', label='Sim Throttle')
+    ax3_1.set_title('Throttle & G-Load')
     ax3_1.set_ylim(-0.1, 1.1)
+    ax3_1.set_ylabel('Throttle (0-1)')
     ax3_1.grid(True)
     
-    # 3D Plot Logic (Moved to ax6)
+    # Combine G-Load onto this plot (Twin Axis)
+    # This visualizes WHY the rocket throttles down (to limit Gs)
+    ax3_1_g = ax3_1.twinx()
+    lns3 = ax3_1_g.plot(t_sim, sim_metrics['g_load'], 'r-', alpha=0.3, linewidth=1.0, label='G-Load')
+    ax3_1_g.set_ylabel('Axial Acceleration (g)', color='r')
+    ax3_1_g.tick_params(axis='y', labelcolor='r')
+    if config:
+        ax3_1_g.axhline(config.max_g_load, color='r', linestyle=':', alpha=0.5)
+        
+        # Forbidden Region for Throttle
+        min_th = config.sequence.min_throttle
+        if min_th > 0.0:
+            ax3_1.axhspan(0.0, min_th, color='red', alpha=0.2, label='Forbidden')
+            
+    # Combined Legend
+    lns = lns1 + lns2 + lns3
+    labs = [l.get_label() for l in lns]
+    ax3_1.legend(lns, labs, loc='center right')
+
+    # 2. Forces
+    ax3_2 = fig3.add_subplot(gs3[0, 1])
+    ax3_2.set_title('Force Balance')
+    
+    # Clip data to avoid log(0) errors during coast phases
+    thrust_plot = np.maximum(sim_metrics['thrust'], 1e-3)
+    drag_plot = np.maximum(sim_metrics['drag'], 1e-3)
+    weight_plot = y_sim[6, :] * environment.config.g0 / 1000.0
+    
+    ax3_2.plot(t_sim, thrust_plot, 'b-', label='Thrust')
+    ax3_2.plot(t_sim, drag_plot, 'r-', label='Drag')
+    ax3_2.plot(t_sim, weight_plot, 'k--', label='Weight', alpha=0.5)
+    
+    ax3_2.set_ylabel('Force (kN)')
+    ax3_2.set_yscale('log')
+    ax3_2.grid(True, which="both", ls="-", alpha=0.5)
+    ax3_2.legend()
+
+    # 3. Thrust Vector
+    ax3_3 = fig3.add_subplot(gs3[1, 0])
+    ax3_3.plot(t_sim, u_sim[1, :], label='Ux')
+    ax3_3.plot(t_sim, u_sim[2, :], label='Uy')
+    ax3_3.plot(t_sim, u_sim[3, :], label='Uz')
+    ax3_3.set_title('Thrust Vector (ECI)')
+    ax3_3.grid(True)
+    ax3_3.legend()
+
+    # 4. Flight Envelope
+    ax3_4 = fig3.add_subplot(gs3[1, 1])
+    ax3_4.set_title('Flight Envelope (Q vs AoA)')
+    
+    # Scatter plot colored by Mach
+    sc9 = ax3_4.scatter(sim_metrics['q'], sim_metrics['aoa'], c=sim_metrics['mach'], cmap='viridis', s=10)
+    cbar9 = plt.colorbar(sc9, ax=ax3_4)
+    cbar9.set_label('Mach Number')
+    
+    # Max Q Limit line
+    if config:
+        q_lim_kpa = config.max_q_limit / 1000.0
+        ax3_4.axvline(q_lim_kpa, color='r', linestyle='--', label=f'Max Q Limit ({q_lim_kpa:.1f} kPa)')
+    
+    ax3_4.set_xlabel('Dynamic Pressure (kPa)')
+    ax3_4.set_ylabel('AoA (deg)')
+    ax3_4.grid(True)
+    ax3_4.legend()
+
+    # WINDOW 4: 3D TRAJECTORY (Standalone)
+    fig4 = plt.figure(figsize=(10, 10))
+    ax4 = fig4.add_subplot(111, projection='3d')
+    ax4.set_title('3D Trajectory (ECI)')
+    
     # Draw Earth (Wireframe Ellipsoid)
     # Use WGS84 Ellipsoid dimensions for visual consistency
     print(f"  [Plot] Drawing Earth: R_eq={R_eq/1000:.1f}km, R_pol={R_pol/1000:.1f}km (Flattening f={f:.5f})")
@@ -375,11 +462,11 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     y_earth = R_eq * np.outer(np.sin(u), np.sin(v))
     z_earth = R_pol * np.outer(np.ones(np.size(u)), np.cos(v))
     
-    ax6.plot_wireframe(x_earth, y_earth, z_earth, color='c', alpha=0.2, linewidth=0.5)
+    ax4.plot_wireframe(x_earth, y_earth, z_earth, color='c', alpha=0.2, linewidth=0.5)
     
     # Plot Trajectory
     r_sim = y_sim[0:3, :]
-    ax6.plot(r_sim[0, :], r_sim[1, :], r_sim[2, :], 'r-', label='Flight Path', linewidth=2)
+    ax4.plot(r_sim[0, :], r_sim[1, :], r_sim[2, :], 'r-', label='Flight Path', linewidth=2)
     
     # --- ORBIT PROJECTION (Future Trajectory) ---
     # Propagate the final state for one orbital period to visualize the resulting orbit
@@ -418,113 +505,23 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
             
         t_eval = np.linspace(0, period, 300) # High resolution for smooth circle
         sol_orbit = solve_ivp(two_body_dyn, [0, period], np.concatenate([r_final, v_final]), t_eval=t_eval, rtol=1e-5)
-        ax6.plot(sol_orbit.y[0], sol_orbit.y[1], sol_orbit.y[2], 'k--', linewidth=1, label='Projected Orbit', alpha=0.6)
+        ax4.plot(sol_orbit.y[0], sol_orbit.y[1], sol_orbit.y[2], 'k--', linewidth=1, label='Projected Orbit', alpha=0.6)
     
     # Markers
-    ax6.scatter(r_sim[0, 0], r_sim[1, 0], r_sim[2, 0], color='g', s=50, label='Launch')
-    ax6.scatter(r_sim[0, -1], r_sim[1, -1], r_sim[2, -1], color='k', marker='x', s=50, label='Orbit Injection')
+    ax4.scatter(r_sim[0, 0], r_sim[1, 0], r_sim[2, 0], color='g', s=50, label='Launch')
+    ax4.scatter(r_sim[0, -1], r_sim[1, -1], r_sim[2, -1], color='k', marker='x', s=50, label='Orbit Injection')
     
     # Axis Labels & Limits
-    ax6.set_xlabel('X (ECI) [m]')
-    ax6.set_ylabel('Y (ECI) [m]')
-    ax6.set_zlabel('Z (ECI) [m]')
+    ax4.set_xlabel('X (ECI) [m]')
+    ax4.set_ylabel('Y (ECI) [m]')
+    ax4.set_zlabel('Z (ECI) [m]')
     
     # Set cubic limits for aspect ratio
     max_val = max(np.max(np.abs(r_sim)), R_eq) * 1.1
-    ax6.set_xlim(-max_val, max_val)
-    ax6.set_ylim(-max_val, max_val)
-    ax6.set_zlim(-max_val, max_val)
-    ax6.set_box_aspect([1, 1, 1]) # Force equal aspect ratio for visual roundness
-    ax6.legend()
-    
-    if config:
-        # Window 2 (Dynamics) Continued
-        
-        # 4. Gamma
-        ax2_4 = fig2.add_subplot(gs2[1, 0])
-        ax2_4.plot(t_sim, sim_metrics['gamma'], 'b-')
-        ax2_4.set_ylabel('Gamma (deg)')
-        ax2_4.set_title('Flight Path Angle')
-        ax2_4.grid(True)
-
-        # 5. T/W
-        ax2_5 = fig2.add_subplot(gs2[1, 1])
-        ax2_5.plot(t_sim, sim_metrics['tw'], 'm-')
-        ax2_5.set_ylabel('Ratio')
-        ax2_5.set_title('Thrust-to-Weight')
-        ax2_5.grid(True)
-        ax2_5.axhline(1.0, color='k', linestyle='--', alpha=0.5)
-
-        # 6. Energy
-        ax2_6 = fig2.add_subplot(gs2[1, 2])
-        ax2_6.plot(t_sim, sim_metrics['energy'], 'g-')
-        ax2_6.set_ylabel('MJ/kg')
-        ax2_6.set_title('Specific Energy')
-        ax2_6.grid(True)
-
-        # Window 3 (Controls) Continued
-        
-        # 2. Vector
-        ax3_2 = fig3.add_subplot(gs3[0, 1])
-        ax3_2.plot(t_sim, u_sim[1, :], label='Ux')
-        ax3_2.plot(t_sim, u_sim[2, :], label='Uy')
-        ax3_2.plot(t_sim, u_sim[3, :], label='Uz')
-        ax3_2.set_title('Thrust Vector (ECI)')
-        ax3_2.grid(True)
-        ax3_2.legend()
-        
-        # 3. G-Load
-        ax3_3 = fig3.add_subplot(gs3[0, 2])
-        ax3_3.plot(t_sim, sim_metrics['g_load'], 'r-')
-        ax3_3.set_ylabel('g')
-        ax3_3.set_title('Axial Acceleration')
-        ax3_3.grid(True)
-
-        # 4. Heating
-        ax3_4 = fig3.add_subplot(gs3[1, 0])
-        ax3_4.plot(t_sim, sim_metrics['heating'], 'orange')
-        ax3_4.set_ylabel('MW/m^2')
-        ax3_4.set_title('Heating Proxy')
-        ax3_4.grid(True)
-        
-        # Forbidden Region for Throttle
-        min_th = config.sequence.min_throttle
-        if min_th > 0.0:
-            ax3_1.axhspan(0.0, min_th, color='red', alpha=0.2, label='Forbidden')
-        ax3_1.legend()
-        
-        # 5. Envelope
-        ax3_5 = fig3.add_subplot(gs3[1, 1])
-        ax3_5.set_title('Flight Envelope (Q vs AoA)')
-        
-        # Scatter plot colored by Mach
-        sc9 = ax3_5.scatter(sim_metrics['q'], sim_metrics['aoa'], c=sim_metrics['mach'], cmap='viridis', s=10)
-        cbar9 = plt.colorbar(sc9, ax=ax3_5)
-        cbar9.set_label('Mach Number')
-        
-        # Max Q Limit line
-        q_lim_kpa = config.max_q_limit / 1000.0
-        ax3_5.axvline(q_lim_kpa, color='r', linestyle='--', label=f'Max Q Limit ({q_lim_kpa:.1f} kPa)')
-        
-        ax3_5.set_xlabel('Dynamic Pressure (kPa)')
-        ax3_5.set_ylabel('AoA (deg)')
-        ax3_5.grid(True)
-        ax3_5.legend()
-        
-        # 6. Forces
-        ax3_6 = fig3.add_subplot(gs3[1, 2])
-        ax3_6.set_title('Force Balance')
-        
-        # Clip data to avoid log(0) errors during coast phases
-        thrust_plot = np.maximum(sim_metrics['thrust'], 1e-3)
-        drag_plot = np.maximum(sim_metrics['drag'], 1e-3)
-        
-        ax3_6.plot(t_sim, thrust_plot, 'b-', label='Thrust')
-        ax3_6.plot(t_sim, drag_plot, 'r-', label='Drag')
-        
-        ax3_6.set_ylabel('Force (kN)')
-        ax3_6.set_yscale('log') # Log scale to see drag at high altitude
-        ax3_6.grid(True, which="both", ls="-", alpha=0.5)
-        ax3_6.legend()
+    ax4.set_xlim(-max_val, max_val)
+    ax4.set_ylim(-max_val, max_val)
+    ax4.set_zlim(-max_val, max_val)
+    ax4.set_box_aspect([1, 1, 1]) # Force equal aspect ratio for visual roundness
+    ax4.legend()
 
     plt.show()
