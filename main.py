@@ -147,8 +147,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
             # Structural Constraints
             # 1. Max Q (35 kPa limit)
             q_val, _ = vehicle.get_aero_properties(x_k, u_dir, t_k_scaled, stage_mode=phase_mode, scaling=scaling)
-            # Apply numerical buffer to prevent simulation drift from triggering violations
-            opti.subject_to(q_val <= config.max_q_limit * config.max_q_opt_margin)
+            opti.subject_to(q_val <= config.max_q_limit)
             
             # 2. G-Force Limit (4.0 g)
             # Calculate Sensed Acceleration = |a_kinematic - g|
@@ -164,6 +163,26 @@ def solve_optimal_trajectory(config, vehicle, environment):
             a_sensed = acc_phys - g_phys
             g_load = ca.norm_2(a_sensed)
             opti.subject_to(g_load <= config.max_g_load * environment.config.g0)
+            
+            # --- End-of-Interval Checks (Rigorous) ---
+            # We check the future point (k+1) using the CURRENT control (u_k) to prevent inter-node violations.
+            t_next_scaled = t_k_scaled + dt_scaled
+            
+            # 1. Max Q (End of Interval)
+            # Dynamic pressure can peak between nodes if velocity increases significantly.
+            q_val_next, _ = vehicle.get_aero_properties(x_next, u_dir, t_next_scaled, stage_mode=phase_mode, scaling=scaling)
+            opti.subject_to(q_val_next <= config.max_q_limit)
+            
+            # Calculate dynamics at the next step (x_next is already computed by RK4 above)
+            derivs_next = vehicle.get_dynamics(x_next, u_throttle, u_dir, t_next_scaled, stage_mode=phase_mode, scaling=scaling)
+            acc_phys_next = derivs_next[3:6] * (scaling.speed / scaling.time)
+            
+            r_phys_next = x_next[0:3] * scaling.length
+            t_phys_next = t_next_scaled * scaling.time
+            env_state_next = environment.get_state_opti(r_phys_next, t_phys_next)
+            
+            g_load_next = ca.norm_2(acc_phys_next - env_state_next['gravity'])
+            opti.subject_to(g_load_next <= config.max_g_load * environment.config.g0)
             
         # --- Constraint Check for Final Node (k=N) ---
         # Critical for G-Load (Burnout) as mass is lowest here.
@@ -181,7 +200,7 @@ def solve_optimal_trajectory(config, vehicle, environment):
              
         # Max Q (Final Node)
         q_val_f, _ = vehicle.get_aero_properties(x_final_phase, u_dir_f, t_final_phase, stage_mode=phase_mode, scaling=scaling)
-        opti.subject_to(q_val_f <= config.max_q_limit * config.max_q_opt_margin)
+        opti.subject_to(q_val_f <= config.max_q_limit)
         
         # G-Load (Final Node)
         derivs_f = vehicle.get_dynamics(x_final_phase, u_th_f, u_dir_f, t_final_phase, stage_mode=phase_mode, scaling=scaling)
@@ -341,7 +360,7 @@ if __name__ == "__main__":
     import analysis
     
     print(f"\n\033[1m--- Setting up Mission ---\033[0m")
-    StarshipBlock2.print_summary()
+    debug.print_config_summary(StarshipBlock2)
     env = Environment(EARTH_CONFIG)
     veh = Vehicle(StarshipBlock2, env)
     

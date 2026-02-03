@@ -137,13 +137,12 @@ class TwoStageRocketConfig:
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
     target_inclination: Optional[float] = None   # [deg] Target Inclination. If None, defaults to Launch Latitude (Min Energy).
-    num_nodes: int = 150  # Number of discretization nodes per phase
+    num_nodes: int = 140  # Number of discretization nodes per phase
     max_iter: int = 2000  # Maximum number of iterations for the optimizer
     
     # Structural Limits
     max_q_limit: float = 40000.0   # [Pa] Maximum Dynamic Pressure
     max_g_load: float = 4.0        # [g] Maximum Acceleration
-    max_q_opt_margin: float = 0.99 # [-] Safety margin for optimizer (1.0 = exact limit)
     
     @property
     def launch_mass(self) -> float:
@@ -151,67 +150,6 @@ class TwoStageRocketConfig:
         return (self.stage_1.dry_mass + self.stage_1.propellant_mass +
                 self.stage_2.dry_mass + self.stage_2.propellant_mass +
                 self.payload_mass)
-
-    def print_summary(self):
-        """Prints a diagnostic summary of the configuration."""
-        g0 = 9.80665
-        
-        # ANSI Colors
-        C = "\033[96m" # Cyan
-        B = "\033[1m"  # Bold
-        R = "\033[0m"  # Reset
-        G = "\033[92m" # Green
-        Y = "\033[93m" # Yellow
-        
-        print(f"\n{C}" + "="*80 + f"{R}")
-        print(f"{B} CONFIG DIAGNOSTIC: {self.name} {R}")
-        print(f"{C}" + "="*80 + f"{R}")
-        inc_str = f"{self.target_inclination:.1f}" if self.target_inclination is not None else "Min-Energy (Auto)"
-        print(f"  Target Orbit:      {self.target_altitude/1000:.1f} km @ {inc_str} deg")
-        print(f"  Launch Mass:       {self.launch_mass:,.0f} kg")
-        print(f"  Payload:           {self.payload_mass:,.0f} kg")
-        
-        # --- Stage 1 Analysis ---
-        s1 = self.stage_1
-        m0_1 = self.launch_mass
-        mf_1 = m0_1 - s1.propellant_mass
-        dv_1 = s1.isp_vac * g0 * np.log(m0_1 / mf_1)
-        tw_1 = s1.thrust_sl / (m0_1 * g0)
-        
-        print(f"{C}" + "-"*80 + f"{R}")
-        print(f"  Stage 1 (Booster):")
-        print(f"    Dry Mass:        {s1.dry_mass:,.0f} kg")
-        print(f"    Propellant:      {s1.propellant_mass:,.0f} kg")
-        print(f"    Thrust (SL/Vac): {s1.thrust_sl/1e6:.2f} / {s1.thrust_vac/1e6:.2f} MN")
-        print(f"    ISP (SL/Vac):    {s1.isp_sl:.0f} / {s1.isp_vac:.0f} s")
-        print(f"    Liftoff T/W:     {tw_1:.2f}")
-        print(f"    Ideal Delta-V:   {dv_1:.0f} m/s")
-
-        # --- Stage 2 Analysis ---
-        s2 = self.stage_2
-        m0_2 = s2.dry_mass + s2.propellant_mass + self.payload_mass
-        mf_2 = s2.dry_mass + self.payload_mass
-        dv_2 = s2.isp_vac * g0 * np.log(m0_2 / mf_2)
-        tw_2 = s2.thrust_vac / (m0_2 * g0)
-        
-        print(f"{C}" + "-"*80 + f"{R}")
-        print(f"  Stage 2 (Ship):")
-        print(f"    Dry Mass:        {s2.dry_mass:,.0f} kg")
-        print(f"    Propellant:      {s2.propellant_mass:,.0f} kg")
-        print(f"    Thrust (Vac):    {s2.thrust_vac/1e6:.2f} MN")
-        print(f"    ISP (SL/Vac):    {s2.isp_sl:.0f} / {s2.isp_vac:.0f} s")
-        print(f"    Staging T/W:     {tw_2:.2f}")
-        print(f"    Ideal Delta-V:   {dv_2:.0f} m/s")
-        
-        # --- Total System ---
-        print(f"{C}" + "="*80 + f"{R}")
-        print(f"  Total Ideal Delta-V: {dv_1 + dv_2:.0f} m/s")
-        print(f"  Est. Losses (Grav+Drag): ~1500 m/s")
-        if (dv_1 + dv_2) < 9000:
-             print(f"  >>> {Y}⚠️ WARNING: Total Delta-V is likely insufficient for Orbit.{R}")
-        else:
-             print(f"  >>> {G}✅ INFO: Theoretical Delta-V is sufficient.{R}")
-        print(f"{C}" + "="*80 + f"{R}\n")
 
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(
@@ -224,7 +162,6 @@ StarshipBlock2 = TwoStageRocketConfig(
     # Structural Limits
     max_q_limit=35000.0, # 35 kPa
     max_g_load=4.0,      # 4.0 g
-    max_q_opt_margin=0.99, # 1% buffer for discretization noise
 
     sequence=SequenceConfig(
         main_engine_ramp_time=3.0,     

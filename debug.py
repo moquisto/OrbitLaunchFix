@@ -801,7 +801,7 @@ def validate_trajectory(simulation_data, config, environment):
     print(f"ORBITAL INJECTION ACCURACY (t = {t[-1]:.1f} s)")
     print(f"  {Style.BOLD}{'Metric':<15} | {'Actual':<12} | {'Target':<12} | {'Error':<10}{Style.RESET}")
     print(f"  {Style.CYAN}" + "-" * 55 + f"{Style.RESET}")
-    print(f"  {'Altitude (km)':<15} | {((r_mag - R_eq)/1000):<12.2f} | {target_alt/1000:<12.2f} | {(r_mag - R_eq - target_alt)/1000:<+8.2f}")
+    print(f"  {'Alt (Spherical)':<15} | {((r_mag - R_eq)/1000):<12.2f} | {target_alt/1000:<12.2f} | {(r_mag - R_eq - target_alt)/1000:<+8.2f}")
     print(f"  {'Periapsis (km)':<15} | {alt_p/1000:<12.2f} | {target_alt/1000:<12.2f} | {(alt_p - target_alt)/1000:<+8.2f}")
     print(f"  {'Apoapsis (km)':<15} | {alt_a/1000:<12.2f} | {target_alt/1000:<12.2f} | {(alt_a - target_alt)/1000:<+8.2f}")
     print(f"  {'Eccentricity':<15} | {ecc:<12.5f} | {'0.00000':<12} | {ecc:<+8.5f}")
@@ -840,9 +840,10 @@ def validate_trajectory(simulation_data, config, environment):
     print(f"  Max Q:          {max_q/1000:.2f} kPa (Limit: {config.max_q_limit/1000:.1f} kPa) | Margin: {(config.max_q_limit - max_q)/1000:.2f} kPa")
     print(f"  Max G-Load:     {max_g:.2f} g    (Limit: {config.max_g_load:.1f} g)     | Margin: {config.max_g_load - max_g:.2f} g")
     
-    if max_q > config.max_q_limit:
+    # Tolerances for reporting (avoid false positives from floating point noise)
+    if max_q > config.max_q_limit + 100.0: # 100 Pa tolerance
         print(f"  >>> {Style.RED}⚠️ WARNING: Max Q limit exceeded!{Style.RESET}")
-    if max_g > config.max_g_load:
+    if max_g > config.max_g_load + 0.01: # 0.01g tolerance
         print(f"  >>> {Style.RED}⚠️ WARNING: G-Load limit exceeded!{Style.RESET}")
         
     print("="*40 + "\n")
@@ -1182,6 +1183,7 @@ def analyze_energy_balance(simulation_data, vehicle):
     r0 = y[0:3, 0]
     v0 = y[3:6, 0]
     E_start = 0.5 * np.dot(v0, v0) + get_potential_energy(r0)
+    E_curr = E_start
     
     print(f"{Style.BOLD}{'Time':<10} | {'Mech Energy (MJ/kg)':<20} | {'Work Done (MJ/kg)':<20} | {'Error (J/kg)':<15}{Style.RESET}")
     print(f"{Style.CYAN}" + "-" * 75 + f"{Style.RESET}")
@@ -1211,10 +1213,13 @@ def analyze_energy_balance(simulation_data, vehicle):
             print(f"{t[i+1]:<10.1f} | {E_curr/1e6:<20.4f} | {(E_start + work_done)/1e6:<20.4f} | {error:<15.2f}")
 
     print(f"{Style.CYAN}" + "-" * 75 + f"{Style.RESET}")
-    if error < 100.0: # 100 J/kg is very small compared to MJ/kg specific energy
-        print(f">>> {Style.GREEN}✅ SUCCESS: Energy is conserved (within integration error).{Style.RESET}")
+    
+    rel_error = error / abs(E_curr) if abs(E_curr) > 1.0 else 0.0
+    
+    if rel_error < 1e-4: # 0.01% tolerance
+        print(f">>> {Style.GREEN}✅ SUCCESS: Energy is conserved (Rel Error: {rel_error*100:.5f}%).{Style.RESET}")
     else:
-        print(f">>> {Style.YELLOW}⚠️ WARNING: Energy drift detected. Check integrator tolerance or physics model.{Style.RESET}")
+        print(f">>> {Style.YELLOW}⚠️ WARNING: Energy drift detected ({rel_error*100:.4f}%). Check integrator tolerance or physics model.{Style.RESET}")
     print("="*40 + "\n")
 
 def analyze_instantaneous_orbit(simulation_data, environment):
@@ -1227,6 +1232,7 @@ def analyze_instantaneous_orbit(simulation_data, environment):
     y = simulation_data['y']
     mu = environment.config.earth_mu
     R_e = environment.config.earth_radius_equator
+    f = environment.config.earth_flattening
     
     if len(t) < 2:
         print("  Not enough data.")
@@ -1270,8 +1276,10 @@ def analyze_instantaneous_orbit(simulation_data, environment):
     events = sorted(list(set(events)), key=lambda x: x[1])
     
     # --- 2. Print Table ---
-    print(f"{Style.BOLD}{'Event':<16} | {'Time':<6} | {'Alt':<7} | {'Vel':<7} | {'FPA':<5} | {'Apogee':<8} | {'Perigee':<8} | {'Inc':<6}{Style.RESET}")
-    print(f"{Style.BOLD}{'':<16} | {'(s)':<6} | {'(km)':<7} | {'(m/s)':<7} | {'(deg)':<5} | {'(km)':<8} | {'(km)':<8} | {'(deg)':<6}{Style.RESET}")
+    print(f"  * Altitudes are Spherical (Relative to Equatorial Radius: {R_e/1000:.1f} km).")
+    print(f"  * Negative values at Liftoff are due to Earth's oblateness at launch latitude.")
+    print(f"{Style.BOLD}{'Event':<16} | {'Time':<6} | {'Alt(Sph)':<8} | {'Vel':<7} | {'FPA':<5} | {'Apogee':<8} | {'Perigee':<8} | {'Inc':<6}{Style.RESET}")
+    print(f"{Style.BOLD}{'':<16} | {'(s)':<6} | {'(km)':<8} | {'(m/s)':<7} | {'(deg)':<5} | {'(km)':<8} | {'(km)':<8} | {'(deg)':<6}{Style.RESET}")
     print(f"{Style.CYAN}" + "-" * 85 + f"{Style.RESET}")
     
     for label, idx in events:
@@ -1281,6 +1289,9 @@ def analyze_instantaneous_orbit(simulation_data, environment):
         
         r = np.linalg.norm(r_vec)
         v = np.linalg.norm(v_vec)
+        
+        # Calculate Spherical Altitude
+        # Consistent with Apogee/Perigee (which use R_e) and Optimizer Target.
         alt = r - R_e
         
         # Specific Energy
@@ -1317,14 +1328,14 @@ def analyze_instantaneous_orbit(simulation_data, environment):
             alt_a = np.inf
             
         # Formatting
-        alt_str = f"{alt/1000:.1f}"
+        alt_str = f"{alt/1000:<8.1f}"
         vel_str = f"{v:.0f}"
         fpa_str = f"{gamma:.1f}"
         apo_str = f"{alt_a/1000:.1f}" if alt_a != np.inf else "Inf"
         peri_str = f"{alt_p/1000:.1f}"
         inc_str = f"{inc:.2f}"
         
-        print(f"{label:<16} | {time_val:<6.1f} | {alt_str:<7} | {vel_str:<7} | {fpa_str:<5} | {apo_str:<8} | {peri_str:<8} | {inc_str:<6}")
+        print(f"{label:<16} | {time_val:<6.1f} | {alt_str} | {vel_str:<7} | {fpa_str:<5} | {apo_str:<8} | {peri_str:<8} | {inc_str:<6}")
         
     print("="*40 + "\n")
 
@@ -1341,20 +1352,28 @@ def analyze_integrator_steps(simulation_data):
         return
 
     dt = np.diff(t)
-    dt = dt[dt > 1e-9] # Filter out zero-length steps caused by phase concatenation
+    # Filter out zero-length steps caused by phase concatenation
+    mask = dt > 1e-9
+    dt_valid = dt[mask]
+    t_start = t[:-1][mask]
     
-    if len(dt) == 0:
+    if len(dt_valid) == 0:
         print("  Not enough valid time steps.")
         return
     
+    min_idx = np.argmin(dt_valid)
+    min_step = dt_valid[min_idx]
+    min_time = t_start[min_idx]
+    
     print(f"  Total Steps: {len(t)}")
-    print(f"  Min Step:    {np.min(dt):.2e} s")
-    print(f"  Max Step:    {np.max(dt):.2e} s")
-    print(f"  Mean Step:   {np.mean(dt):.2e} s")
+    print(f"  Min Step:    {min_step:.2e} s (at t={min_time:.2f}s)")
+    print(f"  Max Step:    {np.max(dt_valid):.2e} s")
+    print(f"  Mean Step:   {np.mean(dt_valid):.2e} s")
     
     # Check for stiffness (very small steps)
-    if np.min(dt) < 1e-4:
+    if min_step < 1e-4:
         print(f"  >>> {Style.YELLOW}⚠️ WARNING: Very small time steps detected (<1e-4s). Physics might be stiff.{Style.RESET}")
+        print(f"      (Likely caused by discontinuous control inputs or phase transitions at t={min_time:.1f}s)")
     else:
         print(f"  >>> {Style.GREEN}✅ SUCCESS: Time steps indicate well-behaved dynamics.{Style.RESET}")
     print("="*40 + "\n")
@@ -1472,14 +1491,77 @@ def analyze_guidance_accuracy(guess, opt_res):
     m_final_opt = opt_res['X3'][6, -1]
     
     print(f"  MECO Time:   Guess={t1_guess:.1f}s, Opt={t1_opt:.1f}s (Diff: {t1_opt-t1_guess:+.1f}s)")
-    print(f"  Final Mass:  Guess={m_final_guess:,.0f}kg, Opt={m_final_opt:,.0f}kg (Diff: {m_final_opt-m_final_guess:+.0f}kg)")
+    print(f"  Final Mass:  Guess={m_final_guess:,.0f}kg (Depletion), Opt={m_final_opt:,.0f}kg (Insertion)")
     
+    fuel_saved = m_final_opt - m_final_guess
+
     if m_final_opt > m_final_guess + 1000:
-         print(f"  >>> {Style.GREEN}✅ INFO: Optimizer saved {m_final_opt - m_final_guess:,.0f} kg of fuel compared to the burn-to-depletion guess.{Style.RESET}")
+         print(f"  >>> {Style.GREEN}✅ INFO: Optimizer found a solution with {fuel_saved:,.0f} kg of fuel remaining.{Style.RESET}")
+         print(f"      (The initial guess burned all fuel; the optimizer cut the engine early at orbit insertion.)")
     elif m_final_opt < m_final_guess - 50000:
          print(f"  >>> {Style.YELLOW}⚠️ NOTE: Optimizer result is significantly lighter than guess (Check constraints).{Style.RESET}")
     else:
          print(f"  >>> {Style.GREEN}✅ SUCCESS: Guidance provided a close mass estimate.{Style.RESET}")
+    print("="*40 + "\n")
+
+# ==============================================================================
+# CONFIGURATION DIAGNOSTICS
+# ==============================================================================
+
+def print_config_summary(config):
+    """
+    Prints a diagnostic summary of the vehicle configuration (Delta-V, T/W).
+    Moved from config.py to separate data from presentation.
+    """
+    g0 = 9.80665
+    
+    _print_header(f"Config Diagnostic: {config.name}", "Config")
+    
+    inc_str = f"{config.target_inclination:.1f}" if config.target_inclination is not None else "Min-Energy (Auto)"
+    print(f"  Target Orbit:      {config.target_altitude/1000:.1f} km @ {inc_str} deg")
+    print(f"  Launch Mass:       {config.launch_mass:,.0f} kg")
+    print(f"  Payload:           {config.payload_mass:,.0f} kg")
+    
+    # --- Stage 1 Analysis ---
+    s1 = config.stage_1
+    m0_1 = config.launch_mass
+    mf_1 = m0_1 - s1.propellant_mass
+    dv_1 = s1.isp_vac * g0 * np.log(m0_1 / mf_1)
+    tw_1 = s1.thrust_sl / (m0_1 * g0)
+    
+    print(f"{Style.CYAN}" + "-"*80 + f"{Style.RESET}")
+    print(f"  Stage 1 (Booster):")
+    print(f"    Dry Mass:        {s1.dry_mass:,.0f} kg")
+    print(f"    Propellant:      {s1.propellant_mass:,.0f} kg")
+    print(f"    Thrust (SL/Vac): {s1.thrust_sl/1e6:.2f} / {s1.thrust_vac/1e6:.2f} MN")
+    print(f"    ISP (SL/Vac):    {s1.isp_sl:.0f} / {s1.isp_vac:.0f} s")
+    print(f"    Liftoff T/W:     {tw_1:.2f}")
+    print(f"    Ideal Delta-V:   {dv_1:.0f} m/s")
+
+    # --- Stage 2 Analysis ---
+    s2 = config.stage_2
+    m0_2 = s2.dry_mass + s2.propellant_mass + config.payload_mass
+    mf_2 = s2.dry_mass + config.payload_mass
+    dv_2 = s2.isp_vac * g0 * np.log(m0_2 / mf_2)
+    tw_2 = s2.thrust_vac / (m0_2 * g0)
+    
+    print(f"{Style.CYAN}" + "-"*80 + f"{Style.RESET}")
+    print(f"  Stage 2 (Ship):")
+    print(f"    Dry Mass:        {s2.dry_mass:,.0f} kg")
+    print(f"    Propellant:      {s2.propellant_mass:,.0f} kg")
+    print(f"    Thrust (Vac):    {s2.thrust_vac/1e6:.2f} MN")
+    print(f"    ISP (SL/Vac):    {s2.isp_sl:.0f} / {s2.isp_vac:.0f} s")
+    print(f"    Staging T/W:     {tw_2:.2f}")
+    print(f"    Ideal Delta-V:   {dv_2:.0f} m/s")
+    
+    # --- Total System ---
+    print(f"{Style.CYAN}" + "="*80 + f"{Style.RESET}")
+    print(f"  Total Ideal Delta-V: {dv_1 + dv_2:.0f} m/s")
+    print(f"  Est. Losses (Grav+Drag): ~1500 m/s")
+    if (dv_1 + dv_2) < 9000:
+            print(f"  >>> {Style.YELLOW}⚠️ WARNING: Total Delta-V is likely insufficient for Orbit.{Style.RESET}")
+    else:
+            print(f"  >>> {Style.GREEN}✅ INFO: Theoretical Delta-V is sufficient.{Style.RESET}")
     print("="*40 + "\n")
 
 # ==============================================================================
