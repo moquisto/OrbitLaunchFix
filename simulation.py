@@ -215,14 +215,24 @@ def run_simulation(optimization_result, vehicle, config):
         # The physics engine forces u_thrust = u_vel during coast, so we replicate that here
         # to ensure analysis plots show ~0 deg AoA.
         v_coast = res2.y[3:6, :]
-        v_norm = np.linalg.norm(v_coast, axis=0)
+        r_coast = res2.y[0:3, :]
+        
+        # Calculate Wind Velocity (V_wind = Omega x R) to get Relative Velocity
+        omega_vec = vehicle.env.config.earth_omega_vector
+        wind_x = omega_vec[1]*r_coast[2,:] - omega_vec[2]*r_coast[1,:]
+        wind_y = omega_vec[2]*r_coast[0,:] - omega_vec[0]*r_coast[2,:]
+        wind_z = omega_vec[0]*r_coast[1,:] - omega_vec[1]*r_coast[0,:]
+        wind_vel = np.vstack([wind_x, wind_y, wind_z])
+        
+        v_rel = v_coast - wind_vel
+        v_norm = np.linalg.norm(v_rel, axis=0)
         
         # Avoid division by zero. Default to [1, 0, 0] if velocity is zero.
-        v_dir = np.zeros_like(v_coast)
+        v_dir = np.zeros_like(v_rel)
         v_dir[0, :] = 1.0
         
         # Perform safe division in-place
-        np.divide(v_coast, v_norm, out=v_dir, where=v_norm > 1e-9)
+        np.divide(v_rel, v_norm, out=v_dir, where=v_norm > 1e-9)
         
         u_coast[1:, :] = v_dir
         u_list.append(u_coast)
