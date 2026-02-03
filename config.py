@@ -59,8 +59,8 @@ class EnvConfig:
     atmosphere_max_alt: float = 1_000_000.0       # [m] Atmosphere cutoff altitude
     
     # --- Launch Site
-    launch_latitude: float = 25.997               # [deg] Starbase, TX
-    launch_longitude: float = -97.157             # [deg]
+    launch_latitude: float = 90             # [deg] Starbase, TX
+    launch_longitude: float = 90            # [deg]
     launch_altitude: float = 5.0                  # [m]
 
     # --- Physical Constants ---

@@ -376,6 +376,27 @@ if __name__ == "__main__":
     
     debug.run_postflight_analysis(sim_res, opt_res, veh, env)
     
+    # --- Final Objective Summary ---
+    print(f"\n{debug.Style.BOLD}{'='*40}{debug.Style.RESET}")
+    print(f"{debug.Style.BOLD} FINAL OPTIMIZATION RESULT{debug.Style.RESET}")
+    print(f"{debug.Style.BOLD}{'='*40}{debug.Style.RESET}")
+    
+    m_final_opt = opt_res["X3"][6, -1]
+    m_dry_s2 = StarshipBlock2.stage_2.dry_mass
+    m_payload = StarshipBlock2.payload_mass
+    m_fuel_left = m_final_opt - (m_dry_s2 + m_payload)
+    
+    print(f"Objective: Maximize Final Mass (Minimize Fuel Consumption)")
+    print(f"  Target Orbit:    {StarshipBlock2.target_altitude/1000:.1f} km")
+    print(f"  Payload:         {m_payload:,.0f} kg")
+    print(f"  Fuel Remaining:  {m_fuel_left:,.2f} kg")
+    
+    if m_fuel_left > 0:
+        print(f"  >>> {debug.Style.GREEN}SUCCESS: Orbit reached with {m_fuel_left:.0f} kg propellant margin.{debug.Style.RESET}")
+    else:
+        print(f"  >>> {debug.Style.RED}FAILURE: Negative fuel margin ({m_fuel_left:.0f} kg). Orbit not viable.{debug.Style.RESET}")
+    print("="*40 + "\n")
+
     print(f"\033[1m--- Plotting Results ---\033[0m")
     analysis.plot_mission(opt_res, sim_res, env, StarshipBlock2)
     print("Done.")
