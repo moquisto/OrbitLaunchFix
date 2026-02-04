@@ -34,7 +34,7 @@ def _monte_carlo_worker(args):
     idx, base_config, base_env_config, opt_res = args
     
     # Re-seed random number generator for this process
-    np.random.seed(int(time.time() * 1000) + idx)
+    np.random.seed((int(time.time() * 1000) + idx) % (2**32))
     
     # Perturb Configuration
     cfg = copy.deepcopy(base_config)
@@ -100,6 +100,9 @@ class ReliabilitySuite:
 
     def run_all(self):
         """Runs all analysis modules sequentially."""
+        # Grade A Upgrade 1: Rigorous Statistics (First)
+        self.analyze_monte_carlo_convergence(N_samples=300)
+        
         self.analyze_grid_independence()
         self.analyze_integrator_tolerance()
         self.analyze_corner_cases()
@@ -120,8 +123,6 @@ class ReliabilitySuite:
         self.analyze_aerodynamics(sim_res)
         self.analyze_lagrange_multipliers(opt_res)
         
-        # Grade A Upgrade 1: Rigorous Statistics (Last)
-        self.analyze_monte_carlo_convergence(N_samples=300)
         self.print_final_report_recommendations()
 
     # 1. GRID INDEPENDENCE STUDY
