@@ -9,6 +9,7 @@ import time
 import contextlib
 import os
 from scipy.interpolate import interp1d
+import multiprocessing
 
 # Project Imports
 from config import StarshipBlock2, EARTH_CONFIG
@@ -24,6 +25,66 @@ def suppress_stdout():
     with open(os.devnull, 'w') as fnull:
         with contextlib.redirect_stdout(fnull):
             yield
+
+def _monte_carlo_worker(args):
+    """
+    Worker function for parallel Monte Carlo simulations.
+    Must be at module level to be picklable.
+    """
+    idx, base_config, base_env_config, opt_res = args
+    
+    # Re-seed random number generator for this process
+    np.random.seed(int(time.time() * 1000) + idx)
+    
+    # Perturb Configuration
+    cfg = copy.deepcopy(base_config)
+    env_cfg = copy.deepcopy(base_env_config)
+    
+    # Randomize (Gaussian)
+    thrust_mult = np.random.normal(1.0, 0.02)
+    isp_mult = np.random.normal(1.0, 0.01)
+    dens_mult = np.random.normal(1.0, 0.10)
+    
+    cfg.stage_1.thrust_vac *= thrust_mult
+    cfg.stage_2.thrust_vac *= thrust_mult
+    cfg.stage_1.isp_vac *= isp_mult
+    cfg.stage_2.isp_vac *= isp_mult
+    env_cfg.density_multiplier = dens_mult
+    
+    sim_res = {'y': np.zeros((7, 1)), 'success': False}
+    
+    # Run Simulation (Suppress output)
+    try:
+        with open(os.devnull, 'w') as fnull:
+            with contextlib.redirect_stdout(fnull):
+                env_mc = Environment(env_cfg)
+                veh_mc = Vehicle(cfg, env_mc)
+                sim_res = run_simulation(opt_res, veh_mc, cfg)
+    except Exception:
+        pass # sim_res remains dummy failure
+
+    # Check Success Criteria
+    r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - env_cfg.earth_radius_equator
+    v_f = np.linalg.norm(sim_res['y'][3:6, -1])
+    m_final = sim_res['y'][6, -1]
+    m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
+    
+    target_alt = cfg.target_altitude
+    target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
+    
+    orbit_ok = abs(r_f - target_alt) < 10000.0 and abs(v_f - target_vel) < 20.0
+    fuel_ok = (m_final - m_dry) > 0.0
+    
+    # Return results and trajectory data (if valid)
+    phase_data = None
+    if np.linalg.norm(sim_res['y'][:, 0]) > 1.0:
+        y_sim = sim_res['y']
+        r_mag = np.linalg.norm(y_sim[0:3, :], axis=0)
+        alt = (r_mag - env_cfg.earth_radius_equator) / 1000.0
+        vel = np.linalg.norm(y_sim[3:6, :], axis=0)
+        phase_data = (alt, vel, orbit_ok and fuel_ok)
+
+    return (orbit_ok, fuel_ok, phase_data)
 
 class ReliabilitySuite:
     def __init__(self):
@@ -202,8 +263,6 @@ class ReliabilitySuite:
     # 6. AERODYNAMIC ANGLE CHECK
     def analyze_aerodynamics(self, sim_res):
         debug._print_sub_header("6. Aerodynamic Angle Check (Max Q)")
-        # Extract Max Q region
-        debug.analyze_instantaneous_orbit(sim_res, self.env) # This prints orbit table
         
         # Re-use debug logic implicitly via simulation metrics
         t = sim_res['t']
@@ -420,48 +479,26 @@ class ReliabilitySuite:
         phase_space_data = [] # For "Cherry on Top" Phase Space Plot
         
         t0 = time.time()
-        for i in range(N_samples):
-            if i % 10 == 0:
-                print(f"  Progress: {i}/{N_samples} ({(i/N_samples)*100:.1f}%)", end='\r')
-            
-            # Perturb
-            cfg = copy.deepcopy(self.base_config)
-            env_cfg = copy.deepcopy(self.base_env_config)
-            
-            # Randomize (Gaussian)
-            thrust_mult = np.random.normal(1.0, 0.02)
-            isp_mult = np.random.normal(1.0, 0.01)
-            dens_mult = np.random.normal(1.0, 0.10)
-            
-            cfg.stage_1.thrust_vac *= thrust_mult
-            cfg.stage_2.thrust_vac *= thrust_mult
-            cfg.stage_1.isp_vac *= isp_mult
-            cfg.stage_2.isp_vac *= isp_mult
-            env_cfg.density_multiplier = dens_mult
-            
-            # Sim (Wrapped in try-except for robustness against physics crashes)
-            try:
-                with suppress_stdout():
-                    env_mc = Environment(env_cfg)
-                    veh_mc = Vehicle(cfg, env_mc)
-                    sim_res = run_simulation(opt_res, veh_mc, cfg)
-            except Exception:
-                # If simulation crashes (e.g. integrator failure), count as failure and continue
-                sim_res = {'y': np.zeros((7, 1)), 'success': False}
+        
+        # Prepare arguments for parallel workers
+        args_list = [(i, self.base_config, self.base_env_config, opt_res) for i in range(N_samples)]
+        
+        n_cpu = multiprocessing.cpu_count()
+        print(f"  Starting parallel execution with {n_cpu} workers...")
+        
+        results = []
+        with multiprocessing.Pool(processes=n_cpu) as pool:
+            # Use imap to get results as they complete for progress reporting
+            for i, res in enumerate(pool.imap(_monte_carlo_worker, args_list)):
+                results.append(res)
+                if i % 10 == 0 or i == N_samples - 1:
+                    elapsed = time.time() - t0
+                    avg_time = elapsed / (i + 1)
+                    remaining = avg_time * (N_samples - (i + 1))
+                    print(f"  Progress: {i+1}/{N_samples} ({((i+1)/N_samples)*100:.1f}%) - ETA: {remaining:.1f}s   ", end='\r')
 
-            # Check Success
-            r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - env_cfg.earth_radius_equator
-            v_f = np.linalg.norm(sim_res['y'][3:6, -1])
-            m_final = sim_res['y'][6, -1]
-            m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
-            
-            target_alt = cfg.target_altitude
-            target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
-            
-            # Criteria: Alt +/- 10km, Vel +/- 20m/s, Fuel > 0
-            orbit_ok = abs(r_f - target_alt) < 10000.0 and abs(v_f - target_vel) < 20.0
-            fuel_ok = (m_final - m_dry) > 0.0
-            
+        # Process results sequentially to build cumulative stats
+        for i, (orbit_ok, fuel_ok, p_data) in enumerate(results):
             if fuel_ok:
                 hardware_success_count += 1
             
@@ -471,14 +508,8 @@ class ReliabilitySuite:
                 if not orbit_ok: orbit_fail_count += 1
                 if not fuel_ok: fuel_fail_count += 1
             
-            # Store Phase Space Data (All runs for high-res plot)
-            # Only plot if simulation produced valid data (not dummy zeros from crash)
-            if np.linalg.norm(sim_res['y'][:, 0]) > 1.0:
-                y_sim = sim_res['y']
-                r_mag = np.linalg.norm(y_sim[0:3, :], axis=0)
-                alt = (r_mag - env_cfg.earth_radius_equator) / 1000.0
-                vel = np.linalg.norm(y_sim[3:6, :], axis=0)
-                phase_space_data.append((alt, vel, orbit_ok and fuel_ok))
+            if p_data is not None:
+                phase_space_data.append(p_data)
             
             # Calculate stats
             n = i + 1
