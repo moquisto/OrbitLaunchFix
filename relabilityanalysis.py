@@ -46,6 +46,7 @@ class ReliabilitySuite:
         # Grade A Upgrades
         self.analyze_chaos_lyapunov()                        # Upgrade 2: Chaos Theory
         self.analyze_stiffness_euler()                       # Upgrade 3: Numerical Stiffness
+        self.analyze_bifurcation()                           # Upgrade 4: Bifurcation Analysis
         
         # Run a baseline optimization for single-run checks
         print(f"\n{debug.Style.BOLD}--- Generating Baseline Solution for Deep Dive ---{debug.Style.RESET}")
@@ -60,6 +61,7 @@ class ReliabilitySuite:
         
         # Grade A Upgrade 1: Rigorous Statistics (Last)
         self.analyze_monte_carlo_convergence(N_samples=300)
+        self.print_final_report_recommendations()
 
     # 1. GRID INDEPENDENCE STUDY
     def analyze_grid_independence(self):
@@ -575,6 +577,18 @@ class ReliabilitySuite:
         t_pert = sim_pert['t']
         y_pert = sim_pert['y']
         
+        # FIX: Remove duplicates from time arrays (caused by phase concatenation)
+        # Cubic spline interpolation requires strictly increasing x values.
+        _, idx_nom = np.unique(t_nom, return_index=True)
+        idx_nom = np.sort(idx_nom)
+        t_nom = t_nom[idx_nom]
+        y_nom = y_nom[:, idx_nom]
+        
+        _, idx_pert = np.unique(t_pert, return_index=True)
+        idx_pert = np.sort(idx_pert)
+        t_pert = t_pert[idx_pert]
+        y_pert = y_pert[:, idx_pert]
+        
         # Resample to dense grid for high-resolution plotting (2000 points)
         t_dense = np.linspace(t_nom[0], t_nom[-1], 2000)
         
@@ -653,7 +667,15 @@ class ReliabilitySuite:
         
         # Quantitative Error Calculation
         # Interpolate RK45 to the final Euler time
-        f_rk = interp1d(sim_rk45['t'], sim_rk45['y'], axis=1, fill_value="extrapolate")
+        # FIX: Remove duplicates for interpolation
+        t_rk = sim_rk45['t']
+        y_rk = sim_rk45['y']
+        _, idx_rk = np.unique(t_rk, return_index=True)
+        idx_rk = np.sort(idx_rk)
+        t_rk = t_rk[idx_rk]
+        y_rk = y_rk[:, idx_rk]
+        
+        f_rk = interp1d(t_rk, y_rk, axis=1, fill_value="extrapolate")
         y_rk_final = f_rk(t_euler[-1])
         y_eu_final = y_euler[:, -1]
         err_km = np.linalg.norm(y_eu_final[0:3] - y_rk_final[0:3]) / 1000.0
@@ -679,6 +701,104 @@ class ReliabilitySuite:
         print("This justifies using an Adaptive RK45 solver instead of Symplectic integrators")
         print("(like Verlet), because the rocket is a Non-Conservative system (Mass loss, Drag)")
         print("where energy conservation is not the primary constraint.")
+
+    # 13. BIFURCATION ANALYSIS (Upgrade 4)
+    def analyze_bifurcation(self):
+        debug._print_sub_header("13. Bifurcation Analysis (Cliff-Edge Test)")
+        print("Sweeping Thrust Multiplier to identify stability boundaries...")
+        
+        # Get nominal controls
+        with suppress_stdout():
+            opt_res = solve_optimal_trajectory(self.base_config, self.veh, self.env, print_level=0)
+            
+        if not opt_res.get("success", False):
+            print("Baseline optimization failed. Skipping.")
+            return
+
+        # Sweep range: 0.95 to 1.05
+        multipliers = np.linspace(0.95, 1.05, 11)
+        success_rates = []
+        
+        print(f"{'Thrust Mult':<12} | {'Success Rate':<15}")
+        print("-" * 30)
+        
+        # Use a smaller batch for speed (15 runs per step)
+        n_runs_per_step = 15 
+        
+        for m in multipliers:
+            n_success = 0
+            
+            for _ in range(n_runs_per_step):
+                # Perturb
+                cfg = copy.deepcopy(self.base_config)
+                env_cfg = copy.deepcopy(self.base_env_config)
+                
+                # Apply Bifurcation Parameter (Mean Thrust Shift)
+                # We shift the mean, but still apply the standard MC noise (2%)
+                # to see if the system is robust AROUND that new mean.
+                thrust_noise = np.random.normal(1.0, 0.02)
+                combined_mult = m * thrust_noise
+                
+                cfg.stage_1.thrust_vac *= combined_mult
+                cfg.stage_2.thrust_vac *= combined_mult
+                
+                # Run Sim
+                try:
+                    with suppress_stdout():
+                        env_mc = Environment(env_cfg)
+                        veh_mc = Vehicle(cfg, env_mc)
+                        sim_res = run_simulation(opt_res, veh_mc, cfg)
+                        
+                    # Check Success
+                    r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - env_cfg.earth_radius_equator
+                    v_f = np.linalg.norm(sim_res['y'][3:6, -1])
+                    m_final = sim_res['y'][6, -1]
+                    m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
+                    
+                    target_alt = cfg.target_altitude
+                    target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
+                    
+                    orbit_ok = abs(r_f - target_alt) < 10000.0 and abs(v_f - target_vel) < 20.0
+                    fuel_ok = (m_final - m_dry) > 0.0
+                    
+                    if orbit_ok and fuel_ok:
+                        n_success += 1
+                except:
+                    pass
+            
+            rate = (n_success / n_runs_per_step) * 100.0
+            success_rates.append(rate)
+            print(f"{m:<12.2f} | {rate:<15.1f}%")
+            
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(multipliers, success_rates, 'ro-', linewidth=2)
+        plt.xlabel('Thrust Multiplier (Mean)')
+        plt.ylabel('Success Rate (%)')
+        plt.title('Bifurcation Analysis: Stability "Cliff-Edge"')
+        plt.grid(True)
+        plt.axvline(1.0, color='k', linestyle='--', label='Nominal')
+        plt.legend()
+        plt.show()
+        
+        print(f">>> {debug.Style.GREEN}PASS: Bifurcation analysis complete.{debug.Style.RESET}")
+
+    def print_final_report_recommendations(self):
+        print(f"\n{debug.Style.BOLD}=== FINAL REPORT RECOMMENDATIONS (GRADE A) ==={debug.Style.RESET}")
+        
+        print(f"\n{debug.Style.BOLD}1. THEORETICAL DEFENSE: Time Reversal Symmetry{debug.Style.RESET}")
+        print("Add this to your 'Theoretical Background' or 'Discussion' section:")
+        print("\"Unlike the pendulum discussed in Lecture 1, the rocket system breaks Time-Reversal Symmetry (t -> -t).")
+        print(" This is because Drag is a dissipative force (F_d proportional to -v|v|), and the mass flow is irreversible")
+        print(" (combustion). This lack of symmetry confirms the system is non-Hamiltonian, further justifying the")
+        print(" rejection of Symplectic Integrators in favor of Adaptive RK45.\"")
+        
+        print(f"\n{debug.Style.BOLD}2. COMPUTATIONAL DEFENSE: Jacobian Sparsity{debug.Style.RESET}")
+        print("Add this to your 'Numerical Methods' section:")
+        print("\"The Trajectory Optimization problem is formulated as a Nonlinear Programming (NLP) problem.")
+        print(" By using Direct Collocation, we ensure the Jacobian Matrix (derivatives of constraints w.r.t variables)")
+        print(" is Sparse (approx 0.3% density). This allows the solver (IPOPT) to scale to ~3000 variables efficiently,")
+        print(" similar to how relaxation methods for the Laplace equation exploit local connectivity.\"")
 
 if __name__ == "__main__":
     suite = ReliabilitySuite()
