@@ -652,11 +652,22 @@ class ReliabilitySuite:
         f_rk = interp1d(t_rk, y_rk, axis=1, fill_value="extrapolate")
 
         # Plot Setup
-        plt.figure(figsize=(10, 6))
-        plt.plot(sim_rk45['t'][sim_rk45['t']<=T1], r_rk[sim_rk45['t']<=T1]/1000.0, 'k-', linewidth=2, label='RK45 (Adaptive)')
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
+        
+        # Top: Trajectory
+        ax1.plot(sim_rk45['t'][sim_rk45['t']<=T1], r_rk[sim_rk45['t']<=T1]/1000.0, 'k-', linewidth=2, label='RK45 (Adaptive)')
+        ax1.set_ylabel('Altitude (km)')
+        ax1.set_title('Numerical Stiffness: Euler vs RK45 (Phase 1)')
+        ax1.grid(True)
+        
+        # Bottom: Error
+        ax2.set_ylabel('Altitude Error (km)')
+        ax2.set_xlabel('Time (s)')
+        ax2.grid(True)
+        ax2.set_title('Integration Error (Euler - RK45)')
         
         # 2. Run Euler Loop for multiple time steps
-        dt_values = [0.1, 0.5, 1.0]
+        dt_values = [0.1, 1.0, 2.0]
         colors = ['g--', 'b--', 'r--']
         
         for dt, color in zip(dt_values, colors):
@@ -684,14 +695,18 @@ class ReliabilitySuite:
             y_eu_final = y_euler[:, -1]
             err_km = np.linalg.norm(y_eu_final[0:3] - y_rk_final[0:3]) / 1000.0
             
+            # Error Trace for Plotting
+            y_rk_interp = f_rk(t_euler)
+            r_rk_interp = np.linalg.norm(y_rk_interp[0:3], axis=0) - self.env.config.earth_radius_equator
+            error_trace = (r_eu - r_rk_interp) / 1000.0
+            
             print(f"  dt={dt}s -> Error: {err_km:.2f} km")
-            plt.plot(t_euler, r_eu/1000.0, color, label=f'Euler (dt={dt}s, Err={err_km:.1f}km)')
+            ax1.plot(t_euler, r_eu/1000.0, color, label=f'Euler (dt={dt}s)')
+            ax2.plot(t_euler, error_trace, color, label=f'dt={dt}s (Final Err={err_km:.1f}km)')
         
-        plt.xlabel('Time (s)')
-        plt.ylabel('Altitude (km)')
-        plt.title(f'Numerical Stiffness: Euler vs RK45 (Phase 1)')
-        plt.legend()
-        plt.grid(True)
+        ax1.legend()
+        ax2.legend()
+        plt.tight_layout()
         plt.show()
         print(f">>> {debug.Style.GREEN}PASS: Stiffness demonstrated.{debug.Style.RESET}")
         print(f"\n{debug.Style.BOLD}THEORETICAL DEFENSE (For Report):{debug.Style.RESET}")
