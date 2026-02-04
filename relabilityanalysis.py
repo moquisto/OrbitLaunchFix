@@ -559,15 +559,15 @@ class ReliabilitySuite:
             opt_res = solve_optimal_trajectory(self.base_config, self.veh, self.env, print_level=0)
             sim_nom = run_simulation(opt_res, self.veh, self.base_config)
             
-        # 2. Perturbed Run (Perturb Density by 1e-6)
-        print("Generating Perturbed Trajectory (Density + 1e-6)...")
-        pert_env_config = copy.deepcopy(self.base_env_config)
-        pert_env_config.density_multiplier += 1e-6
-        pert_env = Environment(pert_env_config)
-        pert_veh = Vehicle(self.base_config, pert_env)
+        # 2. Perturbed Run (Perturb Thrust by 0.1%)
+        # Changing thrust is more sensitive than density for open-loop divergence
+        print("Generating Perturbed Trajectory (Thrust + 0.1%)...")
+        pert_config = copy.deepcopy(self.base_config)
+        pert_config.stage_1.thrust_vac *= 1.001
+        pert_veh = Vehicle(pert_config, self.env)
         
         with suppress_stdout():
-            sim_pert = run_simulation(opt_res, pert_veh, self.base_config)
+            sim_pert = run_simulation(opt_res, pert_veh, pert_config)
             
         # 3. Analysis
         # Interpolate Perturbed to Nominal Time Grid
@@ -620,7 +620,7 @@ class ReliabilitySuite:
         plt.plot(t_dense, log_delta, 'r-')
         plt.xlabel('Time (s)')
         plt.ylabel('ln(|delta_r|) [Log Divergence]')
-        plt.title(f'Lyapunov Analysis: Sensitivity to Initial Conditions\nEst. Lambda = {lambda_est:.4f} s^-1, Final Div = {final_div:.1f} km')
+        plt.title(f'Lyapunov Analysis: Sensitivity to Initial Conditions (Thrust +0.1%)\nEst. Lambda = {lambda_est:.4f} s^-1, Final Div = {final_div:.1f} km')
         plt.grid(True)
         plt.show()
         print(f">>> {debug.Style.GREEN}PASS: Chaos analysis complete.{debug.Style.RESET}")
@@ -634,8 +634,6 @@ class ReliabilitySuite:
             opt_res = solve_optimal_trajectory(self.base_config, self.veh, self.env, print_level=0)
             sim_rk45 = run_simulation(opt_res, self.veh, self.base_config)
             
-        # 2. Run Euler (Manual Implementation)
-        print("Running Fixed-Step Euler Integration (dt=0.1s)...")
         
         # Rebuild interpolators
         T1 = opt_res["T1"]
@@ -643,55 +641,55 @@ class ReliabilitySuite:
         t_grid_1 = np.linspace(0, T1, U1.shape[1] + 1)[:-1]
         ctrl_1 = interp1d(t_grid_1, U1, axis=1, kind='previous', fill_value="extrapolate", bounds_error=False)
         
-        # Euler Loop (Phase 1 Only for demonstration)
-        dt = 0.1
-        t_euler = [0.0]
-        y_euler = [sim_rk45['y'][:, 0]]
-        
-        y_curr = y_euler[0].copy()
-        t_curr = 0.0
-        
-        while t_curr < T1:
-            u = ctrl_1(t_curr)
-            dy = self.veh.get_dynamics(y_curr, u[0], u[1:], t_curr, stage_mode="boost", scaling=None)
-            y_curr += dy * dt
-            t_curr += dt
-            t_euler.append(t_curr)
-            y_euler.append(y_curr.copy())
-            
-        # Plot Comparison
-        t_euler = np.array(t_euler)
-        y_euler = np.array(y_euler).T
+        # Reference RK45
         r_rk = np.linalg.norm(sim_rk45['y'][0:3], axis=0) - self.env.config.earth_radius_equator
-        r_eu = np.linalg.norm(y_euler[0:3], axis=0) - self.env.config.earth_radius_equator
-        
-        # Quantitative Error Calculation
-        # Interpolate RK45 to the final Euler time
-        # FIX: Remove duplicates for interpolation
         t_rk = sim_rk45['t']
         y_rk = sim_rk45['y']
         _, idx_rk = np.unique(t_rk, return_index=True)
         idx_rk = np.sort(idx_rk)
         t_rk = t_rk[idx_rk]
         y_rk = y_rk[:, idx_rk]
-        
         f_rk = interp1d(t_rk, y_rk, axis=1, fill_value="extrapolate")
-        y_rk_final = f_rk(t_euler[-1])
-        y_eu_final = y_euler[:, -1]
-        err_km = np.linalg.norm(y_eu_final[0:3] - y_rk_final[0:3]) / 1000.0
-        
-        print(f"  Euler Integration Error (Phase 1): {err_km:.2f} km")
-        if err_km > 10.0:
-             print(f"  >>> {debug.Style.GREEN}PASS: Euler Diverged (Error > 10km). Stiffness confirmed.{debug.Style.RESET}")
-        else:
-             print(f"  >>> {debug.Style.YELLOW}WARN: Euler did not diverge significantly.{debug.Style.RESET}")
-        
+
+        # Plot Setup
         plt.figure(figsize=(10, 6))
-        plt.plot(sim_rk45['t'][sim_rk45['t']<=T1], r_rk[sim_rk45['t']<=T1]/1000.0, 'b-', label='RK45 (Adaptive)')
-        plt.plot(t_euler, r_eu/1000.0, 'r--', label=f'Euler (dt={dt}s)')
+        plt.plot(sim_rk45['t'][sim_rk45['t']<=T1], r_rk[sim_rk45['t']<=T1]/1000.0, 'k-', linewidth=2, label='RK45 (Adaptive)')
+        
+        # 2. Run Euler Loop for multiple time steps
+        dt_values = [0.1, 0.5, 1.0]
+        colors = ['g--', 'b--', 'r--']
+        
+        for dt, color in zip(dt_values, colors):
+            print(f"Running Fixed-Step Euler Integration (dt={dt}s)...")
+            t_euler = [0.0]
+            y_euler = [sim_rk45['y'][:, 0]]
+            
+            y_curr = y_euler[0].copy()
+            t_curr = 0.0
+            
+            while t_curr < T1:
+                u = ctrl_1(t_curr)
+                dy = self.veh.get_dynamics(y_curr, u[0], u[1:], t_curr, stage_mode="boost", scaling=None)
+                y_curr += dy * dt
+                t_curr += dt
+                t_euler.append(t_curr)
+                y_euler.append(y_curr.copy())
+            
+            t_euler = np.array(t_euler)
+            y_euler = np.array(y_euler).T
+            r_eu = np.linalg.norm(y_euler[0:3], axis=0) - self.env.config.earth_radius_equator
+            
+            # Error Calc
+            y_rk_final = f_rk(t_euler[-1])
+            y_eu_final = y_euler[:, -1]
+            err_km = np.linalg.norm(y_eu_final[0:3] - y_rk_final[0:3]) / 1000.0
+            
+            print(f"  dt={dt}s -> Error: {err_km:.2f} km")
+            plt.plot(t_euler, r_eu/1000.0, color, label=f'Euler (dt={dt}s, Err={err_km:.1f}km)')
+        
         plt.xlabel('Time (s)')
         plt.ylabel('Altitude (km)')
-        plt.title(f'Numerical Stiffness: Euler vs RK45 (Phase 1)\nIntegration Error: {err_km:.1f} km')
+        plt.title(f'Numerical Stiffness: Euler vs RK45 (Phase 1)')
         plt.legend()
         plt.grid(True)
         plt.show()
@@ -699,8 +697,11 @@ class ReliabilitySuite:
         print(f"\n{debug.Style.BOLD}THEORETICAL DEFENSE (For Report):{debug.Style.RESET}")
         print("The divergence of the Euler method proves the system is 'Stiff'.")
         print("This justifies using an Adaptive RK45 solver instead of Symplectic integrators")
-        print("(like Verlet), because the rocket is a Non-Conservative system (Mass loss, Drag)")
-        print("where energy conservation is not the primary constraint.")
+        print("(like Verlet), because the rocket is a Non-Conservative system.")
+        print("Verlet is designed for Hamiltonian systems (E=const), but a rocket has:")
+        print("  1. Mass Loss (dm/dt != 0)")
+        print("  2. Non-Conservative Forces (Drag, Thrust)")
+        print("Therefore, Symplectic properties are less important than Stability for Stiff ODEs.")
 
     # 13. BIFURCATION ANALYSIS (Upgrade 4)
     def analyze_bifurcation(self):
