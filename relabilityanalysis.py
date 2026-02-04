@@ -617,11 +617,17 @@ class ReliabilitySuite:
         
         # Plot
         plt.figure(figsize=(10, 6))
-        plt.plot(t_dense, log_delta, 'r-')
+        plt.plot(t_dense, log_delta, 'b-', linewidth=1.5, label='Log Divergence ln(|Δr|)')
+        
+        # Plot Fit Line
+        y_fit = coeffs[0] * t_dense[idx_start:idx_end] + coeffs[1]
+        plt.plot(t_dense[idx_start:idx_end], y_fit, 'r--', linewidth=2, label=f'Lyapunov Fit (λ ≈ {lambda_est:.4f})')
+        
         plt.xlabel('Time (s)')
         plt.ylabel('ln(|delta_r|) [Log Divergence]')
         plt.title(f'Lyapunov Analysis: Sensitivity to Initial Conditions (Thrust +0.1%)\nEst. Lambda = {lambda_est:.4f} s^-1, Final Div = {final_div:.1f} km')
         plt.grid(True)
+        plt.legend()
         plt.show()
         print(f">>> {debug.Style.GREEN}PASS: Chaos analysis complete.{debug.Style.RESET}")
 
@@ -659,11 +665,12 @@ class ReliabilitySuite:
         ax1.set_ylabel('Altitude (km)')
         ax1.set_title('Numerical Stiffness: Euler vs RK45 (Phase 1)')
         ax1.grid(True)
+        ax1.legend()
         
         # Bottom: Error
-        ax2.set_ylabel('Altitude Error (km)')
+        ax2.set_ylabel('Position Error (km) [Log Scale]')
         ax2.set_xlabel('Time (s)')
-        ax2.grid(True)
+        ax2.grid(True, which="both", ls="-", alpha=0.3)
         ax2.set_title('Integration Error (Euler - RK45)')
         
         # 2. Run Euler Loop for multiple time steps
@@ -697,12 +704,19 @@ class ReliabilitySuite:
             
             # Error Trace for Plotting
             y_rk_interp = f_rk(t_euler)
-            r_rk_interp = np.linalg.norm(y_rk_interp[0:3], axis=0) - self.env.config.earth_radius_equator
-            error_trace = (r_eu - r_rk_interp) / 1000.0
+            
+            # Position Error (Euclidean Distance) for log plot
+            pos_diff = y_euler[0:3, :] - y_rk_interp[0:3, :]
+            error_trace_km = np.linalg.norm(pos_diff, axis=0) / 1000.0
+            # Avoid log(0)
+            error_trace_km = np.maximum(error_trace_km, 1e-9)
             
             print(f"  dt={dt}s -> Error: {err_km:.2f} km")
             ax1.plot(t_euler, r_eu/1000.0, color, label=f'Euler (dt={dt}s)')
-            ax2.plot(t_euler, error_trace, color, label=f'dt={dt}s (Final Err={err_km:.1f}km)')
+            ax2.semilogy(t_euler, error_trace_km, color, label=f'dt={dt}s (Final Err={err_km:.1f}km)')
+        
+        # Add Threshold Line
+        ax2.axhline(y=1.0, color='k', linestyle=':', label='1 km Threshold')
         
         ax1.legend()
         ax2.legend()
