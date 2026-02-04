@@ -123,7 +123,7 @@ class ReliabilitySuite:
         self.analyze_aerodynamics(sim_res)
         self.analyze_lagrange_multipliers(opt_res)
         
-        self.print_final_report_recommendations()
+        self.print_final_report_recommendations(sim_res)
 
     # 1. GRID INDEPENDENCE STUDY
     def analyze_grid_independence(self):
@@ -551,7 +551,7 @@ class ReliabilitySuite:
         # Extract final altitude from phase space data
         alts = [d[0][-1] for d in phase_space_data]
         plt.hist(alts, bins=20, color='purple', alpha=0.7, edgecolor='black')
-        plt.axvline(cfg.target_altitude/1000.0, color='k', linestyle='dashed', linewidth=1, label='Target')
+        plt.axvline(self.base_config.target_altitude/1000.0, color='k', linestyle='dashed', linewidth=1, label='Target')
         plt.xlabel('Final Altitude (km)')
         plt.ylabel('Frequency')
         plt.title(f'Altitude Dispersion Histogram (First {len(alts)} Runs)')
@@ -778,7 +778,7 @@ class ReliabilitySuite:
             return
 
         # Sweep range: 0.95 to 1.05
-        multipliers = np.linspace(0.95, 1.05, 11)
+        multipliers = np.linspace(0.95, 1.05, 21)
         success_rates = []
         
         print(f"{'Thrust Mult':<12} | {'Success Rate':<15}")
@@ -845,7 +845,7 @@ class ReliabilitySuite:
         
         print(f">>> {debug.Style.GREEN}PASS: Bifurcation analysis complete.{debug.Style.RESET}")
 
-    def print_final_report_recommendations(self):
+    def print_final_report_recommendations(self, sim_res=None):
         print(f"\n{debug.Style.BOLD}=== FINAL REPORT RECOMMENDATIONS (GRADE A) ==={debug.Style.RESET}")
         
         print(f"\n{debug.Style.BOLD}1. THEORETICAL DEFENSE: Time Reversal Symmetry{debug.Style.RESET}")
@@ -861,6 +861,64 @@ class ReliabilitySuite:
         print(" By using Direct Collocation, we ensure the Jacobian Matrix (derivatives of constraints w.r.t variables)")
         print(" is Sparse (approx 0.3% density). This allows the solver (IPOPT) to scale to ~3000 variables efficiently,")
         print(" similar to how relaxation methods for the Laplace equation exploit local connectivity.\"")
+
+        print(f"\n{debug.Style.BOLD}3. PHYSICS VALIDATION: Theoretical Impulsive Minimum{debug.Style.RESET}")
+        
+        # Constants
+        mu = self.base_env_config.earth_mu
+        R_eq = self.base_env_config.earth_radius_equator
+        target_alt = self.base_config.target_altitude
+        lat = self.base_env_config.launch_latitude
+        omega = self.base_env_config.earth_omega_vector[2]
+        
+        # Step A: Transfer Orbit (Hohmann)
+        r1 = R_eq
+        r2 = R_eq + target_alt
+        a_tx = (r1 + r2) / 2.0
+        
+        v_p_tx = np.sqrt(mu * (2/r1 - 1/a_tx))
+        v_a_tx = np.sqrt(mu * (2/r2 - 1/a_tx))
+        
+        # Step B: Final Orbit
+        v_target = np.sqrt(mu / r2)
+        
+        # Step C: Surface Velocity (Free Boost)
+        v_surf = omega * R_eq * np.cos(np.radians(lat))
+        
+        # Step D: Delta-V
+        dv_1 = v_p_tx - v_surf
+        dv_2 = v_target - v_a_tx
+        dv_ideal = dv_1 + dv_2
+        
+        print("Add this calculation to your 'Discussion' section to prove efficiency:")
+        print(f"  Theoretical Min Delta-V: {dv_ideal:.1f} m/s (Hohmann Transfer from Surface)")
+        
+        if sim_res is not None:
+            # Calculate Actual Delta-V from simulation
+            t, y, u = sim_res['t'], sim_res['y'], sim_res['u']
+            actual_dv = 0.0
+            m_stg2_wet = self.base_config.stage_2.dry_mass + self.base_config.stage_2.propellant_mass + self.base_config.payload_mass
+            
+            for i in range(len(t) - 1):
+                dt = t[i+1] - t[i]
+                if dt < 1e-6 or u[0, i] < 0.01: continue
+                
+                stage = self.base_config.stage_1 if y[6, i] > m_stg2_wet + 1000 else self.base_config.stage_2
+                env_state = self.env.get_state_sim(y[0:3, i], t[i])
+                isp_eff = stage.isp_vac + (env_state['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
+                thrust = u[0, i] * stage.thrust_vac * (isp_eff / stage.isp_vac)
+                actual_dv += (thrust / y[6, i]) * dt
+            
+            loss = actual_dv - dv_ideal
+            efficiency = (dv_ideal / actual_dv) * 100.0
+            
+            print(f"\n  Recommended Table for Report:")
+            print(f"  | Metric | Value | Notes |")
+            print(f"  | --- | --- | --- |")
+            print(f"  | **Theoretical Min** | **{dv_ideal:.0f} m/s** | Impulsive Transfer (Hohmann) |")
+            print(f"  | **Actual Optimized** | **{actual_dv:.0f} m/s** | From Simulation |")
+            print(f"  | **Gravity + Drag Loss** | **{loss:.0f} m/s** | The 'Price' of Ascent |")
+            print(f"  | **Efficiency** | **{efficiency:.1f}%** | (Theoretical / Actual) |")
 
 if __name__ == "__main__":
     suite = ReliabilitySuite()
