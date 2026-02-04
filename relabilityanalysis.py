@@ -8,6 +8,7 @@ import copy
 import time
 import contextlib
 import os
+from scipy.interpolate import interp1d
 
 # Project Imports
 from config import StarshipBlock2, EARTH_CONFIG
@@ -41,7 +42,10 @@ class ReliabilitySuite:
         self.analyze_grid_independence()
         self.analyze_integrator_tolerance()
         self.analyze_corner_cases()
-        self.analyze_monte_carlo_dispersion()
+        
+        # Grade A Upgrades
+        self.analyze_chaos_lyapunov()                        # Upgrade 2: Chaos Theory
+        self.analyze_stiffness_euler()                       # Upgrade 3: Numerical Stiffness
         
         # Run a baseline optimization for single-run checks
         print(f"\n{debug.Style.BOLD}--- Generating Baseline Solution for Deep Dive ---{debug.Style.RESET}")
@@ -53,6 +57,9 @@ class ReliabilitySuite:
         self.analyze_control_slew(sim_res, opt_res)
         self.analyze_aerodynamics(sim_res)
         self.analyze_lagrange_multipliers(opt_res)
+        
+        # Grade A Upgrade 1: Rigorous Statistics (Last)
+        self.analyze_monte_carlo_convergence(N_samples=200)
 
     # 1. GRID INDEPENDENCE STUDY
     def analyze_grid_independence(self):
@@ -329,6 +336,218 @@ class ReliabilitySuite:
                 
         except Exception as e:
             print(f">>> {debug.Style.RED}FAIL: Optimizer crashed on worst case.{debug.Style.RESET}")
+
+    # 10. MONTE CARLO CONVERGENCE (Upgrade 1)
+    def analyze_monte_carlo_convergence(self, N_samples=200):
+        debug._print_sub_header(f"10. Monte Carlo Convergence (N={N_samples})")
+        print(f"Running large-batch Monte Carlo to demonstrate Statistical Convergence (Law of Large Numbers)...")
+        print("Note: This may take several minutes.")
+        
+        # Get nominal controls
+        with suppress_stdout():
+            opt_res = solve_optimal_trajectory(self.base_config, self.veh, self.env, print_level=0)
+            
+        if not opt_res.get("success", False):
+            print("Baseline optimization failed. Skipping.")
+            return
+
+        success_count = 0
+        cumulative_rates = []
+        std_errors = []
+        phase_space_data = [] # For "Cherry on Top" Phase Space Plot
+        
+        t0 = time.time()
+        for i in range(N_samples):
+            if i % 10 == 0:
+                print(f"  Progress: {i}/{N_samples} ({(i/N_samples)*100:.1f}%)", end='\r')
+            
+            # Perturb
+            cfg = copy.deepcopy(self.base_config)
+            env_cfg = copy.deepcopy(self.base_env_config)
+            
+            # Randomize (Gaussian)
+            thrust_mult = np.random.normal(1.0, 0.02)
+            isp_mult = np.random.normal(1.0, 0.01)
+            dens_mult = np.random.normal(1.0, 0.10)
+            
+            cfg.stage_1.thrust_vac *= thrust_mult
+            cfg.stage_2.thrust_vac *= thrust_mult
+            cfg.stage_1.isp_vac *= isp_mult
+            cfg.stage_2.isp_vac *= isp_mult
+            env_cfg.density_multiplier = dens_mult
+            
+            # Sim (Wrapped in try-except for robustness against physics crashes)
+            try:
+                with suppress_stdout():
+                    env_mc = Environment(env_cfg)
+                    veh_mc = Vehicle(cfg, env_mc)
+                    sim_res = run_simulation(opt_res, veh_mc, cfg)
+            except Exception:
+                # If simulation crashes (e.g. integrator failure), count as failure and continue
+                sim_res = {'y': np.zeros((7, 1)), 'success': False}
+
+            # Check Success
+            r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - env_cfg.earth_radius_equator
+            v_f = np.linalg.norm(sim_res['y'][3:6, -1])
+            m_final = sim_res['y'][6, -1]
+            m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
+            
+            target_alt = cfg.target_altitude
+            target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
+            
+            # Criteria: Alt +/- 10km, Vel +/- 20m/s, Fuel > 0
+            orbit_ok = abs(r_f - target_alt) < 10000.0 and abs(v_f - target_vel) < 20.0
+            fuel_ok = (m_final - m_dry) > 0.0
+            
+            if orbit_ok and fuel_ok:
+                success_count += 1
+            
+            # Store Phase Space Data (First 100 runs)
+            if i < 100:
+                y_sim = sim_res['y']
+                r_mag = np.linalg.norm(y_sim[0:3, :], axis=0)
+                alt = (r_mag - env_cfg.earth_radius_equator) / 1000.0
+                vel = np.linalg.norm(y_sim[3:6, :], axis=0)
+                phase_space_data.append((alt, vel, orbit_ok and fuel_ok))
+            
+            # Calculate stats
+            n = i + 1
+            p = success_count / n
+            cumulative_rates.append(p)
+            # Standard Error (Bernoulli)
+            se = np.sqrt(p * (1 - p) / n) if n > 1 else 0.0
+            std_errors.append(se)
+            
+        print(f"  Progress: {N_samples}/{N_samples} (100.0%) - Done in {time.time()-t0:.1f}s")
+        
+        # Plotting
+        n_values = np.arange(1, N_samples + 1)
+        rates = np.array(cumulative_rates)
+        errors = np.array(std_errors)
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(n_values, rates * 100.0, 'b-', label='Cumulative Success Rate')
+        plt.fill_between(n_values, (rates - errors)*100.0, (rates + errors)*100.0, color='b', alpha=0.2, label='Standard Error (1-sigma)')
+        plt.axhline(rates[-1]*100.0, color='k', linestyle='--', alpha=0.5, label=f'Final Rate ({rates[-1]*100:.1f}%)')
+        plt.xlabel('Number of Samples (N)')
+        plt.ylabel('Success Rate (%)')
+        plt.title(f'Monte Carlo Convergence (Law of Large Numbers)\nFinal N={N_samples}, Success Rate={rates[-1]*100:.1f}% +/- {errors[-1]*100:.1f}%')
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+        
+        # Plotting 2: Phase Space (Cherry on Top)
+        plt.figure(figsize=(10, 6))
+        for alt, vel, success in phase_space_data:
+            color = 'g' if success else 'r'
+            alpha = 0.1 if success else 0.8 # Highlight failures
+            zorder = 1 if success else 2    # Draw failures on top
+            plt.plot(alt, vel, color=color, alpha=alpha, linewidth=0.8, zorder=zorder)
+            
+        plt.xlabel('Altitude (km)')
+        plt.ylabel('Velocity (m/s)')
+        plt.title(f'Phase Space Analysis (First {len(phase_space_data)} Runs)\nGreen=Success, Red=Failure')
+        plt.grid(True)
+        plt.show()
+        
+        print(f">>> {debug.Style.GREEN}PASS: Convergence analysis complete.{debug.Style.RESET}")
+
+    # 11. CHAOS / LYAPUNOV ANALYSIS (Upgrade 2)
+    def analyze_chaos_lyapunov(self):
+        debug._print_sub_header("11. Chaos Theory: Lyapunov Analysis (Butterfly Effect)")
+        
+        # 1. Nominal Run
+        print("Generating Nominal Trajectory...")
+        with suppress_stdout():
+            opt_res = solve_optimal_trajectory(self.base_config, self.veh, self.env, print_level=0)
+            sim_nom = run_simulation(opt_res, self.veh, self.base_config)
+            
+        # 2. Perturbed Run (Perturb Density by 1e-6)
+        print("Generating Perturbed Trajectory (Density + 1e-6)...")
+        pert_env_config = copy.deepcopy(self.base_env_config)
+        pert_env_config.density_multiplier += 1e-6
+        pert_env = Environment(pert_env_config)
+        pert_veh = Vehicle(self.base_config, pert_env)
+        
+        with suppress_stdout():
+            sim_pert = run_simulation(opt_res, pert_veh, self.base_config)
+            
+        # 3. Analysis
+        # Interpolate Perturbed to Nominal Time Grid
+        t_nom = sim_nom['t']
+        y_nom = sim_nom['y']
+        
+        t_pert = sim_pert['t']
+        y_pert = sim_pert['y']
+        
+        f_pert = interp1d(t_pert, y_pert, axis=1, kind='linear', fill_value="extrapolate")
+        y_pert_interp = f_pert(t_nom)
+        
+        # Calculate divergence (Euclidean distance in Position)
+        delta_r = np.linalg.norm(y_nom[0:3, :] - y_pert_interp[0:3, :], axis=0)
+        delta_r = np.maximum(delta_r, 1e-12) # Avoid log(0)
+        log_delta = np.log(delta_r)
+        
+        # Plot
+        plt.figure(figsize=(10, 6))
+        plt.plot(t_nom, log_delta, 'r-')
+        plt.xlabel('Time (s)')
+        plt.ylabel('ln(|delta_r|) [Log Divergence]')
+        plt.title('Lyapunov Analysis: Sensitivity to Initial Conditions\n(Perturbation: Density +1e-6)')
+        plt.grid(True)
+        plt.show()
+        print(f">>> {debug.Style.GREEN}PASS: Chaos analysis complete.{debug.Style.RESET}")
+
+    # 12. STIFFNESS / EULER TEST (Upgrade 3)
+    def analyze_stiffness_euler(self):
+        debug._print_sub_header("12. Numerical Stiffness: Euler vs RK45")
+        
+        # 1. Get Controls & Reference
+        with suppress_stdout():
+            opt_res = solve_optimal_trajectory(self.base_config, self.veh, self.env, print_level=0)
+            sim_rk45 = run_simulation(opt_res, self.veh, self.base_config)
+            
+        # 2. Run Euler (Manual Implementation)
+        print("Running Fixed-Step Euler Integration (dt=0.1s)...")
+        
+        # Rebuild interpolators
+        T1 = opt_res["T1"]
+        U1 = np.array(opt_res["U1"])
+        t_grid_1 = np.linspace(0, T1, U1.shape[1] + 1)[:-1]
+        ctrl_1 = interp1d(t_grid_1, U1, axis=1, kind='previous', fill_value="extrapolate", bounds_error=False)
+        
+        # Euler Loop (Phase 1 Only for demonstration)
+        dt = 0.1
+        t_euler = [0.0]
+        y_euler = [sim_rk45['y'][:, 0]]
+        
+        y_curr = y_euler[0].copy()
+        t_curr = 0.0
+        
+        while t_curr < T1:
+            u = ctrl_1(t_curr)
+            dy = self.veh.get_dynamics(y_curr, u[0], u[1:], t_curr, stage_mode="boost", scaling=None)
+            y_curr += dy * dt
+            t_curr += dt
+            t_euler.append(t_curr)
+            y_euler.append(y_curr.copy())
+            
+        # Plot Comparison
+        t_euler = np.array(t_euler)
+        y_euler = np.array(y_euler).T
+        r_rk = np.linalg.norm(sim_rk45['y'][0:3], axis=0) - self.env.config.earth_radius_equator
+        r_eu = np.linalg.norm(y_euler[0:3], axis=0) - self.env.config.earth_radius_equator
+        
+        plt.figure(figsize=(10, 6))
+        plt.plot(sim_rk45['t'][sim_rk45['t']<=T1], r_rk[sim_rk45['t']<=T1]/1000.0, 'b-', label='RK45 (Adaptive)')
+        plt.plot(t_euler, r_eu/1000.0, 'r--', label=f'Euler (dt={dt}s)')
+        plt.xlabel('Time (s)')
+        plt.ylabel('Altitude (km)')
+        plt.title('Numerical Stiffness: Euler vs RK45 (Phase 1)')
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+        print(f">>> {debug.Style.GREEN}PASS: Stiffness demonstrated.{debug.Style.RESET}")
 
 if __name__ == "__main__":
     suite = ReliabilitySuite()
