@@ -232,7 +232,7 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         
         # Fix: Align dummy control with velocity vector for visualization.
         # The physics engine forces u_thrust = u_vel during coast, so we replicate that here
-        # to ensure analysis plots show ~0 deg AoA.
+        # to ensure analysis plots show ~0 deg AoA (Drag minimizes AoA).
         v_coast = res2.y[3:6, :]
         r_coast = res2.y[0:3, :]
         
@@ -251,7 +251,7 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         v_dir[0, :] = 1.0
         
         # Perform safe division in-place
-        np.divide(v_rel, v_norm, out=v_dir, where=v_norm > 1e-9)
+        np.divide(v_rel, v_norm[None, :], out=v_dir, where=v_norm > 1e-9)
         
         u_coast[1:, :] = v_dir
         u_list.append(u_coast)

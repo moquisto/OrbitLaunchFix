@@ -268,7 +268,7 @@ def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
     # --- 5. INITIALIZATION ---
     print(f"[Optimizer] Calling Guidance module for Warm Start...")
     t_guess = time.time()
-    # FIX: Pass N, not N+1. Guidance generates N+1 points (nodes) from N intervals.
+    # Guidance generates N+1 points (nodes) from N intervals.
     guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N)
     print(f"[Optimizer] Guidance generated in {time.time() - t_guess:.2f}s")
     
