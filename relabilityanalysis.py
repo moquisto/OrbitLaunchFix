@@ -77,6 +77,89 @@ def wilson_interval(successes, n, z=1.96):
     return max(0.0, center - half), min(1.0, center + half)
 
 
+def gaussian_2d_coverage(n_std):
+    """
+    Probability mass enclosed by an n-sigma Mahalanobis ellipse in 2D Gaussian data.
+    """
+    n = float(n_std)
+    return 1.0 - np.exp(-0.5 * n * n)
+
+
+def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_s=20.0):
+    """
+    Centralized terminal-state checker used across reliability analyses.
+    Returns a dict with validity flags, errors, and pass/fail status labels.
+    """
+    metrics = {
+        "terminal_valid": False,
+        "trajectory_valid": False,
+        "orbit_ok": False,
+        "fuel_ok": False,
+        "strict_ok": False,
+        "status": "SIM_ERROR",
+        "r_f_m": np.nan,
+        "v_f_m_s": np.nan,
+        "target_alt_m": float(cfg.target_altitude),
+        "target_vel_m_s": np.nan,
+        "alt_err_m": np.nan,
+        "vel_err_m_s": np.nan,
+        "m_final_kg": np.nan,
+        "m_dry_limit_kg": float(cfg.stage_2.dry_mass + cfg.payload_mass),
+        "fuel_margin_kg": np.nan
+    }
+
+    y = sim_res.get("y", None) if isinstance(sim_res, dict) else None
+    if not isinstance(y, np.ndarray) or y.ndim != 2 or y.shape[0] < 7 or y.shape[1] < 1:
+        return metrics
+
+    final_state = y[:, -1]
+    if not np.all(np.isfinite(final_state)):
+        return metrics
+
+    r_f = np.linalg.norm(final_state[0:3]) - env_cfg.earth_radius_equator
+    v_f = np.linalg.norm(final_state[3:6])
+    m_final = float(final_state[6])
+    target_alt = float(cfg.target_altitude)
+    target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
+
+    alt_err = r_f - target_alt
+    vel_err = v_f - target_vel
+    fuel_margin = m_final - metrics["m_dry_limit_kg"]
+
+    orbit_ok = abs(alt_err) < alt_tol_m and abs(vel_err) < vel_tol_m_s
+    fuel_ok = fuel_margin > 0.0
+    strict_ok = orbit_ok and fuel_ok
+
+    metrics.update({
+        "terminal_valid": True,
+        "orbit_ok": orbit_ok,
+        "fuel_ok": fuel_ok,
+        "strict_ok": strict_ok,
+        "r_f_m": r_f,
+        "v_f_m_s": v_f,
+        "target_vel_m_s": target_vel,
+        "alt_err_m": alt_err,
+        "vel_err_m_s": vel_err,
+        "m_final_kg": m_final,
+        "fuel_margin_kg": fuel_margin
+    })
+
+    if strict_ok:
+        metrics["status"] = "PASS"
+    elif (not orbit_ok) and (not fuel_ok):
+        metrics["status"] = "MISS+FUEL"
+    elif not orbit_ok:
+        metrics["status"] = "MISS"
+    else:
+        metrics["status"] = "FUEL"
+
+    # Require finite full history for trajectory-based plots.
+    if np.all(np.isfinite(y)) and np.linalg.norm(y[:, 0]) > 1.0:
+        metrics["trajectory_valid"] = True
+
+    return metrics
+
+
 def _export_csv(path, headers, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", newline="", encoding="utf-8") as f:
@@ -119,28 +202,29 @@ def _monte_carlo_worker(args):
     except Exception:
         pass # sim_res remains dummy failure
 
-    # Check Success Criteria
-    r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - env_cfg.earth_radius_equator
-    v_f = np.linalg.norm(sim_res['y'][3:6, -1])
-    m_final = sim_res['y'][6, -1]
-    m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
-    
-    target_alt = cfg.target_altitude
-    target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
-    
-    orbit_ok = abs(r_f - target_alt) < 10000.0 and abs(v_f - target_vel) < 20.0
-    fuel_ok = (m_final - m_dry) > 0.0
-    
+    metrics = evaluate_terminal_state(sim_res, cfg, env_cfg)
+
     # Return results and trajectory data (if valid)
     phase_data = None
-    if np.linalg.norm(sim_res['y'][:, 0]) > 1.0:
+    if metrics["trajectory_valid"]:
         y_sim = sim_res['y']
         r_mag = np.linalg.norm(y_sim[0:3, :], axis=0)
         alt = (r_mag - env_cfg.earth_radius_equator) / 1000.0
         vel = np.linalg.norm(y_sim[3:6, :], axis=0)
-        phase_data = (alt, vel, orbit_ok and fuel_ok)
+        phase_data = (alt, vel, metrics["strict_ok"])
 
-    return (orbit_ok, fuel_ok, phase_data)
+    return {
+        "orbit_ok": metrics["orbit_ok"],
+        "fuel_ok": metrics["fuel_ok"],
+        "strict_ok": metrics["strict_ok"],
+        "terminal_valid": metrics["terminal_valid"],
+        "trajectory_valid": metrics["trajectory_valid"],
+        "status": metrics["status"],
+        "final_altitude_km": (metrics["r_f_m"] / 1000.0) if metrics["terminal_valid"] else np.nan,
+        "final_velocity_m_s": metrics["v_f_m_s"],
+        "fuel_margin_kg": metrics["fuel_margin_kg"],
+        "phase_data": phase_data
+    }
 
 class ReliabilitySuite:
     def __init__(self, output_dir=None, save_figures=True, show_plots=True, random_seed=1337):
@@ -261,6 +345,7 @@ class ReliabilitySuite:
         node_counts = [40, 50, 60, 70, 80, 90, 100, 120, 140]
         masses = []
         runtimes = []
+        success_flags = []
         
         print(f"{'Nodes':<6} | {'Final Mass (kg)':<15} | {'Runtime (s)':<10} | {'Status':<10}")
         print("-" * 50)
@@ -277,37 +362,47 @@ class ReliabilitySuite:
                 if res.get("success", False):
                     m_final = res['X3'][6, -1]
                     status = "Converged"
+                    ok = True
                 else:
-                    raise Exception("Solver failed")
-            except:
-                m_final = 0.0
+                    m_final = np.nan
+                    status = "Failed"
+                    ok = False
+            except Exception:
+                m_final = np.nan
                 status = "Failed"
+                ok = False
             
             dt = time.time() - t0
             masses.append(m_final)
             runtimes.append(dt)
+            success_flags.append(int(ok))
             print(f"{N:<6} | {m_final:<15.1f} | {dt:<10.2f} | {status:<10}")
 
         self._save_table(
             "grid_independence",
-            ["nodes", "final_mass_kg", "runtime_s"],
-            [(node_counts[i], masses[i], runtimes[i]) for i in range(len(node_counts))]
+            ["nodes", "final_mass_kg", "runtime_s", "solver_success"],
+            [(node_counts[i], masses[i], runtimes[i], success_flags[i]) for i in range(len(node_counts))]
         )
             
         # Convergence Check
-        if len(masses) >= 3:
-            diff = abs(masses[-1] - masses[-3])
+        mass_by_nodes = {node_counts[i]: masses[i] for i in range(len(node_counts))}
+        m_100 = mass_by_nodes.get(100, np.nan)
+        m_140 = mass_by_nodes.get(140, np.nan)
+        if np.isfinite(m_100) and np.isfinite(m_140):
+            diff = abs(m_140 - m_100)
             print(f"\nMass Delta (140 vs 100 nodes): {diff:.1f} kg")
             if diff < 100.0:
                 print(f">>> {debug.Style.GREEN}PASS: Grid Independent (<100kg change).{debug.Style.RESET}")
             else:
                 print(f">>> {debug.Style.YELLOW}WARN: Grid Dependent (Solution still changing).{debug.Style.RESET}")
+        else:
+            print(f"\n>>> {debug.Style.YELLOW}WARN: Cannot assess grid independence because node 100 or 140 failed.{debug.Style.RESET}")
         
         # Visualization: Convergence vs Cost
         fig, ax1 = plt.subplots(figsize=(10, 6))
         
         # Filter valid runs for plotting
-        valid_indices = [i for i, m in enumerate(masses) if m > 1.0]
+        valid_indices = [i for i, m in enumerate(masses) if np.isfinite(m)]
         valid_nodes = [node_counts[i] for i in valid_indices]
         valid_masses = [masses[i] for i in valid_indices]
         valid_runtimes = [runtimes[i] for i in valid_indices]
@@ -385,7 +480,8 @@ class ReliabilitySuite:
         plt.loglog(rtols, drifts, 'bo-', label='Altitude Drift')
         plt.xlabel('Integrator Relative Tolerance (rtol)')
         plt.ylabel('Position Drift vs Baseline (m)')
-        plt.title('Integrator Convergence (Baseline: rtol=1e-14)')
+        baseline_rtol = tols[-1][0]
+        plt.title(f'Integrator Convergence (Baseline: rtol={baseline_rtol:.0e})')
         plt.grid(True, which="both", ls="-")
         plt.gca().invert_xaxis() # Standard convention: higher precision (lower tol) to the right
         self._finalize_figure(fig, "integrator_tolerance_convergence")
@@ -555,7 +651,9 @@ class ReliabilitySuite:
 
         N_runs = 20
         rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
-        success_count = 0
+        strict_success_count = 0
+        hardware_success_count = 0
+        invalid_terminal_count = 0
         alt_errors = []
         vel_errors = []
         run_rows = []
@@ -588,48 +686,54 @@ class ReliabilitySuite:
             # Run Sim
             with suppress_stdout():
                 sim_res = run_simulation(opt_res, veh_mc, cfg)
-                
-            # Check Orbit
-            r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - env_cfg.earth_radius_equator
-            v_f = np.linalg.norm(sim_res['y'][3:6, -1])
-            m_final = sim_res['y'][6, -1]
-            m_dry_limit = cfg.stage_2.dry_mass + cfg.payload_mass
-            
-            target_alt = cfg.target_altitude
-            target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
-            
-            alt_err = (r_f - target_alt) / 1000.0
-            vel_err = v_f - target_vel
-            
-            alt_errors.append(alt_err)
-            vel_errors.append(vel_err)
-            
-            # Success Criteria: +/- 10km, +/- 20 m/s
-            orbit_ok = abs(alt_err) < 10.0 and abs(vel_err) < 20.0
-            fuel_margin = m_final - m_dry_limit
-            
-            status_str = "FAIL"
-            if orbit_ok:
-                success_count += 1
-                status_str = "PASS"
-            elif fuel_margin < 1.0: # Less than 1kg remaining implies depletion
-                status_str = "FUEL" # Ran out of gas before reaching target
-                
+
+            metrics = evaluate_terminal_state(sim_res, cfg, env_cfg)
+            if not metrics["terminal_valid"]:
+                invalid_terminal_count += 1
+
+            if metrics["fuel_ok"]:
+                hardware_success_count += 1
+            if metrics["strict_ok"]:
+                strict_success_count += 1
+
+            alt_err = metrics["alt_err_m"] / 1000.0 if metrics["terminal_valid"] else np.nan
+            vel_err = metrics["vel_err_m_s"] if metrics["terminal_valid"] else np.nan
+            if np.isfinite(alt_err) and np.isfinite(vel_err):
+                alt_errors.append(alt_err)
+                vel_errors.append(vel_err)
+
+            status_str = metrics["status"]
+
             print(f"{i+1:<4} | {thrust_mult:<8.3f} | {isp_mult:<8.3f} | {dens_mult:<8.3f} | {alt_err:<12.1f} | {vel_err:<12.1f} | {status_str:<6}")
-            run_rows.append((i + 1, thrust_mult, isp_mult, dens_mult, alt_err, vel_err, fuel_margin, status_str))
+            run_rows.append((
+                i + 1, thrust_mult, isp_mult, dens_mult, alt_err, vel_err,
+                metrics["fuel_margin_kg"], int(metrics["terminal_valid"]), int(metrics["orbit_ok"]),
+                int(metrics["fuel_ok"]), int(metrics["strict_ok"]), status_str
+            ))
             
-        print(f"\nRobustness: {success_count}/{N_runs} ({(success_count/N_runs)*100:.0f}%)")
-        print(f"Alt Dispersion (Sigma): {np.std(alt_errors):.2f} km")
-        print(f"Vel Dispersion (Sigma): {np.std(vel_errors):.2f} m/s")
+        print(f"\nStrict Robustness (orbit+fuel): {strict_success_count}/{N_runs} ({(strict_success_count/N_runs)*100:.0f}%)")
+        print(f"Hardware Robustness (fuel only): {hardware_success_count}/{N_runs} ({(hardware_success_count/N_runs)*100:.0f}%)")
+        if invalid_terminal_count > 0:
+            print(f"Invalid terminal states: {invalid_terminal_count}/{N_runs}")
+        if len(alt_errors) > 0:
+            print(f"Alt Dispersion (Sigma): {np.std(alt_errors):.2f} km")
+            print(f"Vel Dispersion (Sigma): {np.std(vel_errors):.2f} m/s")
+        else:
+            print("No valid terminal states available for dispersion statistics.")
         self._save_table(
             "monte_carlo_dispersion_n20",
-            ["run", "thrust_multiplier", "isp_multiplier", "density_multiplier", "altitude_error_km", "velocity_error_m_s", "fuel_margin_kg", "status"],
+            [
+                "run", "thrust_multiplier", "isp_multiplier", "density_multiplier", "altitude_error_km",
+                "velocity_error_m_s", "fuel_margin_kg", "terminal_valid", "orbit_ok", "fuel_ok",
+                "strict_success", "status"
+            ],
             run_rows
         )
         
         # Visualization: Targeting Scatter Plot
         fig = plt.figure(figsize=(10, 6))
-        plt.scatter(vel_errors, alt_errors, c='b', alpha=0.6, label='Simulations')
+        if len(vel_errors) > 0:
+            plt.scatter(vel_errors, alt_errors, c='b', alpha=0.6, label='Valid simulations')
         
         # Draw Success Box (+/- 20m/s, +/- 10km)
         rect = plt.Rectangle((-20, -10), 40, 20, linewidth=2, edgecolor='g', facecolor='g', alpha=0.1, label='Success Criteria')
@@ -640,6 +744,14 @@ class ReliabilitySuite:
         plt.title(f'Monte Carlo Dispersion (N={N_runs})\nTargeting Accuracy')
         plt.axhline(0, color='k', linestyle='--', alpha=0.3)
         plt.axvline(0, color='k', linestyle='--', alpha=0.3)
+        if invalid_terminal_count > 0:
+            plt.text(
+                0.99, 0.01,
+                f'Excluded invalid runs: {invalid_terminal_count}/{N_runs}',
+                transform=plt.gca().transAxes,
+                ha='right', va='bottom', fontsize=9,
+                bbox=dict(facecolor='white', alpha=0.8, edgecolor='none')
+            )
         plt.grid(True)
         plt.legend()
         self._finalize_figure(fig, "monte_carlo_dispersion_n20")
@@ -689,9 +801,18 @@ class ReliabilitySuite:
         try:
             with suppress_stdout():
                 res = solve_optimal_trajectory(wc_config, wc_veh, wc_env, print_level=0)
-            
-            m_final = res['X3'][6, -1]
+
             m_dry = wc_config.stage_2.dry_mass + wc_config.payload_mass
+            if not res.get("success", False):
+                print(f">>> {debug.Style.RED}FAIL: Worst-case optimization did not converge.{debug.Style.RESET}")
+                self._save_table(
+                    "corner_case_worst_case",
+                    ["solver_success", "final_mass_kg", "dry_plus_payload_kg", "fuel_margin_kg"],
+                    [(0, np.nan, m_dry, np.nan)]
+                )
+                return
+
+            m_final = res['X3'][6, -1]
             margin = m_final - m_dry
             
             print(f"  Worst Case Fuel Margin: {margin:.1f} kg")
@@ -703,8 +824,8 @@ class ReliabilitySuite:
 
             self._save_table(
                 "corner_case_worst_case",
-                ["final_mass_kg", "dry_plus_payload_kg", "fuel_margin_kg"],
-                [(m_final, m_dry, margin)]
+                ["solver_success", "final_mass_kg", "dry_plus_payload_kg", "fuel_margin_kg"],
+                [(1, m_final, m_dry, margin)]
             )
                 
             # Visualization: Mass Budget
@@ -723,7 +844,7 @@ class ReliabilitySuite:
             plt.grid(True, axis='y', alpha=0.3)
             self._finalize_figure(fig, "corner_case_mass_budget")
                 
-        except Exception as e:
+        except Exception:
             print(f">>> {debug.Style.RED}FAIL: Optimizer crashed on worst case.{debug.Style.RESET}")
 
     # 10. MONTE CARLO CONVERGENCE (Upgrade 1)
@@ -745,12 +866,15 @@ class ReliabilitySuite:
         success_count = 0
         orbit_fail_count = 0
         fuel_fail_count = 0
+        invalid_terminal_count = 0
+        invalid_trajectory_count = 0
         hardware_success_count = 0
         cumulative_rates = []
         std_errors = []
         wilson_low = []
         wilson_high = []
         phase_space_data = [] # For "Cherry on Top" Phase Space Plot
+        terminal_rows = []
         
         t0 = time.time()
         
@@ -761,8 +885,8 @@ class ReliabilitySuite:
             for i in range(N_samples)
         ]
         
-        n_cpu = multiprocessing.cpu_count()
-        print(f"  Starting parallel execution with {n_cpu} workers...")
+        n_workers = min(multiprocessing.cpu_count(), max(1, N_samples))
+        print(f"  Starting parallel execution with {n_workers} workers...")
         main_file = getattr(__import__("__main__"), "__file__", None)
         can_parallel = main_file is not None and os.path.exists(main_file)
         
@@ -770,7 +894,7 @@ class ReliabilitySuite:
         try:
             if not can_parallel:
                 raise RuntimeError("no importable __main__ module path")
-            with multiprocessing.Pool(processes=n_cpu) as pool:
+            with multiprocessing.Pool(processes=n_workers) as pool:
                 # Use imap to get results as they complete for progress reporting.
                 for i, res in enumerate(pool.imap(_monte_carlo_worker, args_list)):
                     results.append(res)
@@ -791,15 +915,42 @@ class ReliabilitySuite:
                     print(f"  Progress: {i+1}/{N_samples} ({((i+1)/N_samples)*100:.1f}%) - ETA: {remaining:.1f}s   ", end='\r')
 
         # Process results sequentially to build cumulative stats
-        for i, (orbit_ok, fuel_ok, p_data) in enumerate(results):
+        for i, res in enumerate(results):
+            orbit_ok = bool(res.get("orbit_ok", False))
+            fuel_ok = bool(res.get("fuel_ok", False))
+            strict_ok = bool(res.get("strict_ok", False))
+            terminal_valid = bool(res.get("terminal_valid", False))
+            trajectory_valid = bool(res.get("trajectory_valid", False))
+            p_data = res.get("phase_data", None)
+
+            if terminal_valid:
+                terminal_rows.append((
+                    i + 1,
+                    float(res.get("final_altitude_km", np.nan)),
+                    float(res.get("final_velocity_m_s", np.nan)),
+                    float(res.get("fuel_margin_kg", np.nan)),
+                    int(orbit_ok),
+                    int(fuel_ok),
+                    int(strict_ok),
+                    str(res.get("status", "SIM_ERROR"))
+                ))
+            else:
+                invalid_terminal_count += 1
+                terminal_rows.append((i + 1, np.nan, np.nan, np.nan, 0, 0, 0, "SIM_ERROR"))
+
+            if not trajectory_valid:
+                invalid_trajectory_count += 1
+
             if fuel_ok:
                 hardware_success_count += 1
             
-            if orbit_ok and fuel_ok:
+            if strict_ok:
                 success_count += 1
             else:
-                if not orbit_ok: orbit_fail_count += 1
-                if not fuel_ok: fuel_fail_count += 1
+                if terminal_valid and (not orbit_ok):
+                    orbit_fail_count += 1
+                if terminal_valid and (not fuel_ok):
+                    fuel_fail_count += 1
             
             if p_data is not None:
                 phase_space_data.append(p_data)
@@ -835,9 +986,12 @@ class ReliabilitySuite:
         if len(rates) > 0:
             print(f"    Strict Success (Hit Target):   {rates[-1]*100:.1f}% (Low due to Open-Loop Sensitivity)")
             print(f"    Hardware Robustness (Fuel>0):  {(hardware_success_count/N_samples)*100:.1f}% (Vehicle Capability)")
+            print(f"    Valid terminal states:         {(N_samples-invalid_terminal_count)}/{N_samples}")
+            print(f"    Valid trajectories (for phase plots): {(N_samples-invalid_trajectory_count)}/{N_samples}")
             print(f"    Failures Breakdown:")
             print(f"      - Missed Target (Guidance):  {orbit_fail_count}")
             print(f"      - Ran out of Fuel (Perf):    {fuel_fail_count}")
+            print(f"      - Invalid terminal data:     {invalid_terminal_count}")
         
         fig = plt.figure(figsize=(10, 6))
         plt.plot(n_values, rates * 100.0, 'b-', label='Cumulative Success Rate')
@@ -864,39 +1018,30 @@ class ReliabilitySuite:
         
         # Plotting 3: Error Histograms (Altitude & Velocity)
         fig_hist = plt.figure(figsize=(12, 6))
+        valid_final_alts = [row[1] for row in terminal_rows if np.isfinite(row[1])]
+        valid_final_vels = [row[2] for row in terminal_rows if np.isfinite(row[2])]
         
         # Altitude
         plt.subplot(1, 2, 1)
-        # Filter outliers for cleaner histograms (e.g. crashes at launch pad)
-        target_alt_km = self.base_config.target_altitude/1000.0
-        all_alts = [d[0][-1] for d in phase_space_data]
-        hist_alts = [a for a in all_alts if abs(a - target_alt_km) < 50.0]
-        outliers_alt = len(all_alts) - len(hist_alts)
-        if outliers_alt > 0: print(f"  [Viz] Filtered {outliers_alt} altitude outliers (crashes) from histogram.")
-        
-        if len(hist_alts) > 0:
-            plt.hist(hist_alts, bins=30, color='purple', alpha=0.7, edgecolor='black')
+        target_alt_km = self.base_config.target_altitude / 1000.0
+        if len(valid_final_alts) > 0:
+            plt.hist(valid_final_alts, bins=30, color='purple', alpha=0.7, edgecolor='black')
         plt.axvline(self.base_config.target_altitude/1000.0, color='k', linestyle='dashed', linewidth=1, label='Target')
         plt.xlabel('Final Altitude (km)')
         plt.ylabel('Frequency')
-        plt.title(f'Altitude Dispersion (N={len(hist_alts)})')
+        plt.title(f'Altitude Dispersion (all valid terminal states, N={len(valid_final_alts)})')
         plt.legend()
         plt.grid(True, alpha=0.3)
 
         # Velocity
         plt.subplot(1, 2, 2)
         target_vel = np.sqrt(self.base_env_config.earth_mu / (self.base_env_config.earth_radius_equator + self.base_config.target_altitude))
-        all_vels = [d[1][-1] for d in phase_space_data]
-        hist_vels = [v for v in all_vels if abs(v - target_vel) < 100.0]
-        outliers_vel = len(all_vels) - len(hist_vels)
-        if outliers_vel > 0: print(f"  [Viz] Filtered {outliers_vel} velocity outliers from histogram.")
-        
-        if len(hist_vels) > 0:
-            plt.hist(hist_vels, bins=30, color='teal', alpha=0.7, edgecolor='black')
+        if len(valid_final_vels) > 0:
+            plt.hist(valid_final_vels, bins=30, color='teal', alpha=0.7, edgecolor='black')
         plt.axvline(target_vel, color='k', linestyle='dashed', linewidth=1, label='Target')
         plt.xlabel('Final Velocity (m/s)')
         plt.ylabel('Frequency')
-        plt.title(f'Velocity Dispersion (N={len(hist_vels)})')
+        plt.title(f'Velocity Dispersion (all valid terminal states, N={len(valid_final_vels)})')
         plt.legend()
         plt.grid(True, alpha=0.3)
         
@@ -912,26 +1057,40 @@ class ReliabilitySuite:
             
         plt.xlabel('Altitude (km)')
         plt.ylabel('Velocity (m/s)')
-        plt.title(f'Phase Space Analysis (First {len(phase_space_data)} Runs)\nGreen=Success, Red=Failure')
+        plt.title(f'Phase Space Analysis (Valid trajectories N={len(phase_space_data)})\nGreen=Success, Red=Failure')
         plt.grid(True)
         self._finalize_figure(fig_phase, "monte_carlo_phase_space")
         
         # Plotting 4: Terminal State Scatter (Targeting)
         fig_scatter = plt.figure(figsize=(10, 6))
-        
-        final_alts = [d[0][-1] for d in phase_space_data]
-        final_vels = [d[1][-1] for d in phase_space_data]
-        success_flags = [d[2] for d in phase_space_data]
 
         self._save_table(
             "monte_carlo_terminal_states",
-            ["run", "final_altitude_km", "final_velocity_m_s", "success"],
             [
-                (i + 1, final_alts[i], final_vels[i], int(success_flags[i]))
-                for i in range(len(final_alts))
-            ]
+                "run", "final_altitude_km", "final_velocity_m_s", "fuel_margin_kg",
+                "orbit_ok", "fuel_ok", "strict_success", "status"
+            ],
+            terminal_rows
+        )
+        self._save_table(
+            "monte_carlo_data_integrity",
+            [
+                "total_runs", "valid_terminal_runs", "invalid_terminal_runs",
+                "valid_trajectory_runs", "invalid_trajectory_runs"
+            ],
+            [(
+                N_samples,
+                N_samples - invalid_terminal_count,
+                invalid_terminal_count,
+                N_samples - invalid_trajectory_count,
+                invalid_trajectory_count
+            )]
         )
         
+        final_alts = [row[1] for row in terminal_rows if np.isfinite(row[1])]
+        final_vels = [row[2] for row in terminal_rows if np.isfinite(row[2])]
+        success_flags = [bool(row[6]) for row in terminal_rows if np.isfinite(row[1]) and np.isfinite(row[2])]
+
         # Separate success and failure for coloring
         succ_alts = [a for a, s in zip(final_alts, success_flags) if s]
         succ_vels = [v for v, s in zip(final_vels, success_flags) if s]
@@ -952,15 +1111,25 @@ class ReliabilitySuite:
                              linewidth=1, edgecolor='k', facecolor='none', linestyle='--', label='Tolerance')
         plt.gca().add_patch(rect)
         
-        # Add Confidence Ellipses (1-sigma and 3-sigma) for successful runs
+        # Add 2D Gaussian-coverage ellipses for successful runs.
         if len(succ_alts) > 5:
             ax = plt.gca()
-            confidence_ellipse(np.array(succ_alts), np.array(succ_vels), ax, n_std=1.0, edgecolor='blue', linestyle='--', label='1-sigma (68%)')
-            confidence_ellipse(np.array(succ_alts), np.array(succ_vels), ax, n_std=3.0, edgecolor='blue', linestyle=':', label='3-sigma (99.7%)')
+            p1 = 100.0 * gaussian_2d_coverage(1.0)
+            p3 = 100.0 * gaussian_2d_coverage(3.0)
+            confidence_ellipse(np.array(succ_alts), np.array(succ_vels), ax, n_std=1.0, edgecolor='blue', linestyle='--', label=f'1σ ellipse ({p1:.1f}% in 2D)')
+            confidence_ellipse(np.array(succ_alts), np.array(succ_vels), ax, n_std=3.0, edgecolor='blue', linestyle=':', label=f'3σ ellipse ({p3:.1f}% in 2D)')
         
         plt.xlabel('Final Altitude (km)')
         plt.ylabel('Final Velocity (m/s)')
-        plt.title(f'Terminal State Dispersion (N={len(phase_space_data)})')
+        plt.title(f'Terminal State Dispersion (valid terminal states N={len(final_alts)})')
+        if invalid_terminal_count > 0:
+            plt.text(
+                0.99, 0.01,
+                f'Excluded invalid terminal states: {invalid_terminal_count}/{N_samples}',
+                transform=plt.gca().transAxes,
+                ha='right', va='bottom', fontsize=9,
+                bbox=dict(facecolor='white', alpha=0.8, edgecolor='none')
+            )
         plt.legend()
         plt.grid(True)
         self._finalize_figure(fig_scatter, "monte_carlo_terminal_scatter")
@@ -976,7 +1145,7 @@ class ReliabilitySuite:
 
     # 11. CHAOS / LYAPUNOV ANALYSIS (Upgrade 2)
     def analyze_chaos_lyapunov(self):
-        debug._print_sub_header("11. Chaos Theory: Lyapunov Analysis (Butterfly Effect)")
+        debug._print_sub_header("11. Finite-Time Sensitivity Analysis (Thrust Perturbation)")
         
         # 1. Nominal Run
         print("Generating Nominal Trajectory...")
@@ -1033,12 +1202,12 @@ class ReliabilitySuite:
         log_delta = np.log(delta_r)
         
         # Quantitative Analysis
-        # Estimate Lyapunov Exponent (Slope of log divergence)
+        # Finite-time divergence growth-rate estimate from log-distance slope.
         # Fit to the middle 50% of the trajectory to avoid transient and saturation
         idx_start = int(len(t_dense) * 0.2)
         idx_end = int(len(t_dense) * 0.8)
         coeffs = np.polyfit(t_dense[idx_start:idx_end], log_delta[idx_start:idx_end], 1)
-        lambda_est = coeffs[0]
+        growth_rate = coeffs[0]
         final_div = delta_r[-1] / 1000.0 # km
         fit_x = t_dense[idx_start:idx_end]
         fit_y = log_delta[idx_start:idx_end]
@@ -1048,12 +1217,14 @@ class ReliabilitySuite:
         r2 = 1.0 - ss_res / (ss_tot + 1e-16)
 
         self._save_table(
-            "lyapunov_divergence",
+            "finite_time_divergence",
             ["time_s", "delta_r_m", "log_delta_r"],
             [(t_dense[i], delta_r[i], log_delta[i]) for i in range(len(t_dense))]
         )
         
-        print(f"  Estimated Lyapunov Exponent: ~{lambda_est:.4f} s^-1")
+        print("  Note: this compares nominal dynamics to a perturbed-parameter run.")
+        print("  It is a finite-time sensitivity metric, not a formal Lyapunov exponent.")
+        print(f"  Estimated growth rate: ~{growth_rate:.4f} s^-1")
         print(f"  Linear-fit R^2 (mid-window): {r2:.4f}")
         print(f"  Divergence at T={t_dense[-1]:.1f}s: {final_div:.2f} km")
         
@@ -1063,18 +1234,18 @@ class ReliabilitySuite:
         
         # Plot Fit Line
         y_fit = coeffs[0] * t_dense[idx_start:idx_end] + coeffs[1]
-        plt.plot(t_dense[idx_start:idx_end], y_fit, 'r--', linewidth=2, label=f'Lyapunov Fit (λ ≈ {lambda_est:.4f})')
+        plt.plot(t_dense[idx_start:idx_end], y_fit, 'r--', linewidth=2, label=f'Growth-rate fit ({growth_rate:.4f} s^-1)')
         
         plt.xlabel('Time (s)')
         plt.ylabel('ln(|delta_r|) [Log Divergence]')
         plt.title(
-            f'Lyapunov Analysis: Sensitivity to Initial Conditions (Thrust +0.1%)\n'
-            f'Est. Lambda = {lambda_est:.4f} s^-1, R² = {r2:.3f}, Final Div = {final_div:.1f} km'
+            f'Finite-Time Sensitivity to Parameter Perturbation (Thrust +0.1%)\n'
+            f'Growth Rate = {growth_rate:.4f} s^-1, R² = {r2:.3f}, Final Div = {final_div:.1f} km'
         )
         plt.grid(True)
         plt.legend()
         self._finalize_figure(fig, "chaos_lyapunov")
-        print(f">>> {debug.Style.GREEN}PASS: Chaos analysis complete.{debug.Style.RESET}")
+        print(f">>> {debug.Style.GREEN}PASS: Finite-time sensitivity analysis complete.{debug.Style.RESET}")
 
     # 12. STIFFNESS / EULER TEST (Upgrade 3)
     def analyze_stiffness_euler(self):
@@ -1236,21 +1407,19 @@ class ReliabilitySuite:
                 veh_bif = Vehicle(cfg, self.env)
                 sim_res = run_simulation(opt_res, veh_bif, cfg)
             
-            # Metrics
-            r_f = np.linalg.norm(sim_res['y'][0:3, -1]) - self.env.config.earth_radius_equator
-            v_f = np.linalg.norm(sim_res['y'][3:6, -1])
-            m_final = sim_res['y'][6, -1]
-            m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
-            target_vel = np.sqrt(self.env.config.earth_mu / (self.env.config.earth_radius_equator + cfg.target_altitude))
-            
-            final_alts.append(r_f / 1000.0)
-            final_vels.append(v_f)
-            margins.append(m_final - m_dry)
-            
-            orbit_ok = abs(r_f - cfg.target_altitude) < 10000.0 and abs(v_f - target_vel) < 20.0
-            status = "Orbit" if orbit_ok and (m_final > m_dry) else "Off-target"
+            metrics = evaluate_terminal_state(sim_res, cfg, self.base_env_config)
+            final_alts.append(metrics["r_f_m"] / 1000.0 if metrics["terminal_valid"] else np.nan)
+            final_vels.append(metrics["v_f_m_s"] if metrics["terminal_valid"] else np.nan)
+            margins.append(metrics["fuel_margin_kg"])
+
+            if metrics["strict_ok"]:
+                status = "Orbit"
+            elif metrics["terminal_valid"]:
+                status = metrics["status"]
+            else:
+                status = "SIM_ERROR"
             statuses.append(status)
-            print(f"{mult:<12.2f} | {r_f/1000:<15.1f} | {status:<10}")
+            print(f"{mult:<12.2f} | {final_alts[-1]:<15.1f} | {status:<10}")
 
         self._save_table(
             "bifurcation_thrust_sweep",
@@ -1301,6 +1470,12 @@ class ReliabilitySuite:
         opt_res = self._get_baseline_opt_res()
         with suppress_stdout():
             sim_res = run_simulation(opt_res, self.veh, self.base_config)
+
+        terminal_metrics = evaluate_terminal_state(sim_res, self.base_config, self.base_env_config)
+        mission_success = terminal_metrics["strict_ok"]
+        if not terminal_metrics["terminal_valid"]:
+            print("  Cannot evaluate efficiency: simulation produced invalid terminal state.")
+            return
             
         # 2. Calculate Actual Delta-V (Integrated)
         t, y, u = sim_res['t'], sim_res['y'], sim_res['u']
@@ -1345,17 +1520,21 @@ class ReliabilitySuite:
         print(f"  Actual Delta-V (Simulation):       {dv_actual:.1f} m/s")
         print(f"  Gravity/Drag/Steering Losses:      {dv_actual - dv_theoretical:.1f} m/s")
         print(f"  Mission Efficiency:                {efficiency:.1f}%")
+        if not mission_success:
+            print(f">>> {debug.Style.YELLOW}NOTE: Terminal orbit criteria were not met; efficiency is diagnostic only.{debug.Style.RESET}")
 
         self._save_table(
             "theoretical_efficiency",
-            ["dv_theoretical_m_s", "dv_actual_m_s", "losses_m_s", "efficiency_percent"],
-            [(dv_theoretical, dv_actual, dv_actual - dv_theoretical, efficiency)]
+            ["mission_success", "dv_theoretical_m_s", "dv_actual_m_s", "losses_m_s", "efficiency_percent"],
+            [(int(mission_success), dv_theoretical, dv_actual, dv_actual - dv_theoretical, efficiency)]
         )
         
-        if efficiency > 85.0:
+        if mission_success and efficiency > 85.0:
             print(f">>> {debug.Style.GREEN}PASS: High efficiency (>85%). Trajectory is near-optimal.{debug.Style.RESET}")
-        else:
+        elif mission_success:
             print(f">>> {debug.Style.YELLOW}NOTE: Efficiency is {efficiency:.1f}%. Losses are significant.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}NOTE: Skip pass/fail efficiency grading because mission was off-target.{debug.Style.RESET}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reliability and robustness analysis suite.")
