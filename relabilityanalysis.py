@@ -18,7 +18,7 @@ from datetime import datetime
 import argparse
 
 # Project Imports
-from config import StarshipBlock2, EARTH_CONFIG
+from config import StarshipBlock2, EARTH_CONFIG, RELIABILITY_ANALYSIS_TOGGLES
 from vehicle import Vehicle
 from environment import Environment
 from main import solve_optimal_trajectory
@@ -231,6 +231,7 @@ class ReliabilitySuite:
     def __init__(self, output_dir=None, save_figures=True, show_plots=True, random_seed=1337):
         self.base_config = copy.deepcopy(StarshipBlock2)
         self.base_env_config = copy.deepcopy(EARTH_CONFIG)
+        self.test_toggles = copy.deepcopy(RELIABILITY_ANALYSIS_TOGGLES)
         self.random_seed = int(random_seed)
         self.seed_sequence = np.random.SeedSequence(self.random_seed)
         self.rng = np.random.default_rng(self.random_seed)
@@ -310,33 +311,68 @@ class ReliabilitySuite:
         else:
             plt.close(fig)
 
+    def _run_if_enabled(self, flag_name, label, fn, *args, **kwargs):
+        enabled = bool(getattr(self.test_toggles, flag_name, True))
+        if enabled:
+            fn(*args, **kwargs)
+            return True
+        print(f"\n[Skip] {label} disabled in RELIABILITY_ANALYSIS_TOGGLES.{flag_name}")
+        return False
+
     def run_all(self, monte_carlo_samples=500):
         """Runs all analysis modules sequentially."""
-        # Grade A Upgrades
-        self.analyze_stiffness_euler()                       # Upgrade 3: Numerical Stiffness
-        
-        # Grade A Upgrade 1: Rigorous Statistics
-        self.analyze_monte_carlo_convergence(N_samples=monte_carlo_samples)
-        
-        self.analyze_grid_independence()
-        self.analyze_integrator_tolerance()
-        self.analyze_corner_cases()
-        
-        # Grade A Upgrades
-        self.analyze_chaos_lyapunov()                        # Upgrade 2: Chaos Theory
-        self.analyze_bifurcation()                           # Upgrade 4: Bifurcation Analysis
-        self.analyze_theoretical_efficiency()                # Physics Verification: Hohmann Comparison
-        
-        # Run a baseline optimization for single-run checks
-        print(f"\n{debug.Style.BOLD}--- Generating Baseline Solution for Deep Dive ---{debug.Style.RESET}")
-        opt_res = self._get_baseline_opt_res()
-        sim_res = run_simulation(opt_res, self.veh, self.base_config)
-        
-        self.analyze_drift(opt_res, sim_res)
-        self.analyze_energy_balance(sim_res)
-        self.analyze_control_slew(sim_res, opt_res)
-        self.analyze_aerodynamics(sim_res)
-        self.analyze_lagrange_multipliers(opt_res)
+        ran_any = False
+
+        # Major reliability tests.
+        ran_any |= self._run_if_enabled(
+            "stiffness_convergence",
+            "Integrator convergence",
+            self.analyze_stiffness_euler
+        )
+        ran_any |= self._run_if_enabled(
+            "monte_carlo_convergence",
+            "Monte Carlo convergence",
+            self.analyze_monte_carlo_convergence,
+            N_samples=monte_carlo_samples
+        )
+        ran_any |= self._run_if_enabled("grid_independence", "Grid independence", self.analyze_grid_independence)
+        ran_any |= self._run_if_enabled("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance)
+        ran_any |= self._run_if_enabled("corner_cases", "Corner cases", self.analyze_corner_cases)
+        ran_any |= self._run_if_enabled(
+            "finite_time_sensitivity",
+            "Finite-time sensitivity",
+            self.analyze_chaos_lyapunov
+        )
+        ran_any |= self._run_if_enabled("bifurcation", "Bifurcation", self.analyze_bifurcation)
+        ran_any |= self._run_if_enabled(
+            "theoretical_efficiency",
+            "Theoretical efficiency",
+            self.analyze_theoretical_efficiency
+        )
+
+        # Deep-dive analyses share the same baseline simulation.
+        deep_dive_flags = [
+            "drift",
+            "energy_balance",
+            "control_slew",
+            "aerodynamics",
+            "lagrange_multipliers",
+        ]
+        if any(bool(getattr(self.test_toggles, name, True)) for name in deep_dive_flags):
+            print(f"\n{debug.Style.BOLD}--- Generating Baseline Solution for Deep Dive ---{debug.Style.RESET}")
+            opt_res = self._get_baseline_opt_res()
+            sim_res = run_simulation(opt_res, self.veh, self.base_config)
+
+            ran_any |= self._run_if_enabled("drift", "Drift analysis", self.analyze_drift, opt_res, sim_res)
+            ran_any |= self._run_if_enabled("energy_balance", "Energy balance", self.analyze_energy_balance, sim_res)
+            ran_any |= self._run_if_enabled("control_slew", "Control slew", self.analyze_control_slew, sim_res, opt_res)
+            ran_any |= self._run_if_enabled("aerodynamics", "Aerodynamic audit", self.analyze_aerodynamics, sim_res)
+            ran_any |= self._run_if_enabled("lagrange_multipliers", "Lagrange multipliers", self.analyze_lagrange_multipliers, opt_res)
+        else:
+            print("\n[Skip] All deep-dive tests are disabled in RELIABILITY_ANALYSIS_TOGGLES.")
+
+        if not ran_any:
+            print("\nNo analyses executed. Enable tests in RELIABILITY_ANALYSIS_TOGGLES in config.py.")
 
     # 1. GRID INDEPENDENCE STUDY
     def analyze_grid_independence(self):
