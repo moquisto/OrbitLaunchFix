@@ -9,6 +9,7 @@ import time
 import contextlib
 import os
 from scipy.interpolate import interp1d
+from scipy.integrate import solve_ivp
 import multiprocessing
 import matplotlib.patches as patches
 import csv
@@ -342,7 +343,7 @@ class ReliabilitySuite:
         debug._print_sub_header("1. Grid Independence Study")
         # User limit: Max 140 nodes
         # Increased resolution for smoother convergence graph
-        node_counts = [40, 50, 60, 70, 80, 90, 100, 120, 140]
+        node_counts = [40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140]
         masses = []
         runtimes = []
         success_flags = []
@@ -1249,45 +1250,58 @@ class ReliabilitySuite:
 
     # 12. STIFFNESS / EULER TEST (Upgrade 3)
     def analyze_stiffness_euler(self):
-        debug._print_sub_header("12. Numerical Stiffness & Convergence Analysis")
-        print("Comparing Fixed-Step Integrators (Euler vs RK4) against Adaptive RK45 Baseline...")
+        debug._print_sub_header("12. Integrator Convergence Under Piecewise-Constant Controls")
+        print("Comparing fixed-step Euler and RK4 against a high-accuracy Phase-1 reference.")
+        print("Note: With piecewise-constant controls and non-smooth aerodynamics, RK4 formal order 4 does not fully appear.")
         
         # 1. Get Controls & Reference
         opt_res = self._get_baseline_opt_res()
             
         if not opt_res.get("success", False):
-            print("  Baseline optimization failed. Skipping Stiffness test.")
+            print("  Baseline optimization failed. Skipping convergence test.")
             return
 
-        with suppress_stdout():
-            sim_rk45 = run_simulation(opt_res, self.veh, self.base_config)
-            
-        # Rebuild interpolators for Phase 1
+        # Rebuild interpolator for Phase 1 controls.
         T1 = opt_res["T1"]
         U1 = np.array(opt_res["U1"])
         t_grid_1 = np.linspace(0, T1, U1.shape[1] + 1)[:-1]
         ctrl_1 = interp1d(t_grid_1, U1, axis=1, kind='previous', fill_value="extrapolate", bounds_error=False)
         
-        # Reference RK45 Final State at T1
-        # Find index closest to T1 in simulation
-        idx_T1 = np.abs(sim_rk45['t'] - T1).argmin()
-        y_ref_final = sim_rk45['y'][:, idx_T1]
+        # Build a dedicated high-accuracy reference for Phase 1 at exact T1.
+        r0, v0 = self.env.get_launch_site_state()
+        y0 = np.concatenate([r0, v0, [self.base_config.launch_mass]])
+
+        def dynamics_phase1(t, y):
+            u = ctrl_1(t)
+            return self.veh.get_dynamics(y, u[0], u[1:], t, stage_mode="boost", scaling=None)
+
+        with suppress_stdout():
+            ref_res = solve_ivp(
+                fun=dynamics_phase1,
+                t_span=(0.0, T1),
+                y0=y0,
+                method="DOP853",
+                rtol=1e-12,
+                atol=1e-14
+            )
+        if not ref_res.success or ref_res.y.shape[1] < 1:
+            print("  High-accuracy reference integration failed. Skipping convergence test.")
+            return
+        y_ref_final = ref_res.y[:, -1]
         
         # 2. Convergence Study
-        dt_values = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5] # Log-spacing roughly
+        dt_values = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
         euler_errors = []
         rk4_errors = []
         
         print(f"{'dt (s)':<8} | {'Euler Err (m)':<15} | {'RK4 Err (m)':<15}")
         print("-" * 45)
-        
-        y0 = sim_rk45['y'][:, 0]
-        
+
         for dt in dt_values:
             # --- Euler ---
             t_curr = 0.0
             y_curr = y0.copy()
-            while t_curr < T1:
+            while t_curr < T1 - 1e-14:
                 # Clamp last step
                 step = min(dt, T1 - t_curr)
                 u = ctrl_1(t_curr)
@@ -1301,7 +1315,7 @@ class ReliabilitySuite:
             # --- Fixed RK4 ---
             t_curr = 0.0
             y_curr = y0.copy()
-            while t_curr < T1:
+            while t_curr < T1 - 1e-14:
                 step = min(dt, T1 - t_curr)
                 
                 # k1
@@ -1329,51 +1343,82 @@ class ReliabilitySuite:
             
             print(f"{dt:<8.3f} | {err_eu:<15.4f} | {err_rk4:<15.4f}")
 
-        # 3. Calculate Slopes (Log-Log)
-        # Use first and last points for slope estimation
-        slope_eu = (np.log10(euler_errors[-1]) - np.log10(euler_errors[0])) / (np.log10(dt_values[-1]) - np.log10(dt_values[0]))
-        slope_rk = (np.log10(rk4_errors[-1]) - np.log10(rk4_errors[0])) / (np.log10(dt_values[-1]) - np.log10(dt_values[0]))
+        # 3. Estimate effective orders with robust log-log regression.
+        dt_arr = np.array(dt_values, dtype=float)
+        eu_arr = np.maximum(np.array(euler_errors, dtype=float), 1e-16)
+        rk_arr = np.maximum(np.array(rk4_errors, dtype=float), 1e-16)
+        log_dt = np.log10(dt_arr)
+
+        # Use smaller dt points for local asymptotic slope estimation.
+        fit_idx = np.where(dt_arr <= 0.1)[0]
+        if len(fit_idx) < 3:
+            fit_idx = np.arange(max(3, len(dt_arr) // 2))
+
+        def fit_slope_and_r2(log_x, log_y):
+            coeff = np.polyfit(log_x, log_y, 1)
+            pred = coeff[0] * log_x + coeff[1]
+            ss_res = np.sum((log_y - pred) ** 2)
+            ss_tot = np.sum((log_y - np.mean(log_y)) ** 2)
+            r2 = 1.0 - ss_res / (ss_tot + 1e-16)
+            return coeff, r2
+
+        coeff_eu, r2_eu = fit_slope_and_r2(log_dt[fit_idx], np.log10(eu_arr[fit_idx]))
+        coeff_rk, r2_rk = fit_slope_and_r2(log_dt[fit_idx], np.log10(rk_arr[fit_idx]))
+        slope_eu = coeff_eu[0]
+        slope_rk = coeff_rk[0]
         
-        print(f"\nConvergence Slopes (Log-Log):")
-        print(f"  Euler (Order 1): {slope_eu:.2f} (Expected ~1.0)")
-        print(f"  RK4   (Order 4): {slope_rk:.2f} (Expected ~4.0)")
+        print(f"\nEffective convergence slopes (log-log regression on dt <= 0.1 s):")
+        print(f"  Euler: {slope_eu:.2f} (R^2={r2_eu:.3f}, expected ~1 for first-order)")
+        print(f"  RK4:   {slope_rk:.2f} (R^2={r2_rk:.3f}, formal 4 only for smooth RHS)")
+        if slope_rk < 3.0:
+            print("  Interpretation: RK4 order reduction is expected here due to control/discrete-model non-smoothness.")
 
         self._save_table(
             "stiffness_convergence",
             ["dt_s", "euler_error_m", "rk4_error_m"],
             [(dt_values[i], euler_errors[i], rk4_errors[i]) for i in range(len(dt_values))]
         )
+        self._save_table(
+            "stiffness_convergence_fit",
+            ["method", "fit_range_dt_max_s", "slope", "r2"],
+            [
+                ("Euler", float(np.max(dt_arr[fit_idx])), float(slope_eu), float(r2_eu)),
+                ("RK4", float(np.max(dt_arr[fit_idx])), float(slope_rk), float(r2_rk))
+            ]
+        )
         
         # 4. Plotting
         fig = plt.figure(figsize=(10, 7))
-        plt.loglog(dt_values, euler_errors, 'r-o', label=f'Euler (Slope={slope_eu:.1f})')
-        plt.loglog(dt_values, rk4_errors, 'b-s', label=f'Fixed RK4 (Slope={slope_rk:.1f})')
+        plt.loglog(dt_arr, eu_arr, 'r-o', label=f'Euler (fit slope={slope_eu:.2f})')
+        plt.loglog(dt_arr, rk_arr, 'b-s', label=f'Fixed RK4 (fit slope={slope_rk:.2f})')
         
-        # Add Reference Slopes
-        ref_x = np.array(dt_values)
-        # Anchor references to the middle data point
-        mid_idx = len(dt_values) // 2
+        # Fit trend lines on the selected local-fit interval.
+        fit_dt = np.linspace(np.min(dt_arr[fit_idx]), np.max(dt_arr[fit_idx]), 100)
+        fit_log_dt = np.log10(fit_dt)
+        eu_fit_line = 10 ** (coeff_eu[0] * fit_log_dt + coeff_eu[1])
+        rk_fit_line = 10 ** (coeff_rk[0] * fit_log_dt + coeff_rk[1])
+        plt.loglog(fit_dt, eu_fit_line, 'r--', alpha=0.5, label='Euler local fit')
+        plt.loglog(fit_dt, rk_fit_line, 'b--', alpha=0.5, label='RK4 local fit')
         
-        # Slope 1 Ref
-        ref_y1 = euler_errors[mid_idx] * (ref_x / ref_x[mid_idx])**1
-        plt.loglog(ref_x, ref_y1, 'k--', alpha=0.3, label='O(dt) Reference')
-        
-        # Slope 4 Ref
-        ref_y4 = rk4_errors[mid_idx] * (ref_x / ref_x[mid_idx])**4
-        plt.loglog(ref_x, ref_y4, 'k:', alpha=0.3, label='O(dt^4) Reference')
+        # First-order reference for context in this non-smooth setting.
+        ref_idx = len(dt_arr) // 2
+        ref_y1 = eu_arr[ref_idx] * (dt_arr / dt_arr[ref_idx]) ** 1
+        plt.loglog(dt_arr, ref_y1, 'k:', alpha=0.35, label='O(dt) reference')
         
         plt.xlabel('Time Step dt (s)')
-        plt.ylabel('Global Position Error (m)')
-        plt.title('Numerical Convergence Analysis: Euler vs RK4')
+        plt.ylabel('Phase-1 Final Position Error (m)')
+        plt.title('Integrator Convergence with Piecewise-Constant Controls')
         plt.grid(True, which="both", ls="-", alpha=0.3)
         plt.legend()
         self._finalize_figure(fig, "stiffness_euler_vs_rk4")
         
         print(f"\n{debug.Style.BOLD}THEORETICAL DEFENSE (For Report):{debug.Style.RESET}")
-        print("1. Why RK45? Rocket dynamics are 'Stiff' (Fast Launch vs Slow Coast).")
-        print("   Adaptive stepping (RK45) captures fast dynamics without wasting time in slow phases.")
+        print("1. Why RK45 for production simulation?")
+        print("   Adaptive stepping gives robust accuracy/cost tradeoff across fast launch and slower coast segments.")
         print("2. Why not Symplectic (Verlet)? The system is Non-Conservative (Thrust/Drag add/remove energy).")
         print("   Symplectic integrators are designed for Hamiltonian systems (Energy Conserving), which this is not.")
+        print("3. Why RK4 does not show formal order 4 here?")
+        print("   Piecewise-constant controls and non-smooth model terms reduce observable global order.")
 
     # 13. BIFURCATION ANALYSIS (Upgrade 4)
     def analyze_bifurcation(self):
