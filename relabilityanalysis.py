@@ -109,15 +109,35 @@ def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_
         "fuel_margin_kg": np.nan
     }
 
-    y = sim_res.get("y", None) if isinstance(sim_res, dict) else None
+    if not isinstance(sim_res, dict):
+        return metrics
+
+    y = sim_res.get("y", None)
+    t = sim_res.get("t", None)
+    u = sim_res.get("u", None)
     if not isinstance(y, np.ndarray) or y.ndim != 2 or y.shape[0] < 7 or y.shape[1] < 1:
+        return metrics
+    if not isinstance(t, np.ndarray) or t.ndim != 1 or len(t) < 1:
+        return metrics
+    if not isinstance(u, np.ndarray) or u.ndim != 2 or u.shape[0] < 4:
+        return metrics
+    if y.shape[1] != len(t) or u.shape[1] != len(t):
+        return metrics
+    if not np.all(np.isfinite(t)) or not np.all(np.isfinite(y)) or not np.all(np.isfinite(u)):
+        return metrics
+    if np.any(np.diff(t) < -1e-9):
         return metrics
 
     final_state = y[:, -1]
-    if not np.all(np.isfinite(final_state)):
+    if not np.all(np.isfinite(final_state)) or final_state[6] <= 0.0:
+        return metrics
+    r0 = np.linalg.norm(y[0:3, 0])
+    rf = np.linalg.norm(final_state[0:3])
+    if r0 < 0.5 * env_cfg.earth_radius_equator or rf < 0.25 * env_cfg.earth_radius_equator:
+        # Catches dummy fallback arrays while still allowing physically crashed trajectories.
         return metrics
 
-    r_f = np.linalg.norm(final_state[0:3]) - env_cfg.earth_radius_equator
+    r_f = rf - env_cfg.earth_radius_equator
     v_f = np.linalg.norm(final_state[3:6])
     m_final = float(final_state[6])
     target_alt = float(cfg.target_altitude)
@@ -154,9 +174,8 @@ def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_
     else:
         metrics["status"] = "FUEL"
 
-    # Require finite full history for trajectory-based plots.
-    if np.all(np.isfinite(y)) and np.linalg.norm(y[:, 0]) > 1.0:
-        metrics["trajectory_valid"] = True
+    # Full history already validated above.
+    metrics["trajectory_valid"] = True
 
     return metrics
 
@@ -512,6 +531,9 @@ class ReliabilitySuite:
     def run_all(self, monte_carlo_samples=500):
         """Runs all analysis modules sequentially."""
         ran_any = False
+        mc_n = max(1, int(monte_carlo_samples))
+        mc_min_precision = min(mc_n, max(20, mc_n // 4))
+        mc_batch = max(5, min(50, max(1, mc_n // 10)))
 
         # Major reliability tests.
         ran_any |= self._run_if_enabled(
@@ -533,27 +555,33 @@ class ReliabilitySuite:
             "monte_carlo_convergence",
             "Monte Carlo convergence",
             self.analyze_monte_carlo_convergence,
-            N_samples=monte_carlo_samples
+            N_samples=mc_n
         )
         ran_any |= self._run_if_enabled(
             "monte_carlo_precision_target",
             "Monte Carlo precision target",
-            self.analyze_monte_carlo_precision_target
+            self.analyze_monte_carlo_precision_target,
+            min_samples=mc_min_precision,
+            max_samples=mc_n,
+            batch_size=mc_batch
         )
         ran_any |= self._run_if_enabled(
             "global_sensitivity",
             "Global sensitivity ranking",
-            self.analyze_global_sensitivity
+            self.analyze_global_sensitivity,
+            N_samples=mc_n
         )
         ran_any |= self._run_if_enabled(
             "constraint_reliability",
             "Constraint reliability curves",
-            self.analyze_constraint_reliability
+            self.analyze_constraint_reliability,
+            N_samples=mc_n
         )
         ran_any |= self._run_if_enabled(
             "distribution_robustness",
             "Distribution robustness",
-            self.analyze_distribution_robustness
+            self.analyze_distribution_robustness,
+            N_per_model=mc_n
         )
         ran_any |= self._run_if_enabled("grid_independence", "Grid independence", self.analyze_grid_independence)
         ran_any |= self._run_if_enabled("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance)
@@ -1850,18 +1878,18 @@ class ReliabilitySuite:
     # 15. SMOOTH ODE BENCHMARK (FORMAL ORDER CHECK)
     def analyze_smooth_integrator_benchmark(self):
         debug._print_sub_header("15. Smooth ODE Benchmark (Formal Integrator Order)")
-        print("Benchmarking Euler and RK4 on a smooth harmonic oscillator with known exact solution.")
+        print("Benchmarking Euler and RK4 on a smooth scalar decay ODE with exact solution.")
 
-        omega = 1.5  # rad/s
-        T = 20.0     # s
-        y0 = np.array([1.0, 0.0], dtype=float)  # [x, v]
+        k = 1.3
+        T = 4.0
+        y0 = 1.0
         dt_values = np.array([0.40, 0.20, 0.10, 0.05, 0.025, 0.0125], dtype=float)
 
-        def dyn(y):
-            return np.array([y[1], -(omega ** 2) * y[0]], dtype=float)
+        def f(y):
+            return -k * y
 
-        def exact_state(t):
-            return np.array([np.cos(omega * t), -omega * np.sin(omega * t)], dtype=float)
+        def exact(t):
+            return np.exp(-k * t)
 
         euler_errors = []
         rk4_errors = []
@@ -1871,40 +1899,44 @@ class ReliabilitySuite:
         for dt in dt_values:
             # Euler
             t = 0.0
-            y = y0.copy()
+            y = float(y0)
             while t < T - 1e-14:
                 h = min(dt, T - t)
-                y = y + h * dyn(y)
+                y = y + h * f(y)
                 t += h
-            err_eu = np.linalg.norm(y - exact_state(T))
+            err_eu = abs(y - exact(T))
             euler_errors.append(err_eu)
 
             # RK4
             t = 0.0
-            y = y0.copy()
+            y = float(y0)
             while t < T - 1e-14:
                 h = min(dt, T - t)
-                k1 = dyn(y)
-                k2 = dyn(y + 0.5 * h * k1)
-                k3 = dyn(y + 0.5 * h * k2)
-                k4 = dyn(y + h * k3)
+                k1 = f(y)
+                k2 = f(y + 0.5 * h * k1)
+                k3 = f(y + 0.5 * h * k2)
+                k4 = f(y + h * k3)
                 y = y + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
                 t += h
-            err_rk = np.linalg.norm(y - exact_state(T))
+            err_rk = abs(y - exact(T))
             rk4_errors.append(err_rk)
 
             print(f"{dt:<10.4f} | {err_eu:<12.4e} | {err_rk:<12.4e}")
 
-        log_dt = np.log10(dt_values)
-        log_eu = np.log10(np.maximum(np.array(euler_errors), 1e-16))
-        log_rk = np.log10(np.maximum(np.array(rk4_errors), 1e-16))
+        # Fit in the asymptotic region (smaller dt) to avoid coarse-step effects.
+        fit_idx = np.where(dt_values <= 0.1)[0]
+        if len(fit_idx) < 3:
+            fit_idx = np.arange(len(dt_values))
+        log_dt = np.log10(dt_values[fit_idx])
+        log_eu = np.log10(np.maximum(np.array(euler_errors)[fit_idx], 1e-16))
+        log_rk = np.log10(np.maximum(np.array(rk4_errors)[fit_idx], 1e-16))
         coeff_eu = np.polyfit(log_dt, log_eu, 1)
         coeff_rk = np.polyfit(log_dt, log_rk, 1)
 
         slope_eu = float(coeff_eu[0])
         slope_rk = float(coeff_rk[0])
-        print(f"  Estimated Euler order: {slope_eu:.2f} (expected ~1)")
-        print(f"  Estimated RK4 order:   {slope_rk:.2f} (expected ~4)")
+        print(f"  Estimated Euler order (dt<=0.1s): {slope_eu:.2f} (expected ~1)")
+        print(f"  Estimated RK4 order (dt<=0.1s):   {slope_rk:.2f} (expected ~4)")
 
         self._save_table(
             "smooth_integrator_benchmark",
@@ -2423,10 +2455,18 @@ class ReliabilitySuite:
         rtols = np.array([r[0] for r in drift_rows[:-1]], dtype=float)
         d_q = np.array([r[2] for r in drift_rows[:-1]], dtype=float)
         d_g = np.array([r[3] for r in drift_rows[:-1]], dtype=float)
+        mask_q = np.isfinite(rtols) & np.isfinite(d_q) & (rtols > 0.0) & (d_q > 0.0)
+        mask_g = np.isfinite(rtols) & np.isfinite(d_g) & (rtols > 0.0) & (d_g > 0.0)
 
         fig = plt.figure(figsize=(10, 6))
-        plt.loglog(rtols, d_q, "o-", label="|Δt Max-Q|")
-        plt.loglog(rtols, d_g, "s-", label="|Δt Max-G|")
+        if np.any(mask_q):
+            plt.loglog(rtols[mask_q], d_q[mask_q], "o-", label="|Δt Max-Q|")
+        if np.any(mask_g):
+            plt.loglog(rtols[mask_g], d_g[mask_g], "s-", label="|Δt Max-G|")
+        if not (np.any(mask_q) or np.any(mask_g)):
+            print("  No finite positive drifts available for log-log event-time plot.")
+            plt.close(fig)
+            return
         plt.gca().invert_xaxis()
         plt.xlabel("Integrator Relative Tolerance (rtol)")
         plt.ylabel("Event Time Drift vs Tightest Tolerance (s)")
