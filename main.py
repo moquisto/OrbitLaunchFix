@@ -32,9 +32,9 @@ def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
         # For minimum energy, target inclination is the absolute value of the launch latitude.
         abs_lat = abs(environment.config.launch_latitude)
         print(f"[Optimizer] Target Inclination not set. Defaulting to absolute Launch Latitude ({abs_lat:.2f} deg) for min-energy orbit.")
-        config.target_inclination = abs_lat
-        
-    Target_Inc_Deg = config.target_inclination
+        Target_Inc_Deg = abs_lat
+    else:
+        Target_Inc_Deg = config.target_inclination
     
     # Ensure Target Inclination is physically possible (>= |Latitude|)
     lat_deg = environment.config.launch_latitude
@@ -93,6 +93,9 @@ def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
     # B. Dynamics & Path Constraints (RK4 Integration)
     def add_phase_dynamics(X, U, T_scaled, phase_mode, t_start_scaled):
         dt_scaled = T_scaled / N
+        Re_s = R_earth / scaling.length
+        f = environment.config.earth_flattening
+        Rp_s = (R_earth * (1.0 - f)) / scaling.length
         
         # Apply Mass Constraints to ALL nodes (0 to N)
         # This ensures the final node (result of last integration step) also respects the limit.
@@ -139,9 +142,6 @@ def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
             # Path Constraints (Safety)
             # Altitude > 0m (Strict constraint, no buffer, WGS84 Ellipsoid)
             r_k_scaled = x_k[0:3]
-            Re_s = R_earth / scaling.length
-            f = environment.config.earth_flattening
-            Rp_s = (R_earth * (1.0 - f)) / scaling.length
             
             # (x/Re)^2 + (y/Re)^2 + (z/Rp)^2 >= 1
             ellipsoid_metric = (r_k_scaled[0]/Re_s)**2 + (r_k_scaled[1]/Re_s)**2 + (r_k_scaled[2]/Rp_s)**2

@@ -131,9 +131,9 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         sim_metrics['q'].append(q / 1000.0)
         
         # Angle of Attack
-        thrust_dir = u_ctrl[1:]
+        thrust_dir = np.array(u_ctrl[1:], copy=True)
         if np.linalg.norm(thrust_dir) > 1e-9:
-            thrust_dir /= np.linalg.norm(thrust_dir)
+            thrust_dir = thrust_dir / np.linalg.norm(thrust_dir)
         else:
             thrust_dir = np.array([1,0,0])
             
