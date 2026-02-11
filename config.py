@@ -161,12 +161,20 @@ class ReliabilityAnalysisToggles:
     Enables/disables each analysis block in relabilityanalysis.py.
     """
     stiffness_convergence: bool = True
+    smooth_integrator_benchmark: bool = False
+    conservative_invariants: bool = False
     monte_carlo_convergence: bool = False
+    monte_carlo_precision_target: bool = False
+    global_sensitivity: bool = False
+    constraint_reliability: bool = False
+    distribution_robustness: bool = False
     grid_independence: bool = False
     integrator_tolerance: bool = False
+    event_time_convergence: bool = False
     corner_cases: bool = False
     finite_time_sensitivity: bool = False
     bifurcation: bool = False
+    bifurcation_2d_map: bool = False
     theoretical_efficiency: bool = False
     drift: bool = False
     energy_balance: bool = False

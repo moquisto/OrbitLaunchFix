@@ -319,15 +319,215 @@ class ReliabilitySuite:
         print(f"\n[Skip] {label} disabled in RELIABILITY_ANALYSIS_TOGGLES.{flag_name}")
         return False
 
+    @staticmethod
+    def _rankdata(values):
+        """Simple rank transform with average-tie handling."""
+        x = np.asarray(values, dtype=float)
+        n = len(x)
+        if n == 0:
+            return np.array([], dtype=float)
+        order = np.argsort(x, kind="mergesort")
+        ranks_sorted = np.arange(1, n + 1, dtype=float)
+        xs = x[order]
+        i = 0
+        while i < n:
+            j = i + 1
+            while j < n and xs[j] == xs[i]:
+                j += 1
+            if j - i > 1:
+                avg_rank = 0.5 * (ranks_sorted[i] + ranks_sorted[j - 1])
+                ranks_sorted[i:j] = avg_rank
+            i = j
+        ranks = np.empty(n, dtype=float)
+        ranks[order] = ranks_sorted
+        return ranks
+
+    @staticmethod
+    def _corr(a, b):
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        if len(a) < 2 or len(b) < 2:
+            return np.nan
+        a_std = np.std(a)
+        b_std = np.std(b)
+        if a_std < 1e-16 or b_std < 1e-16:
+            return np.nan
+        return float(np.corrcoef(a, b)[0, 1])
+
+    def _draw_uncertainty_multipliers(self, rng, model="gaussian_independent"):
+        """
+        Draw uncertainty multipliers for thrust, ISP, and atmosphere density.
+        """
+        if model == "gaussian_independent":
+            thrust_mult = rng.normal(1.0, 0.02)
+            isp_mult = rng.normal(1.0, 0.01)
+            dens_mult = rng.normal(1.0, 0.10)
+        elif model == "uniform_bounded":
+            thrust_mult = rng.uniform(0.94, 1.06)
+            isp_mult = rng.uniform(0.97, 1.03)
+            dens_mult = rng.uniform(0.70, 1.30)
+        elif model == "gaussian_correlated":
+            sig = np.array([0.02, 0.01, 0.10], dtype=float)
+            corr = np.array([
+                [1.0,  0.55, -0.20],
+                [0.55, 1.0, -0.15],
+                [-0.20, -0.15, 1.0]
+            ], dtype=float)
+            cov = np.outer(sig, sig) * corr
+            draw = rng.multivariate_normal(np.ones(3), cov)
+            thrust_mult, isp_mult, dens_mult = draw[0], draw[1], draw[2]
+        else:
+            raise ValueError(f"Unknown uncertainty model '{model}'")
+
+        # Guardrails for physically meaningful environment and engine factors.
+        thrust_mult = float(np.clip(thrust_mult, 0.80, 1.20))
+        isp_mult = float(np.clip(isp_mult, 0.85, 1.15))
+        dens_mult = float(np.clip(dens_mult, 0.20, 2.00))
+        return thrust_mult, isp_mult, dens_mult
+
+    def _trajectory_diagnostics(self, sim_res, veh, cfg):
+        """
+        Extract trajectory-level metrics used by reliability tests.
+        """
+        out = {
+            "valid": False,
+            "max_q_pa": np.nan,
+            "max_q_time_s": np.nan,
+            "max_g": np.nan,
+            "max_g_time_s": np.nan,
+            "staging_time_s": np.nan,
+            "depletion_time_s": np.nan,
+            "q_violation": False,
+            "g_violation": False
+        }
+
+        if not isinstance(sim_res, dict):
+            return out
+        t = sim_res.get("t", None)
+        y = sim_res.get("y", None)
+        u = sim_res.get("u", None)
+        if not isinstance(t, np.ndarray) or not isinstance(y, np.ndarray) or not isinstance(u, np.ndarray):
+            return out
+        if y.ndim != 2 or u.ndim != 2 or len(t) < 1 or y.shape[0] < 7 or u.shape[0] < 4:
+            return out
+        if y.shape[1] != len(t) or u.shape[1] != len(t):
+            return out
+        if not np.all(np.isfinite(t)) or not np.all(np.isfinite(y)) or not np.all(np.isfinite(u)):
+            return out
+
+        m_stage2_wet = cfg.stage_2.dry_mass + cfg.stage_2.propellant_mass + cfg.payload_mass
+        g0 = veh.env.config.g0
+        max_q = -np.inf
+        max_q_time = np.nan
+        max_g = -np.inf
+        max_g_time = np.nan
+
+        for i in range(len(t)):
+            r_i = y[0:3, i]
+            v_i = y[3:6, i]
+            m_i = y[6, i]
+            th_i = u[0, i]
+            dir_i = u[1:, i]
+            ti = t[i]
+
+            env_state = veh.env.get_state_sim(r_i, ti)
+            v_rel = v_i - env_state["wind_velocity"]
+            q = 0.5 * env_state["density"] * np.dot(v_rel, v_rel)
+            if q > max_q:
+                max_q = float(q)
+                max_q_time = float(ti)
+
+            if th_i < 0.01:
+                stage_mode = "coast" if m_i > m_stage2_wet + 1000.0 else "coast_2"
+            else:
+                stage_mode = "boost" if m_i > m_stage2_wet + 1000.0 else "ship"
+            dyn = veh.get_dynamics(y[:, i], th_i, dir_i, ti, stage_mode=stage_mode, scaling=None)
+            sensed_acc = dyn[3:6] - env_state["gravity"]
+            g_load = np.linalg.norm(sensed_acc) / g0
+            if g_load > max_g:
+                max_g = float(g_load)
+                max_g_time = float(ti)
+
+        dm = np.diff(y[6, :])
+        if len(dm) > 0:
+            idx_stage = int(np.argmin(dm))
+            if dm[idx_stage] < -1000.0:
+                out["staging_time_s"] = float(t[idx_stage])
+        m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
+        dep_idx = np.where(y[6, :] <= m_dry + 1e-6)[0]
+        if len(dep_idx) > 0:
+            out["depletion_time_s"] = float(t[int(dep_idx[0])])
+
+        out["valid"] = True
+        out["max_q_pa"] = max_q if np.isfinite(max_q) else np.nan
+        out["max_q_time_s"] = max_q_time
+        out["max_g"] = max_g if np.isfinite(max_g) else np.nan
+        out["max_g_time_s"] = max_g_time
+        out["q_violation"] = bool(np.isfinite(out["max_q_pa"]) and out["max_q_pa"] > cfg.max_q_limit)
+        out["g_violation"] = bool(np.isfinite(out["max_g"]) and out["max_g"] > cfg.max_g_load)
+        return out
+
+    def _simulate_uncertainty_case(self, opt_res, thrust_mult, isp_mult, dens_mult):
+        """
+        Run one perturbed open-loop simulation and return terminal/constraint diagnostics.
+        """
+        cfg = copy.deepcopy(self.base_config)
+        env_cfg = copy.deepcopy(self.base_env_config)
+        cfg.stage_1.thrust_vac *= thrust_mult
+        cfg.stage_2.thrust_vac *= thrust_mult
+        cfg.stage_1.isp_vac *= isp_mult
+        cfg.stage_2.isp_vac *= isp_mult
+        env_cfg.density_multiplier = dens_mult
+
+        sim_res = {"y": np.zeros((7, 1)), "t": np.array([0.0]), "u": np.zeros((4, 1))}
+        try:
+            with suppress_stdout():
+                env_mc = Environment(env_cfg)
+                veh_mc = Vehicle(cfg, env_mc)
+                sim_res = run_simulation(opt_res, veh_mc, cfg)
+            terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
+            traj = self._trajectory_diagnostics(sim_res, veh_mc, cfg)
+        except Exception:
+            terminal = evaluate_terminal_state({"y": np.zeros((7, 1))}, cfg, env_cfg)
+            traj = {
+                "valid": False,
+                "max_q_pa": np.nan,
+                "max_q_time_s": np.nan,
+                "max_g": np.nan,
+                "max_g_time_s": np.nan,
+                "staging_time_s": np.nan,
+                "depletion_time_s": np.nan,
+                "q_violation": False,
+                "g_violation": False
+            }
+
+        return {
+            "thrust_multiplier": float(thrust_mult),
+            "isp_multiplier": float(isp_mult),
+            "density_multiplier": float(dens_mult),
+            "terminal": terminal,
+            "trajectory": traj
+        }
+
     def run_all(self, monte_carlo_samples=500):
         """Runs all analysis modules sequentially."""
         ran_any = False
 
         # Major reliability tests.
         ran_any |= self._run_if_enabled(
+            "smooth_integrator_benchmark",
+            "Smooth ODE integrator benchmark",
+            self.analyze_smooth_integrator_benchmark
+        )
+        ran_any |= self._run_if_enabled(
             "stiffness_convergence",
             "Integrator convergence",
             self.analyze_stiffness_euler
+        )
+        ran_any |= self._run_if_enabled(
+            "conservative_invariants",
+            "Conservative-invariant audit",
+            self.analyze_conservative_invariants
         )
         ran_any |= self._run_if_enabled(
             "monte_carlo_convergence",
@@ -335,8 +535,33 @@ class ReliabilitySuite:
             self.analyze_monte_carlo_convergence,
             N_samples=monte_carlo_samples
         )
+        ran_any |= self._run_if_enabled(
+            "monte_carlo_precision_target",
+            "Monte Carlo precision target",
+            self.analyze_monte_carlo_precision_target
+        )
+        ran_any |= self._run_if_enabled(
+            "global_sensitivity",
+            "Global sensitivity ranking",
+            self.analyze_global_sensitivity
+        )
+        ran_any |= self._run_if_enabled(
+            "constraint_reliability",
+            "Constraint reliability curves",
+            self.analyze_constraint_reliability
+        )
+        ran_any |= self._run_if_enabled(
+            "distribution_robustness",
+            "Distribution robustness",
+            self.analyze_distribution_robustness
+        )
         ran_any |= self._run_if_enabled("grid_independence", "Grid independence", self.analyze_grid_independence)
         ran_any |= self._run_if_enabled("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance)
+        ran_any |= self._run_if_enabled(
+            "event_time_convergence",
+            "Event-time convergence",
+            self.analyze_event_time_convergence
+        )
         ran_any |= self._run_if_enabled("corner_cases", "Corner cases", self.analyze_corner_cases)
         ran_any |= self._run_if_enabled(
             "finite_time_sensitivity",
@@ -344,6 +569,11 @@ class ReliabilitySuite:
             self.analyze_chaos_lyapunov
         )
         ran_any |= self._run_if_enabled("bifurcation", "Bifurcation", self.analyze_bifurcation)
+        ran_any |= self._run_if_enabled(
+            "bifurcation_2d_map",
+            "Bifurcation 2D map",
+            self.analyze_bifurcation_2d_map
+        )
         ran_any |= self._run_if_enabled(
             "theoretical_efficiency",
             "Theoretical efficiency",
@@ -1616,6 +1846,667 @@ class ReliabilitySuite:
             print(f">>> {debug.Style.YELLOW}NOTE: Efficiency is {efficiency:.1f}%. Losses are significant.{debug.Style.RESET}")
         else:
             print(f">>> {debug.Style.YELLOW}NOTE: Skip pass/fail efficiency grading because mission was off-target.{debug.Style.RESET}")
+
+    # 15. SMOOTH ODE BENCHMARK (FORMAL ORDER CHECK)
+    def analyze_smooth_integrator_benchmark(self):
+        debug._print_sub_header("15. Smooth ODE Benchmark (Formal Integrator Order)")
+        print("Benchmarking Euler and RK4 on a smooth harmonic oscillator with known exact solution.")
+
+        omega = 1.5  # rad/s
+        T = 20.0     # s
+        y0 = np.array([1.0, 0.0], dtype=float)  # [x, v]
+        dt_values = np.array([0.40, 0.20, 0.10, 0.05, 0.025, 0.0125], dtype=float)
+
+        def dyn(y):
+            return np.array([y[1], -(omega ** 2) * y[0]], dtype=float)
+
+        def exact_state(t):
+            return np.array([np.cos(omega * t), -omega * np.sin(omega * t)], dtype=float)
+
+        euler_errors = []
+        rk4_errors = []
+
+        print(f"{'dt (s)':<10} | {'Euler Err':<12} | {'RK4 Err':<12}")
+        print("-" * 42)
+        for dt in dt_values:
+            # Euler
+            t = 0.0
+            y = y0.copy()
+            while t < T - 1e-14:
+                h = min(dt, T - t)
+                y = y + h * dyn(y)
+                t += h
+            err_eu = np.linalg.norm(y - exact_state(T))
+            euler_errors.append(err_eu)
+
+            # RK4
+            t = 0.0
+            y = y0.copy()
+            while t < T - 1e-14:
+                h = min(dt, T - t)
+                k1 = dyn(y)
+                k2 = dyn(y + 0.5 * h * k1)
+                k3 = dyn(y + 0.5 * h * k2)
+                k4 = dyn(y + h * k3)
+                y = y + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+                t += h
+            err_rk = np.linalg.norm(y - exact_state(T))
+            rk4_errors.append(err_rk)
+
+            print(f"{dt:<10.4f} | {err_eu:<12.4e} | {err_rk:<12.4e}")
+
+        log_dt = np.log10(dt_values)
+        log_eu = np.log10(np.maximum(np.array(euler_errors), 1e-16))
+        log_rk = np.log10(np.maximum(np.array(rk4_errors), 1e-16))
+        coeff_eu = np.polyfit(log_dt, log_eu, 1)
+        coeff_rk = np.polyfit(log_dt, log_rk, 1)
+
+        slope_eu = float(coeff_eu[0])
+        slope_rk = float(coeff_rk[0])
+        print(f"  Estimated Euler order: {slope_eu:.2f} (expected ~1)")
+        print(f"  Estimated RK4 order:   {slope_rk:.2f} (expected ~4)")
+
+        self._save_table(
+            "smooth_integrator_benchmark",
+            ["dt_s", "euler_state_error", "rk4_state_error"],
+            [(float(dt_values[i]), float(euler_errors[i]), float(rk4_errors[i])) for i in range(len(dt_values))]
+        )
+        self._save_table(
+            "smooth_integrator_benchmark_fit",
+            ["method", "slope"],
+            [("Euler", slope_eu), ("RK4", slope_rk)]
+        )
+
+        fig = plt.figure(figsize=(10, 6))
+        plt.loglog(dt_values, euler_errors, "o-r", label=f"Euler (slope={slope_eu:.2f})")
+        plt.loglog(dt_values, rk4_errors, "s-b", label=f"RK4 (slope={slope_rk:.2f})")
+        plt.xlabel("Time Step dt (s)")
+        plt.ylabel("State Error at T")
+        plt.title("Smooth ODE Benchmark: Formal Integrator Order")
+        plt.grid(True, which="both", ls="-", alpha=0.3)
+        plt.legend()
+        self._finalize_figure(fig, "smooth_integrator_benchmark")
+
+    # 16. CONSERVATIVE INVARIANT TEST
+    def analyze_conservative_invariants(self):
+        debug._print_sub_header("16. Conservative Invariants (Two-Body, No Thrust/Drag)")
+        print("Checking energy and angular-momentum conservation in pure two-body dynamics.")
+
+        opt_res = self._get_baseline_opt_res()
+        with suppress_stdout():
+            sim_res = run_simulation(opt_res, self.veh, self.base_config)
+        if "y" not in sim_res or sim_res["y"].shape[1] < 1:
+            print("  Simulation did not return a valid state history. Skipping.")
+            return
+
+        y_init = sim_res["y"][0:6, -1].copy()
+        mu = self.env.config.earth_mu
+
+        def two_body(t, y):
+            r = y[0:3]
+            v = y[3:6]
+            r_norm = max(np.linalg.norm(r), 1.0)
+            a = -mu * r / (r_norm ** 3)
+            return np.concatenate([v, a])
+
+        T_prop = 5400.0
+        with suppress_stdout():
+            res = solve_ivp(
+                fun=two_body,
+                t_span=(0.0, T_prop),
+                y0=y_init,
+                method="RK45",
+                rtol=1e-10,
+                atol=1e-12
+            )
+        if not res.success or res.y.shape[1] < 2:
+            print("  Two-body propagation failed. Skipping.")
+            return
+
+        r = res.y[0:3, :]
+        v = res.y[3:6, :]
+        r_norm = np.linalg.norm(r, axis=0)
+        v_norm_sq = np.sum(v * v, axis=0)
+        energy = 0.5 * v_norm_sq - mu / np.maximum(r_norm, 1.0)
+        h_vec = np.cross(r.T, v.T).T
+        h_mag = np.linalg.norm(h_vec, axis=0)
+        e0 = energy[0]
+        h0 = h_mag[0]
+        rel_e = np.abs((energy - e0) / (abs(e0) + 1e-16))
+        rel_h = np.abs((h_mag - h0) / (abs(h0) + 1e-16))
+
+        print(f"  Max relative energy drift:         {np.max(rel_e):.3e}")
+        print(f"  Max relative angular momentum drift:{np.max(rel_h):.3e}")
+
+        self._save_table(
+            "conservative_invariants",
+            ["time_s", "specific_energy_J_per_kg", "angular_momentum_m2_s", "rel_energy_drift", "rel_h_drift"],
+            [
+                (float(res.t[i]), float(energy[i]), float(h_mag[i]), float(rel_e[i]), float(rel_h[i]))
+                for i in range(len(res.t))
+            ]
+        )
+
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+        ax1.semilogy(res.t, rel_e, "b-")
+        ax1.set_ylabel("Relative Energy Drift")
+        ax1.grid(True, which="both", alpha=0.3)
+        ax2.semilogy(res.t, rel_h, "r-")
+        ax2.set_xlabel("Time (s)")
+        ax2.set_ylabel("Relative |h| Drift")
+        ax2.grid(True, which="both", alpha=0.3)
+        fig.suptitle("Conservative Invariant Check (Two-Body Dynamics)")
+        self._finalize_figure(fig, "conservative_invariants")
+
+    # 17. MONTE CARLO PRECISION TARGET
+    def analyze_monte_carlo_precision_target(self, target_half_width=0.04, min_samples=80, max_samples=300, batch_size=20):
+        debug._print_sub_header("17. Monte Carlo Precision Target (CI-Based Stop)")
+        print("Running Monte Carlo until Wilson 95% CI half-width reaches target precision.")
+
+        if min_samples < 1 or max_samples < min_samples or batch_size < 1:
+            print("  Invalid parameters for precision-target Monte Carlo. Skipping.")
+            return
+
+        opt_res = self._get_baseline_opt_res()
+        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        successes = 0
+        n = 0
+        batch_rows = []
+        stop_reason = "max_samples"
+        t0 = time.time()
+
+        while n < max_samples:
+            n_batch = min(batch_size, max_samples - n)
+            for _ in range(n_batch):
+                thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
+                result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
+                successes += int(result["terminal"]["strict_ok"])
+            n += n_batch
+
+            lo, hi = wilson_interval(successes, n, z=1.96)
+            p = successes / n
+            half_width = 0.5 * (hi - lo)
+            batch_rows.append((n, p, lo, hi, half_width))
+            print(f"  N={n:4d} | Success={p*100:6.2f}% | CI=[{lo*100:5.2f}, {hi*100:5.2f}] | Half-width={half_width*100:5.2f}%")
+
+            if n >= min_samples and half_width <= target_half_width:
+                stop_reason = "target_precision"
+                break
+
+        elapsed = time.time() - t0
+        final_n, final_p, final_lo, final_hi, final_half = batch_rows[-1]
+        print(f"  Stop reason: {stop_reason}")
+        print(f"  Final: N={final_n}, Success={final_p*100:.2f}%, CI=[{final_lo*100:.2f}, {final_hi*100:.2f}]")
+        print(f"  Runtime: {elapsed:.1f}s")
+
+        self._save_table(
+            "monte_carlo_precision_target",
+            ["n", "success_rate", "wilson_low_95", "wilson_high_95", "ci_half_width_95", "target_half_width"],
+            [(row[0], row[1], row[2], row[3], row[4], target_half_width) for row in batch_rows]
+        )
+
+        fig, ax1 = plt.subplots(figsize=(10, 6))
+        n_vals = np.array([r[0] for r in batch_rows], dtype=int)
+        p_vals = np.array([r[1] for r in batch_rows], dtype=float) * 100.0
+        lo_vals = np.array([r[2] for r in batch_rows], dtype=float) * 100.0
+        hi_vals = np.array([r[3] for r in batch_rows], dtype=float) * 100.0
+        hw_vals = np.array([r[4] for r in batch_rows], dtype=float) * 100.0
+
+        ax1.plot(n_vals, p_vals, "b-o", label="Success rate")
+        ax1.fill_between(n_vals, lo_vals, hi_vals, color="b", alpha=0.15, label="Wilson 95% CI")
+        ax1.set_xlabel("Samples N")
+        ax1.set_ylabel("Success Rate (%)", color="b")
+        ax1.tick_params(axis="y", labelcolor="b")
+        ax1.grid(True, alpha=0.3)
+
+        ax2 = ax1.twinx()
+        ax2.plot(n_vals, hw_vals, "r-s", label="CI half-width")
+        ax2.axhline(target_half_width * 100.0, color="r", linestyle="--", alpha=0.7, label="Target half-width")
+        ax2.set_ylabel("CI Half-Width (%)", color="r")
+        ax2.tick_params(axis="y", labelcolor="r")
+
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
+        plt.title("Monte Carlo Precision Target (Adaptive Sample Size)")
+        self._finalize_figure(fig, "monte_carlo_precision_target")
+
+    # 18. GLOBAL SENSITIVITY RANKING (PRCC / SPEARMAN)
+    def analyze_global_sensitivity(self, N_samples=160):
+        debug._print_sub_header(f"18. Global Sensitivity Ranking (N={N_samples})")
+        print("Estimating rank-based sensitivities of terminal metrics to uncertain inputs.")
+
+        if N_samples < 20:
+            print("  Need at least 20 samples for stable rank correlations. Skipping.")
+            return
+
+        opt_res = self._get_baseline_opt_res()
+        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        rows = []
+        X = []
+        y_alt = []
+        y_vel = []
+        y_fuel = []
+
+        for i in range(N_samples):
+            thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
+            result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
+            tm = result["terminal"]
+            alt_err = tm["alt_err_m"] if tm["terminal_valid"] else np.nan
+            vel_err = tm["vel_err_m_s"] if tm["terminal_valid"] else np.nan
+            fuel_margin = tm["fuel_margin_kg"] if tm["terminal_valid"] else np.nan
+            rows.append((
+                i + 1, thrust_mult, isp_mult, dens_mult,
+                alt_err, vel_err, fuel_margin, int(tm["strict_ok"]), tm["status"]
+            ))
+            if np.isfinite(alt_err) and np.isfinite(vel_err) and np.isfinite(fuel_margin):
+                X.append([thrust_mult, isp_mult, dens_mult])
+                y_alt.append(alt_err)
+                y_vel.append(vel_err)
+                y_fuel.append(fuel_margin)
+
+        self._save_table(
+            "global_sensitivity_samples",
+            [
+                "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
+                "altitude_error_m", "velocity_error_m_s", "fuel_margin_kg", "strict_success", "status"
+            ],
+            rows
+        )
+
+        X = np.array(X, dtype=float)
+        if X.shape[0] < 40:
+            print("  Too few valid terminal states for robust sensitivity ranking. Skipping.")
+            return
+
+        var_names = ["thrust_multiplier", "isp_multiplier", "density_multiplier"]
+
+        def prcc(X_in, y_in):
+            y_rank = self._rankdata(y_in)
+            X_rank = np.column_stack([self._rankdata(X_in[:, j]) for j in range(X_in.shape[1])])
+            vals = []
+            for j in range(X_rank.shape[1]):
+                others = [k for k in range(X_rank.shape[1]) if k != j]
+                if len(others) == 0:
+                    vals.append(self._corr(X_rank[:, j], y_rank))
+                    continue
+                Z = np.column_stack([np.ones(len(y_rank)), X_rank[:, others]])
+                beta_x = np.linalg.lstsq(Z, X_rank[:, j], rcond=None)[0]
+                beta_y = np.linalg.lstsq(Z, y_rank, rcond=None)[0]
+                rx = X_rank[:, j] - Z @ beta_x
+                ry = y_rank - Z @ beta_y
+                vals.append(self._corr(rx, ry))
+            return np.array(vals, dtype=float)
+
+        spearman_alt = np.array([self._corr(self._rankdata(X[:, j]), self._rankdata(y_alt)) for j in range(X.shape[1])])
+        spearman_vel = np.array([self._corr(self._rankdata(X[:, j]), self._rankdata(y_vel)) for j in range(X.shape[1])])
+        spearman_fuel = np.array([self._corr(self._rankdata(X[:, j]), self._rankdata(y_fuel)) for j in range(X.shape[1])])
+        prcc_alt = prcc(X, np.array(y_alt, dtype=float))
+        prcc_vel = prcc(X, np.array(y_vel, dtype=float))
+        prcc_fuel = prcc(X, np.array(y_fuel, dtype=float))
+
+        summary_rows = []
+        for i, name in enumerate(var_names):
+            summary_rows.append((
+                name,
+                float(spearman_alt[i]), float(prcc_alt[i]),
+                float(spearman_vel[i]), float(prcc_vel[i]),
+                float(spearman_fuel[i]), float(prcc_fuel[i])
+            ))
+        self._save_table(
+            "global_sensitivity_ranking",
+            [
+                "variable",
+                "spearman_altitude_error", "prcc_altitude_error",
+                "spearman_velocity_error", "prcc_velocity_error",
+                "spearman_fuel_margin", "prcc_fuel_margin"
+            ],
+            summary_rows
+        )
+
+        print("  PRCC ranking by |value| (Fuel Margin):")
+        order = np.argsort(np.abs(prcc_fuel))[::-1]
+        for idx in order:
+            print(f"    {var_names[idx]:<20}: {prcc_fuel[idx]: .3f}")
+
+        fig = plt.figure(figsize=(10, 6))
+        x = np.arange(len(var_names))
+        w = 0.25
+        plt.bar(x - w, np.abs(prcc_alt), width=w, label='|PRCC| Altitude Error')
+        plt.bar(x, np.abs(prcc_vel), width=w, label='|PRCC| Velocity Error')
+        plt.bar(x + w, np.abs(prcc_fuel), width=w, label='|PRCC| Fuel Margin')
+        plt.xticks(x, var_names, rotation=15)
+        plt.ylabel("Absolute PRCC")
+        plt.title("Global Sensitivity Ranking (Rank-Based Partial Correlation)")
+        plt.grid(True, axis="y", alpha=0.3)
+        plt.legend()
+        self._finalize_figure(fig, "global_sensitivity_ranking")
+
+    # 19. CONSTRAINT RELIABILITY CURVES
+    def analyze_constraint_reliability(self, N_samples=180):
+        debug._print_sub_header(f"19. Constraint Reliability Curves (N={N_samples})")
+        print("Tracking cumulative probabilities of key constraint violations under uncertainty.")
+
+        if N_samples < 20:
+            print("  Need at least 20 samples for reliability curves. Skipping.")
+            return
+
+        opt_res = self._get_baseline_opt_res()
+        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        run_rows = []
+        cumulative_rows = []
+
+        count_orbit = 0
+        count_fuel = 0
+        count_q = 0
+        count_g = 0
+        count_any = 0
+
+        for i in range(N_samples):
+            thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
+            result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
+            tm = result["terminal"]
+            tr = result["trajectory"]
+
+            orbit_fail = int((not tm["terminal_valid"]) or (not tm["orbit_ok"]))
+            fuel_fail = int((not tm["terminal_valid"]) or (not tm["fuel_ok"]))
+            q_violate = int((not tr["valid"]) or tr["q_violation"])
+            g_violate = int((not tr["valid"]) or tr["g_violation"])
+            any_fail = int(orbit_fail or fuel_fail or q_violate or g_violate)
+
+            count_orbit += orbit_fail
+            count_fuel += fuel_fail
+            count_q += q_violate
+            count_g += g_violate
+            count_any += any_fail
+            n = i + 1
+
+            cumulative_rows.append((
+                n,
+                count_orbit / n,
+                count_fuel / n,
+                count_q / n,
+                count_g / n,
+                count_any / n
+            ))
+            run_rows.append((
+                n,
+                thrust_mult,
+                isp_mult,
+                dens_mult,
+                int(tm["terminal_valid"]),
+                int(tm["orbit_ok"]),
+                int(tm["fuel_ok"]),
+                float(tm["fuel_margin_kg"]),
+                int(tr["valid"]),
+                float(tr["max_q_pa"]),
+                float(tr["max_g"]),
+                orbit_fail,
+                fuel_fail,
+                q_violate,
+                g_violate,
+                any_fail
+            ))
+
+        self._save_table(
+            "constraint_reliability_runs",
+            [
+                "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
+                "terminal_valid", "orbit_ok", "fuel_ok", "fuel_margin_kg",
+                "trajectory_valid", "max_q_pa", "max_g",
+                "orbit_fail", "fuel_fail", "q_violation", "g_violation", "any_failure"
+            ],
+            run_rows
+        )
+        self._save_table(
+            "constraint_reliability_curves",
+            ["n", "p_orbit_fail", "p_fuel_fail", "p_q_violate", "p_g_violate", "p_any_failure"],
+            cumulative_rows
+        )
+
+        print("  Final violation probabilities:")
+        labels = [("orbit", count_orbit), ("fuel", count_fuel), ("max_q", count_q), ("max_g", count_g), ("any", count_any)]
+        for name, c in labels:
+            lo, hi = wilson_interval(c, N_samples, z=1.96)
+            print(f"    {name:<6}: {100*c/N_samples:6.2f}%  CI=[{100*lo:5.2f}, {100*hi:5.2f}]")
+
+        n_vals = np.array([r[0] for r in cumulative_rows], dtype=int)
+        p_orbit = np.array([r[1] for r in cumulative_rows], dtype=float)
+        p_fuel = np.array([r[2] for r in cumulative_rows], dtype=float)
+        p_q = np.array([r[3] for r in cumulative_rows], dtype=float)
+        p_g = np.array([r[4] for r in cumulative_rows], dtype=float)
+        p_any = np.array([r[5] for r in cumulative_rows], dtype=float)
+
+        fig = plt.figure(figsize=(10, 6))
+        plt.plot(n_vals, 100.0 * p_orbit, label="Orbit fail")
+        plt.plot(n_vals, 100.0 * p_fuel, label="Fuel fail")
+        plt.plot(n_vals, 100.0 * p_q, label="Max-Q violation")
+        plt.plot(n_vals, 100.0 * p_g, label="Max-G violation")
+        plt.plot(n_vals, 100.0 * p_any, "k--", linewidth=2, label="Any failure")
+        plt.xlabel("Samples N")
+        plt.ylabel("Violation Probability (%)")
+        plt.title("Constraint Reliability Curves (Cumulative)")
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        self._finalize_figure(fig, "constraint_reliability_curves")
+
+    # 20. DISTRIBUTION ROBUSTNESS STUDY
+    def analyze_distribution_robustness(self, N_per_model=100):
+        debug._print_sub_header(f"20. Distribution Robustness (N={N_per_model} per model)")
+        print("Comparing reliability outcomes under different uncertainty distribution assumptions.")
+
+        if N_per_model < 20:
+            print("  Need at least 20 samples per model. Skipping.")
+            return
+
+        opt_res = self._get_baseline_opt_res()
+        models = [
+            "gaussian_independent",
+            "uniform_bounded",
+            "gaussian_correlated"
+        ]
+        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        run_rows = []
+        summary_rows = []
+
+        for model in models:
+            success = 0
+            q_viol = 0
+            g_viol = 0
+            invalid = 0
+            for i in range(N_per_model):
+                thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model=model)
+                result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
+                tm = result["terminal"]
+                tr = result["trajectory"]
+                success += int(tm["strict_ok"])
+                q_viol += int((not tr["valid"]) or tr["q_violation"])
+                g_viol += int((not tr["valid"]) or tr["g_violation"])
+                invalid += int(not tm["terminal_valid"])
+                run_rows.append((
+                    model, i + 1, thrust_mult, isp_mult, dens_mult,
+                    int(tm["strict_ok"]), int(tm["terminal_valid"]),
+                    int((not tr["valid"]) or tr["q_violation"]),
+                    int((not tr["valid"]) or tr["g_violation"]),
+                    tm["status"]
+                ))
+
+            p_success = success / N_per_model
+            lo, hi = wilson_interval(success, N_per_model, z=1.96)
+            summary_rows.append((
+                model, N_per_model, p_success, lo, hi,
+                q_viol / N_per_model, g_viol / N_per_model, invalid / N_per_model
+            ))
+            print(f"  {model:<22} | Success={p_success*100:6.2f}% | CI=[{lo*100:5.2f}, {hi*100:5.2f}]")
+
+        self._save_table(
+            "distribution_robustness_runs",
+            [
+                "model", "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
+                "strict_success", "terminal_valid", "q_violation", "g_violation", "status"
+            ],
+            run_rows
+        )
+        self._save_table(
+            "distribution_robustness_summary",
+            [
+                "model", "n", "success_rate", "wilson_low_95", "wilson_high_95",
+                "q_violation_rate", "g_violation_rate", "invalid_terminal_rate"
+            ],
+            summary_rows
+        )
+
+        models_plot = [r[0] for r in summary_rows]
+        rates = np.array([r[2] for r in summary_rows], dtype=float) * 100.0
+        lo = np.array([r[3] for r in summary_rows], dtype=float) * 100.0
+        hi = np.array([r[4] for r in summary_rows], dtype=float) * 100.0
+        err = np.vstack([rates - lo, hi - rates])
+
+        fig = plt.figure(figsize=(10, 6))
+        plt.bar(models_plot, rates, yerr=err, capsize=6, alpha=0.8, color=["tab:blue", "tab:orange", "tab:green"])
+        plt.ylabel("Strict Success Rate (%)")
+        plt.title("Distribution Robustness: Success Rate Across Uncertainty Models")
+        plt.grid(True, axis="y", alpha=0.3)
+        self._finalize_figure(fig, "distribution_robustness_success")
+
+    # 21. EVENT-TIME CONVERGENCE
+    def analyze_event_time_convergence(self):
+        debug._print_sub_header("21. Event-Time Convergence vs Integrator Tolerance")
+        print("Checking convergence of key event times (Max-Q, Max-G, staging, depletion).")
+
+        opt_res = self._get_baseline_opt_res()
+        tols = [
+            (1e-6, 1e-9), (1e-7, 1e-10), (1e-8, 1e-11), (1e-9, 1e-12), (1e-10, 1e-13), (1e-12, 1e-14)
+        ]
+        rows = []
+        diagnostics = []
+        for rtol, atol in tols:
+            with suppress_stdout():
+                sim_res = run_simulation(opt_res, self.veh, self.base_config, rtol=rtol, atol=atol)
+            diag = self._trajectory_diagnostics(sim_res, self.veh, self.base_config)
+            diagnostics.append(diag)
+            rows.append((
+                rtol, atol, diag["max_q_time_s"], diag["max_g_time_s"], diag["staging_time_s"], diag["depletion_time_s"]
+            ))
+
+        ref = diagnostics[-1]
+        drift_rows = []
+        for i, (rtol, atol) in enumerate(tols):
+            d = diagnostics[i]
+            def drift(a, b):
+                if np.isfinite(a) and np.isfinite(b):
+                    return abs(a - b)
+                return np.nan
+            drift_rows.append((
+                rtol, atol,
+                drift(d["max_q_time_s"], ref["max_q_time_s"]),
+                drift(d["max_g_time_s"], ref["max_g_time_s"]),
+                drift(d["staging_time_s"], ref["staging_time_s"]),
+                drift(d["depletion_time_s"], ref["depletion_time_s"])
+            ))
+
+        self._save_table(
+            "event_time_convergence",
+            [
+                "rtol", "atol", "t_max_q_s", "t_max_g_s", "t_staging_s", "t_depletion_s",
+                "drift_max_q_s", "drift_max_g_s", "drift_staging_s", "drift_depletion_s"
+            ],
+            [
+                (
+                    rows[i][0], rows[i][1], rows[i][2], rows[i][3], rows[i][4], rows[i][5],
+                    drift_rows[i][2], drift_rows[i][3], drift_rows[i][4], drift_rows[i][5]
+                )
+                for i in range(len(rows))
+            ]
+        )
+
+        rtols = np.array([r[0] for r in drift_rows[:-1]], dtype=float)
+        d_q = np.array([r[2] for r in drift_rows[:-1]], dtype=float)
+        d_g = np.array([r[3] for r in drift_rows[:-1]], dtype=float)
+
+        fig = plt.figure(figsize=(10, 6))
+        plt.loglog(rtols, d_q, "o-", label="|Δt Max-Q|")
+        plt.loglog(rtols, d_g, "s-", label="|Δt Max-G|")
+        plt.gca().invert_xaxis()
+        plt.xlabel("Integrator Relative Tolerance (rtol)")
+        plt.ylabel("Event Time Drift vs Tightest Tolerance (s)")
+        plt.title("Event-Time Convergence")
+        plt.grid(True, which="both", alpha=0.3)
+        plt.legend()
+        self._finalize_figure(fig, "event_time_convergence")
+
+    # 22. BIFURCATION 2D MAP
+    def analyze_bifurcation_2d_map(self, n_thrust=11, n_density=11):
+        debug._print_sub_header("22. Bifurcation 2D Map (Thrust x Density)")
+        print("Mapping open-loop success and fuel margin over a 2D parameter grid.")
+
+        opt_res = self._get_baseline_opt_res()
+        if not opt_res.get("success", False):
+            print("  Baseline optimization failed. Skipping.")
+            return
+
+        n_thrust = max(3, int(n_thrust))
+        n_density = max(3, int(n_density))
+        thrust_vals = np.linspace(0.94, 1.06, n_thrust)
+        density_vals = np.linspace(0.80, 1.20, n_density)
+        success_map = np.zeros((len(density_vals), len(thrust_vals)), dtype=float)
+        margin_map = np.full((len(density_vals), len(thrust_vals)), np.nan, dtype=float)
+        rows = []
+
+        for iy, dens in enumerate(density_vals):
+            for ix, thrust in enumerate(thrust_vals):
+                result = self._simulate_uncertainty_case(opt_res, thrust, 1.0, dens)
+                tm = result["terminal"]
+                success = int(tm["strict_ok"])
+                margin = tm["fuel_margin_kg"] if tm["terminal_valid"] else np.nan
+                success_map[iy, ix] = success
+                margin_map[iy, ix] = margin
+                rows.append((
+                    float(thrust), float(dens), int(success), float(margin),
+                    float(tm["alt_err_m"]), float(tm["vel_err_m_s"]), tm["status"]
+                ))
+
+        self._save_table(
+            "bifurcation_2d_map",
+            [
+                "thrust_multiplier", "density_multiplier", "strict_success",
+                "fuel_margin_kg", "altitude_error_m", "velocity_error_m_s", "status"
+            ],
+            rows
+        )
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        im1 = ax1.imshow(
+            success_map,
+            origin="lower",
+            aspect="auto",
+            extent=[thrust_vals[0], thrust_vals[-1], density_vals[0], density_vals[-1]],
+            vmin=0,
+            vmax=1,
+            cmap="RdYlGn"
+        )
+        ax1.set_xlabel("Thrust Multiplier")
+        ax1.set_ylabel("Density Multiplier")
+        ax1.set_title("Strict Success Map")
+        fig.colorbar(im1, ax=ax1, label="Success (0/1)")
+
+        im2 = ax2.imshow(
+            margin_map,
+            origin="lower",
+            aspect="auto",
+            extent=[thrust_vals[0], thrust_vals[-1], density_vals[0], density_vals[-1]],
+            cmap="coolwarm"
+        )
+        ax2.set_xlabel("Thrust Multiplier")
+        ax2.set_ylabel("Density Multiplier")
+        ax2.set_title("Fuel Margin Map (kg)")
+        fig.colorbar(im2, ax=ax2, label="Fuel Margin (kg)")
+        ax2.contour(
+            thrust_vals, density_vals, margin_map,
+            levels=[0.0], colors="k", linewidths=1.2
+        )
+        self._finalize_figure(fig, "bifurcation_2d_map")
+        print(f">>> {debug.Style.GREEN}PASS: 2D bifurcation map generated.{debug.Style.RESET}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reliability and robustness analysis suite.")
