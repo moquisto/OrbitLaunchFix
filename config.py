@@ -154,6 +154,26 @@ class TwoStageRocketConfig:
                 self.stage_2.dry_mass + self.stage_2.propellant_mass +
                 self.payload_mass)
 
+
+@dataclass
+class ReliabilityAnalysisToggles:
+    """
+    Enables/disables each analysis block in relabilityanalysis.py.
+    """
+    stiffness_convergence: bool = True
+    monte_carlo_convergence: bool = False
+    grid_independence: bool = False
+    integrator_tolerance: bool = False
+    corner_cases: bool = False
+    finite_time_sensitivity: bool = False
+    bifurcation: bool = False
+    theoretical_efficiency: bool = False
+    drift: bool = False
+    energy_balance: bool = False
+    control_slew: bool = False
+    aerodynamics: bool = False
+    lagrange_multipliers: bool = False
+
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(
     name="SpaceX Starship IFT-6 (Booster 13 / Ship 31)",
@@ -227,3 +247,7 @@ StarshipBlock2 = TwoStageRocketConfig(
 
 # Default Environment Instance
 EARTH_CONFIG = EnvConfig()
+
+# Reliability analysis switches.
+# Set any field to False to skip that test in ReliabilitySuite.run_all().
+RELIABILITY_ANALYSIS_TOGGLES = ReliabilityAnalysisToggles()
