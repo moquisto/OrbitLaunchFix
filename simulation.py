@@ -22,12 +22,10 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
     # --- 2. SETUP CONTROL INTERPOLATORS ---
     # Phase 1
     N1 = U1.shape[1]
-    # Time grid for controls (nodes)
-    t_grid_1 = np.linspace(0, T1, N1 + 1)
-    # Augment controls to match time grid (repeat last control)
-    U1_aug = np.hstack([U1, U1[:, -1:]])
-    # Use 'linear' to eliminate discretization artifacts (sawtooth) in AoA
-    ctrl_func_1 = interp1d(t_grid_1, U1_aug, axis=1, kind='linear', 
+   # Time grid for controls (start of each interval)
+    t_grid_1 = np.linspace(0, T1, N1 + 1)[:-1]
+    # Use 'previous' to match Direct Collocation (constant control per node)
+    ctrl_func_1 = interp1d(t_grid_1, U1, axis=1, kind='previous',  
                            fill_value="extrapolate", bounds_error=False)
 
     # --- DEBUG: Verify Control Handoff ---
@@ -42,9 +40,8 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
 
     # Phase 3
     N3 = U3.shape[1]
-    t_grid_3 = np.linspace(0, T3, N3 + 1)
-    U3_aug = np.hstack([U3, U3[:, -1:]])
-    ctrl_func_3 = interp1d(t_grid_3, U3_aug, axis=1, kind='linear', 
+    t_grid_3 = np.linspace(0, T3, N3 + 1)[:-1]
+    ctrl_func_3 = interp1d(t_grid_3, U3, axis=1, kind='previous', 
                            fill_value="extrapolate", bounds_error=False)
 
     # --- DEBUG: Verify Control Handoff (Phase 3) ---
