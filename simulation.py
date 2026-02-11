@@ -165,19 +165,10 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
     print("  [Staging Check]")
     vehicle.diagnose_forces(y_current, U3[0,0], U3[1:,0], t_current, "ship")
     
-    # --- DEFINE CUTOFF EVENTS (Closed-Loop Logic) ---
-    # 1. Target Velocity (SECO)
-    R_eq = vehicle.env.config.earth_radius_equator
-    mu = vehicle.env.config.earth_mu
-    target_r = R_eq + config.target_altitude
-    target_v = np.sqrt(mu / target_r)
-    
-    def seco_event(t, y):
-        return np.linalg.norm(y[3:6]) - target_v
-    seco_event.terminal = True
-    seco_event.direction = 1
-    
-    # 2. Propellant Depletion
+    # --- DEFINE CUTOFF EVENTS ---
+    # Verification should remain open-loop: fly the optimized control schedule
+    # for its planned duration and only terminate early on hard failure cases.
+    # 1. Propellant Depletion
     m_dry_s2 = config.stage_2.dry_mass + config.payload_mass
     def depletion_event(t, y):
         return y[6] - m_dry_s2
@@ -186,9 +177,9 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
 
     res3 = solve_ivp(
         fun=lambda t, y: sim_dynamics(t, y, "ship", t_current, ctrl_func_3),
-        t_span=(t_current, t_current + T3 * 1.15), # Allow 15% extra time for low-thrust cases
+        t_span=(t_current, t_current + T3),
         y0=y_current,
-        events=[altitude_event, seco_event, depletion_event],
+        events=[altitude_event, depletion_event],
         rtol=rtol, atol=atol,
         method='RK45'
     )
