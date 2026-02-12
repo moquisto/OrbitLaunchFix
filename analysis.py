@@ -235,18 +235,25 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
             isp_eff = stage.isp_vac + (env_state['pressure'] / stage.p_sl) * (stage.isp_sl - stage.isp_vac)
             thrust_force = throttle * stage.thrust_vac * (isp_eff / stage.isp_vac)
             
-            weight = y_sim[6, i] * np.linalg.norm(env_state['gravity'])
-            
-            sim_metrics['tw'].append(thrust_force / weight)
-            g0 = environment.config.g0
-            sim_metrics['g_load'].append((thrust_force / y_sim[6, i]) / g0)
-            
-            # Drag Force (kN)
+            mass_i = y_sim[6, i]
+            weight = mass_i * np.linalg.norm(env_state['gravity'])
+            sim_metrics['tw'].append(thrust_force / max(weight, 1e-9))
+
+            # Drag Force
             cd_table = stage.aero.mach_cd_table
-            cd_base = np.interp(mach, cd_table[:,0], cd_table[:,1])
+            cd_base = np.interp(mach, cd_table[:, 0], cd_table[:, 1])
             sin_alpha = np.sin(np.radians(alpha_deg))
             cd_total = cd_base + stage.aero.cd_crossflow_factor * sin_alpha**2
             drag_force = q * stage.aero.reference_area * cd_total
+
+            # Sensed acceleration excludes gravity: a_sensed = (F_thrust + F_drag) / m.
+            thrust_vec = thrust_force * thrust_dir
+            if v_rel_mag > 1e-9:
+                drag_vec = -drag_force * vel_dir
+            else:
+                drag_vec = np.zeros(3)
+            sensed_acc = np.linalg.norm(thrust_vec + drag_vec) / max(mass_i, 1e-9)
+            sim_metrics['g_load'].append(sensed_acc / environment.config.g0)
             
             sim_metrics['thrust'].append(thrust_force / 1000.0)
             sim_metrics['drag'].append(drag_force / 1000.0)
