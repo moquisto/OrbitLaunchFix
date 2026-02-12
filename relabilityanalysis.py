@@ -86,7 +86,15 @@ def gaussian_2d_coverage(n_std):
     return 1.0 - np.exp(-0.5 * n * n)
 
 
-def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_s=20.0):
+def evaluate_terminal_state(
+    sim_res,
+    cfg,
+    env_cfg,
+    alt_tol_m=10000.0,
+    vel_tol_m_s=20.0,
+    radial_vel_tol_m_s=25.0,
+    inc_tol_deg=0.75
+):
     """
     Centralized terminal-state checker used across reliability analyses.
     Returns a dict with validity flags, errors, and pass/fail status labels.
@@ -102,8 +110,13 @@ def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_
         "v_f_m_s": np.nan,
         "target_alt_m": float(cfg.target_altitude),
         "target_vel_m_s": np.nan,
+        "target_inclination_deg": np.nan,
         "alt_err_m": np.nan,
         "vel_err_m_s": np.nan,
+        "radial_velocity_m_s": np.nan,
+        "fpa_deg": np.nan,
+        "inclination_deg": np.nan,
+        "inclination_err_deg": np.nan,
         "m_final_kg": np.nan,
         "m_dry_limit_kg": float(cfg.stage_2.dry_mass + cfg.payload_mass),
         "fuel_margin_kg": np.nan
@@ -127,6 +140,8 @@ def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_
         return metrics
     if np.any(np.diff(t) < -1e-9):
         return metrics
+    if np.any(y[6, :] <= 0.0):
+        return metrics
 
     final_state = y[:, -1]
     if not np.all(np.isfinite(final_state)) or final_state[6] <= 0.0:
@@ -137,30 +152,66 @@ def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_
         # Catches dummy fallback arrays while still allowing physically crashed trajectories.
         return metrics
 
+    # Trajectory-level physical validity checks.
+    R_eq = env_cfg.earth_radius_equator
+    R_pol = R_eq * (1.0 - env_cfg.earth_flattening)
+    ellipsoid_metric = (y[0, :] / R_eq) ** 2 + (y[1, :] / R_eq) ** 2 + (y[2, :] / R_pol) ** 2
+    ground_impact = bool(np.nanmin(ellipsoid_metric) <= 1.0 + 1e-8)
+    termination = sim_res.get("termination", {})
+    if isinstance(termination, dict) and termination.get("reason") == "ground_impact":
+        ground_impact = True
+    if ground_impact:
+        metrics["status"] = "CRASH"
+        return metrics
+
     r_f = rf - env_cfg.earth_radius_equator
     v_f = np.linalg.norm(final_state[3:6])
     m_final = float(final_state[6])
     target_alt = float(cfg.target_altitude)
     target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
+    target_inc_deg = float(cfg.target_inclination) if cfg.target_inclination is not None else abs(float(env_cfg.launch_latitude))
 
     alt_err = r_f - target_alt
     vel_err = v_f - target_vel
+    radial_speed = float(np.dot(final_state[0:3], final_state[3:6]) / (rf + 1e-12))
+    sin_fpa = np.clip(radial_speed / (v_f + 1e-12), -1.0, 1.0)
+    fpa_deg = float(np.degrees(np.arcsin(sin_fpa)))
+    h_vec = np.cross(final_state[0:3], final_state[3:6])
+    h_mag = np.linalg.norm(h_vec)
+    if h_mag > 1e-12:
+        inclination_deg = float(np.degrees(np.arccos(np.clip(h_vec[2] / h_mag, -1.0, 1.0))))
+        inc_err_deg = inclination_deg - target_inc_deg
+    else:
+        inclination_deg = np.nan
+        inc_err_deg = np.nan
     fuel_margin = m_final - metrics["m_dry_limit_kg"]
 
-    orbit_ok = abs(alt_err) < alt_tol_m and abs(vel_err) < vel_tol_m_s
+    orbit_ok = (
+        abs(alt_err) < alt_tol_m
+        and abs(vel_err) < vel_tol_m_s
+        and abs(radial_speed) < radial_vel_tol_m_s
+        and np.isfinite(inc_err_deg)
+        and abs(inc_err_deg) < inc_tol_deg
+    )
     fuel_ok = fuel_margin > 0.0
     strict_ok = orbit_ok and fuel_ok
 
     metrics.update({
         "terminal_valid": True,
+        "trajectory_valid": True,
         "orbit_ok": orbit_ok,
         "fuel_ok": fuel_ok,
         "strict_ok": strict_ok,
         "r_f_m": r_f,
         "v_f_m_s": v_f,
         "target_vel_m_s": target_vel,
+        "target_inclination_deg": target_inc_deg,
         "alt_err_m": alt_err,
         "vel_err_m_s": vel_err,
+        "radial_velocity_m_s": radial_speed,
+        "fpa_deg": fpa_deg,
+        "inclination_deg": inclination_deg,
+        "inclination_err_deg": inc_err_deg,
         "m_final_kg": m_final,
         "fuel_margin_kg": fuel_margin
     })
@@ -173,9 +224,6 @@ def evaluate_terminal_state(sim_res, cfg, env_cfg, alt_tol_m=10000.0, vel_tol_m_
         metrics["status"] = "MISS"
     else:
         metrics["status"] = "FUEL"
-
-    # Full history already validated above.
-    metrics["trajectory_valid"] = True
 
     return metrics
 
@@ -432,6 +480,18 @@ class ReliabilitySuite:
         if y.shape[1] != len(t) or u.shape[1] != len(t):
             return out
         if not np.all(np.isfinite(t)) or not np.all(np.isfinite(y)) or not np.all(np.isfinite(u)):
+            return out
+        if np.any(y[6, :] <= 0.0):
+            return out
+
+        termination = sim_res.get("termination", {})
+        if isinstance(termination, dict) and termination.get("reason") == "ground_impact":
+            return out
+
+        R_eq = veh.env.config.earth_radius_equator
+        R_pol = R_eq * (1.0 - veh.env.config.earth_flattening)
+        ellipsoid_metric = (y[0, :] / R_eq) ** 2 + (y[1, :] / R_eq) ** 2 + (y[2, :] / R_pol) ** 2
+        if np.min(ellipsoid_metric) <= 1.0 + 1e-8:
             return out
 
         m_stage2_wet = cfg.stage_2.dry_mass + cfg.stage_2.propellant_mass + cfg.payload_mass
@@ -1060,7 +1120,6 @@ class ReliabilitySuite:
             return
             
         lam = np.array(opt_res['lam_g'])
-        g_val = np.array(opt_res['g'])
         
         # Identify active constraints (where g is close to bound and lambda is high)
         max_lam = np.max(np.abs(lam))
@@ -2232,6 +2291,7 @@ class ReliabilitySuite:
         count_fuel = 0
         count_q = 0
         count_g = 0
+        count_invalid_traj = 0
         count_any = 0
 
         for i in range(N_samples):
@@ -2242,14 +2302,18 @@ class ReliabilitySuite:
 
             orbit_fail = int((not tm["terminal_valid"]) or (not tm["orbit_ok"]))
             fuel_fail = int((not tm["terminal_valid"]) or (not tm["fuel_ok"]))
-            q_violate = int((not tr["valid"]) or tr["q_violation"])
-            g_violate = int((not tr["valid"]) or tr["g_violation"])
-            any_fail = int(orbit_fail or fuel_fail or q_violate or g_violate)
+            traj_invalid = int(not tr["valid"])
+            q_violate = int(tr["valid"] and tr["q_violation"])
+            g_violate = int(tr["valid"] and tr["g_violation"])
+            q_fail_conservative = int((not tr["valid"]) or tr["q_violation"])
+            g_fail_conservative = int((not tr["valid"]) or tr["g_violation"])
+            any_fail = int(orbit_fail or fuel_fail or q_fail_conservative or g_fail_conservative)
 
             count_orbit += orbit_fail
             count_fuel += fuel_fail
             count_q += q_violate
             count_g += g_violate
+            count_invalid_traj += traj_invalid
             count_any += any_fail
             n = i + 1
 
@@ -2259,6 +2323,7 @@ class ReliabilitySuite:
                 count_fuel / n,
                 count_q / n,
                 count_g / n,
+                count_invalid_traj / n,
                 count_any / n
             ))
             run_rows.append((
@@ -2277,6 +2342,9 @@ class ReliabilitySuite:
                 fuel_fail,
                 q_violate,
                 g_violate,
+                traj_invalid,
+                q_fail_conservative,
+                g_fail_conservative,
                 any_fail
             ))
 
@@ -2286,18 +2354,30 @@ class ReliabilitySuite:
                 "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
                 "terminal_valid", "orbit_ok", "fuel_ok", "fuel_margin_kg",
                 "trajectory_valid", "max_q_pa", "max_g",
-                "orbit_fail", "fuel_fail", "q_violation", "g_violation", "any_failure"
+                "orbit_fail", "fuel_fail", "q_violation_physical", "g_violation_physical",
+                "trajectory_invalid", "q_fail_conservative", "g_fail_conservative", "any_failure_conservative"
             ],
             run_rows
         )
         self._save_table(
             "constraint_reliability_curves",
-            ["n", "p_orbit_fail", "p_fuel_fail", "p_q_violate", "p_g_violate", "p_any_failure"],
+            [
+                "n", "p_orbit_fail", "p_fuel_fail",
+                "p_q_violate_physical", "p_g_violate_physical",
+                "p_trajectory_invalid", "p_any_failure_conservative"
+            ],
             cumulative_rows
         )
 
         print("  Final violation probabilities:")
-        labels = [("orbit", count_orbit), ("fuel", count_fuel), ("max_q", count_q), ("max_g", count_g), ("any", count_any)]
+        labels = [
+            ("orbit", count_orbit),
+            ("fuel", count_fuel),
+            ("max_q (physical)", count_q),
+            ("max_g (physical)", count_g),
+            ("traj_invalid", count_invalid_traj),
+            ("any (conservative)", count_any),
+        ]
         for name, c in labels:
             lo, hi = wilson_interval(c, N_samples, z=1.96)
             print(f"    {name:<6}: {100*c/N_samples:6.2f}%  CI=[{100*lo:5.2f}, {100*hi:5.2f}]")
@@ -2307,14 +2387,16 @@ class ReliabilitySuite:
         p_fuel = np.array([r[2] for r in cumulative_rows], dtype=float)
         p_q = np.array([r[3] for r in cumulative_rows], dtype=float)
         p_g = np.array([r[4] for r in cumulative_rows], dtype=float)
-        p_any = np.array([r[5] for r in cumulative_rows], dtype=float)
+        p_invalid = np.array([r[5] for r in cumulative_rows], dtype=float)
+        p_any = np.array([r[6] for r in cumulative_rows], dtype=float)
 
         fig = plt.figure(figsize=(10, 6))
         plt.plot(n_vals, 100.0 * p_orbit, label="Orbit fail")
         plt.plot(n_vals, 100.0 * p_fuel, label="Fuel fail")
-        plt.plot(n_vals, 100.0 * p_q, label="Max-Q violation")
-        plt.plot(n_vals, 100.0 * p_g, label="Max-G violation")
-        plt.plot(n_vals, 100.0 * p_any, "k--", linewidth=2, label="Any failure")
+        plt.plot(n_vals, 100.0 * p_q, label="Max-Q violation (physical)")
+        plt.plot(n_vals, 100.0 * p_g, label="Max-G violation (physical)")
+        plt.plot(n_vals, 100.0 * p_invalid, "m-.", linewidth=1.5, label="Trajectory invalid")
+        plt.plot(n_vals, 100.0 * p_any, "k--", linewidth=2, label="Any failure (conservative)")
         plt.xlabel("Samples N")
         plt.ylabel("Violation Probability (%)")
         plt.title("Constraint Reliability Curves (Cumulative)")
@@ -2345,19 +2427,28 @@ class ReliabilitySuite:
             success = 0
             q_viol = 0
             g_viol = 0
-            invalid = 0
+            q_fail_cons = 0
+            g_fail_cons = 0
+            invalid_terminal = 0
+            invalid_traj = 0
             for i in range(N_per_model):
                 thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model=model)
                 result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
                 tm = result["terminal"]
                 tr = result["trajectory"]
                 success += int(tm["strict_ok"])
-                q_viol += int((not tr["valid"]) or tr["q_violation"])
-                g_viol += int((not tr["valid"]) or tr["g_violation"])
-                invalid += int(not tm["terminal_valid"])
+                q_viol += int(tr["valid"] and tr["q_violation"])
+                g_viol += int(tr["valid"] and tr["g_violation"])
+                q_fail_cons += int((not tr["valid"]) or tr["q_violation"])
+                g_fail_cons += int((not tr["valid"]) or tr["g_violation"])
+                invalid_terminal += int(not tm["terminal_valid"])
+                invalid_traj += int(not tr["valid"])
                 run_rows.append((
                     model, i + 1, thrust_mult, isp_mult, dens_mult,
                     int(tm["strict_ok"]), int(tm["terminal_valid"]),
+                    int(tr["valid"]),
+                    int(tr["valid"] and tr["q_violation"]),
+                    int(tr["valid"] and tr["g_violation"]),
                     int((not tr["valid"]) or tr["q_violation"]),
                     int((not tr["valid"]) or tr["g_violation"]),
                     tm["status"]
@@ -2367,7 +2458,12 @@ class ReliabilitySuite:
             lo, hi = wilson_interval(success, N_per_model, z=1.96)
             summary_rows.append((
                 model, N_per_model, p_success, lo, hi,
-                q_viol / N_per_model, g_viol / N_per_model, invalid / N_per_model
+                q_viol / N_per_model,
+                g_viol / N_per_model,
+                q_fail_cons / N_per_model,
+                g_fail_cons / N_per_model,
+                invalid_terminal / N_per_model,
+                invalid_traj / N_per_model
             ))
             print(f"  {model:<22} | Success={p_success*100:6.2f}% | CI=[{lo*100:5.2f}, {hi*100:5.2f}]")
 
@@ -2375,7 +2471,9 @@ class ReliabilitySuite:
             "distribution_robustness_runs",
             [
                 "model", "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
-                "strict_success", "terminal_valid", "q_violation", "g_violation", "status"
+                "strict_success", "terminal_valid", "trajectory_valid",
+                "q_violation_physical", "g_violation_physical",
+                "q_fail_conservative", "g_fail_conservative", "status"
             ],
             run_rows
         )
@@ -2383,7 +2481,9 @@ class ReliabilitySuite:
             "distribution_robustness_summary",
             [
                 "model", "n", "success_rate", "wilson_low_95", "wilson_high_95",
-                "q_violation_rate", "g_violation_rate", "invalid_terminal_rate"
+                "q_violation_rate_physical", "g_violation_rate_physical",
+                "q_fail_rate_conservative", "g_fail_rate_conservative",
+                "invalid_terminal_rate", "invalid_trajectory_rate"
             ],
             summary_rows
         )

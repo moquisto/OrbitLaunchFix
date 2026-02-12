@@ -33,7 +33,7 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
         try:
             env_state = environment.get_state_sim(r, t)
             wind_vel = env_state['wind_velocity']
-        except:
+        except Exception:
             # Fallback if environment not fully initialized
             wind_vel = np.zeros(3)
             
@@ -94,6 +94,13 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
         throttle, direction = guidance_law(t, y, phase)
         return vehicle.get_dynamics(y, throttle, direction, t, stage_mode=phase, scaling=None)
 
+    def resample_history(t_raw, y_raw, t_grid):
+        # Robust fallback: if integration ended immediately, keep a constant state guess.
+        if len(t_raw) < 2 or np.allclose(t_raw, t_raw[0]):
+            return np.repeat(y_raw[:, -1][:, None], len(t_grid), axis=1)
+        f_interp = interp1d(t_raw, y_raw, axis=1, kind='linear', fill_value="extrapolate")
+        return f_interp(t_grid)
+
     # --- 2. Simulate Phase 1 (Booster Ascent) ---
     # Initial State
     r0, v0 = environment.get_launch_site_state()
@@ -141,8 +148,7 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
     t_grid_1 = np.linspace(0, t1_final, num_nodes + 1)
     
     # Interpolate state
-    f_interp_1 = interp1d(t1_raw, y1_raw, axis=1, kind='linear', fill_value="extrapolate")
-    X1_guess = f_interp_1(t_grid_1)
+    X1_guess = resample_history(t1_raw, y1_raw, t_grid_1)
     
     # Recalculate controls (TH1, TD1) at these grid points
     t_ctrl_1 = t_grid_1[:-1]
@@ -182,8 +188,7 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
         
         # Resample
         t_grid_2 = np.linspace(t1_final, t_end_coast, num_nodes + 1)
-        f_interp_2 = interp1d(t2_raw, y2_raw, axis=1, kind='linear', fill_value="extrapolate")
-        X2_guess = f_interp_2(t_grid_2)
+        X2_guess = resample_history(t2_raw, y2_raw, t_grid_2)
         
         y_prev = y2_raw[:, -1]
         t_start_phase3 = t_end_coast
@@ -218,8 +223,7 @@ def get_initial_guess(mission_config, vehicle, environment, num_nodes=50):
     
     # Resample
     t_grid_3 = np.linspace(t_start_phase3, t3_final, num_nodes + 1)
-    f_interp_3 = interp1d(t3_raw, y3_raw, axis=1, kind='linear', fill_value="extrapolate")
-    X3_guess = f_interp_3(t_grid_3)
+    X3_guess = resample_history(t3_raw, y3_raw, t_grid_3)
     
     # Recalculate controls
     t_ctrl_3 = t_grid_3[:-1]
