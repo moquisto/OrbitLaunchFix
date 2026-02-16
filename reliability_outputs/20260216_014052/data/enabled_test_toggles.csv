@@ -1,0 +1,15 @@
+toggle,enabled
+bifurcation,1
+bifurcation_2d_map,1
+collocation_defect_audit,1
+conservative_invariants,1
+drift,1
+event_time_convergence,1
+finite_time_sensitivity,1
+global_sensitivity,1
+grid_independence,1
+initial_guess_robustness,1
+integrator_tolerance,1
+monte_carlo_precision_target,1
+smooth_integrator_benchmark,1
+theoretical_efficiency,1
