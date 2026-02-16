@@ -6,7 +6,7 @@ This project implements a high-fidelity trajectory optimization and simulation f
 The core philosophy of this project is **"Optimize-then-Simulate"**:
 1.  **Optimize**: Use **CasADi** and **IPOPT** (Interior Point Optimizer) to find the mathematically optimal trajectory.
 2.  **Simulate**: Verify the solution using **SciPy** (`solve_ivp`) in a rigorous forward-time simulation to ensure physical validity.
-3.  **Verify**: Run extensive reliability checks (Monte Carlo, Grid Independence, Energy Balance) to guarantee robustness.
+3.  **Verify**: Run targeted reliability checks to quantify optimality credibility, numerical/statistical uncertainty, and code reliability.
 
 ## Key Features
 
@@ -27,11 +27,10 @@ The core philosophy of this project is **"Optimize-then-Simulate"**:
     *   **Throttling**: Constrains engine throttle between 40% and 100%.
 
 ### 3. Reliability & Analysis Suite
-*   **Monte Carlo Dispersion**: Tests trajectory robustness against parameter variations (Thrust, ISP, Density).
-*   **Grid Independence**: Verifies that the optimization result is not an artifact of the discretization mesh.
-*   **Physics Audits**: Checks Energy Balance (Work-Energy Theorem) and Integrator Tolerance drift.
-*   **Corner Case Analysis**: Tests the vehicle in worst-case scenarios (Low Thrust + High Drag).
-*   **Global Heatmap**: Can simulate launch costs from any latitude on Earth.
+*   **Q1 (Optimality Credibility)**: Grid Independence, Collocation Defect Audit, Initial-Guess Robustness, and Theoretical Delta-V Efficiency.
+*   **Q2 (Accuracy & Uncertainty)**: Integrator Tolerance, Event-Time Convergence, Monte Carlo Precision Target, and Global Sensitivity Ranking.
+*   **Q3 (Code Reliability)**: Optimizer-vs-Simulator Drift plus numerical sanity benchmarks.
+*   **Q5/Q7 (Behavior & Conclusion Support)**: Bifurcation sweeps and finite-time sensitivity for open-loop fragility evidence.
 
 ## File Structure
 
@@ -48,7 +47,7 @@ The core philosophy of this project is **"Optimize-then-Simulate"**:
 ### Analysis & Tools
 *   **`analysis.py`**: Visualization tools to plot trajectory, velocity, dynamic pressure (Q), and AoA.
 *   **`debug.py`**: Extensive diagnostic suite. Checks scaling, physics consistency, and post-flight metrics (Delta-V budget, orbital elements).
-*   **`relabilityanalysis.py`**: Runs a battery of stress tests (Monte Carlo, Corner Cases, Grid Independence) to validate the solver's robustness.
+*   **`relabilityanalysis.py`**: Runs the report-focused reliability suite (optimality credibility, uncertainty quantification, drift checks, bifurcation, and sensitivity).
 *   **`testplot.py`**: Generates a global heatmap showing fuel consumption vs. Launch Latitude.
 
 ## Installation & Requirements
@@ -72,11 +71,39 @@ Run the main script to optimize the trajectory for the configuration defined in 
 *   Interactive plots: Altitude, Velocity, Ground Track, AoA, Forces, and 3D Trajectory.
 
 ### 2. Reliability Analysis
-Run the full validation suite to stress-test the solution:
+Run the report-focused validation suite:
 
     ```bash
     python relabilityanalysis.py
     ```
+
+## Final Report Questions and Evidence
+
+The reliability suite is scoped to answer the following report questions:
+
+1. **Q1: Have we found a credible minimum-fuel solution (within this model)?**
+   * **Tests**: `grid_independence`, `collocation_defect_audit`, `initial_guess_robustness`, `theoretical_efficiency`.
+   * **Role**: Shows the solution is not a mesh artifact, satisfies dynamics consistently, is not overly warm-start dependent, and is benchmarked against a theoretical delta-v floor.
+
+2. **Q2: How accurate is the result, and where does uncertainty lie?**
+   * **Tests**: `integrator_tolerance`, `event_time_convergence`, `monte_carlo_precision_target`, `global_sensitivity`.
+   * **Role**: Quantifies numerical sensitivity to integrator settings and statistical uncertainty under parameter variation (with absolute + relative CI precision targets), then ranks dominant uncertainty drivers with bootstrap confidence intervals.
+
+3. **Q3: Is the code working as intended and reliable?**
+   * **Tests**: `drift`, `smooth_integrator_benchmark`, `conservative_invariants`.
+   * **Role**: Verifies optimizer/simulator consistency and checks integrator behavior in controlled benchmark scenarios.
+
+4. **Q5: How close are we to cliff-edge failure behavior?**
+   * **Tests**: `bifurcation`, `bifurcation_2d_map`.
+   * **Role**: Identifies open-loop feasibility boundaries via normalized orbit-error thresholds (not just fuel margin), showing where small parameter changes trigger mission failure.
+
+5. **Q6: What are the model limitations and validity bounds?**
+   * **Tests**: No single dedicated test; informed by all results and modeling assumptions.
+   * **Role**: Defines where conclusions are valid and prevents over-claiming beyond modeled physics.
+
+6. **Q7: What is the main engineering conclusion?**
+   * **Test support**: `finite_time_sensitivity` (plus Q2/Q5 evidence).
+   * **Role**: Supports the conclusion that open-loop solutions are sensitive and motivates feedback guidance for practical robustness.
 
 ### 3. Global Launch Heatmap
 Generate a heatmap of fuel costs across different latitudes:
