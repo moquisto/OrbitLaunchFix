@@ -24,6 +24,7 @@ from environment import Environment
 from main import solve_optimal_trajectory
 from simulation import run_simulation
 import debug
+import guidance
 
 # --- Helper to suppress output during batch runs ---
 @contextlib.contextmanager
@@ -216,6 +217,8 @@ def normalized_orbit_error(
 
 def _export_csv(path, headers, rows):
     def _format_cell(value):
+        if value is None:
+            return "nan"
         if isinstance(value, (np.floating, float)):
             if np.isnan(value):
                 return "nan"
@@ -257,6 +260,11 @@ class ReliabilitySuite:
         self.save_figures = self.save_outputs
         self.show_plots = bool(show_plots)
         self._analysis_execution = []
+        self._summary = {}
+        # Path-constraint compliance tolerances for reliability classification.
+        # Small slack avoids false negatives from interpolation/integration noise.
+        self.path_q_slack_pa = 500.0
+        self.path_g_slack = 0.05
 
         # Cache one baseline optimization to keep all analyses comparable.
         self._baseline_opt_res = None
@@ -587,6 +595,7 @@ class ReliabilitySuite:
                 sim_res = run_simulation(opt_res, veh_mc, cfg)
             terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
             traj = self._trajectory_diagnostics(sim_res, veh_mc, cfg)
+            path = self._evaluate_path_compliance(traj, cfg)
         except Exception:
             terminal = evaluate_terminal_state({"y": np.zeros((7, 1))}, cfg, env_cfg)
             traj = {
@@ -600,14 +609,203 @@ class ReliabilitySuite:
                 "q_violation": False,
                 "g_violation": False
             }
+            path = self._evaluate_path_compliance(traj, cfg)
+        strict_path_ok = self._is_strict_path_success(terminal, traj, cfg)
 
         return {
             "thrust_multiplier": float(thrust_mult),
             "isp_multiplier": float(isp_mult),
             "density_multiplier": float(dens_mult),
             "terminal": terminal,
-            "trajectory": traj
+            "trajectory": traj,
+            "path": path,
+            "strict_path_ok": int(strict_path_ok)
         }
+
+    @staticmethod
+    def _extract_final_mass_from_opt(opt_res):
+        if not isinstance(opt_res, dict):
+            return np.nan
+        X3 = opt_res.get("X3", None)
+        if not isinstance(X3, np.ndarray) or X3.ndim != 2 or X3.shape[0] < 7 or X3.shape[1] < 1:
+            return np.nan
+        m_final = float(X3[6, -1])
+        if not np.isfinite(m_final) or m_final <= 0.0:
+            return np.nan
+        return m_final
+
+    @staticmethod
+    def _extract_final_mass_from_sim(sim_res):
+        if not isinstance(sim_res, dict):
+            return np.nan
+        y = sim_res.get("y", None)
+        if not isinstance(y, np.ndarray) or y.ndim != 2 or y.shape[0] < 7 or y.shape[1] < 1:
+            return np.nan
+        m_final = float(y[6, -1])
+        if not np.isfinite(m_final) or m_final <= 0.0:
+            return np.nan
+        return m_final
+
+    @staticmethod
+    def _rss(values):
+        arr = np.array([float(v) for v in values if np.isfinite(v)], dtype=float)
+        if arr.size == 0:
+            return np.nan
+        return float(np.sqrt(np.sum(arr * arr)))
+
+    def _evaluate_path_compliance(self, traj_diag, cfg):
+        """
+        Evaluate path-constraint compliance with small numerical slack.
+        """
+        out = {
+            "path_ok": False,
+            "q_ok": False,
+            "g_ok": False,
+            "max_q_pa": np.nan,
+            "max_g": np.nan,
+            "q_limit_pa": float(cfg.max_q_limit),
+            "g_limit": float(cfg.max_g_load),
+            "q_slack_pa": float(self.path_q_slack_pa),
+            "g_slack": float(self.path_g_slack),
+        }
+        if not isinstance(traj_diag, dict) or not bool(traj_diag.get("valid", False)):
+            return out
+        max_q = float(traj_diag.get("max_q_pa", np.nan))
+        max_g = float(traj_diag.get("max_g", np.nan))
+        q_ok = bool(np.isfinite(max_q) and max_q <= cfg.max_q_limit + self.path_q_slack_pa)
+        g_ok = bool(np.isfinite(max_g) and max_g <= cfg.max_g_load + self.path_g_slack)
+        out.update({
+            "path_ok": bool(q_ok and g_ok),
+            "q_ok": q_ok,
+            "g_ok": g_ok,
+            "max_q_pa": max_q,
+            "max_g": max_g,
+        })
+        return out
+
+    def _is_strict_path_success(self, terminal_metrics, traj_diag, cfg):
+        """
+        Mission success for uncertainty/reliability stats:
+        terminal strict success + path constraints within reliability slack.
+        """
+        if not isinstance(terminal_metrics, dict):
+            return False
+        if not bool(terminal_metrics.get("strict_ok", False)):
+            return False
+        path = self._evaluate_path_compliance(traj_diag, cfg)
+        return bool(path["path_ok"])
+
+    def _get_saved_metric(self, table_name, key):
+        """
+        Best-effort helper for cross-test summaries.
+        Reads `metric,value` style CSVs if they exist.
+        """
+        table_path = self.data_dir / f"{table_name}.csv"
+        if not table_path.exists():
+            return np.nan
+        try:
+            with open(table_path, "r", encoding="utf-8", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    if str(row.get("metric", "")).strip() == str(key):
+                        val = row.get("value", "nan")
+                        try:
+                            return float(val)
+                        except Exception:
+                            return np.nan
+        except Exception:
+            return np.nan
+        return np.nan
+
+    @staticmethod
+    def _normalize_direction_history(td):
+        arr = np.array(td, dtype=float, copy=True)
+        if arr.ndim != 2 or arr.shape[0] != 3:
+            return arr
+        norms = np.linalg.norm(arr, axis=0)
+        good = norms > 1e-12
+        if np.any(good):
+            arr[:, good] = arr[:, good] / norms[good]
+        if np.any(~good):
+            arr[:, ~good] = np.array([[1.0], [0.0], [0.0]])
+        return arr
+
+    @staticmethod
+    def _perturb_state_history(X, rng, pos_sigma, vel_sigma, mass_sigma):
+        arr = np.array(X, dtype=float, copy=True)
+        if arr.ndim != 2 or arr.shape[0] < 7 or arr.shape[1] < 1:
+            return arr
+
+        # Bounded relative perturbation (approximately +/- sigma).
+        arr[0:3, :] *= 1.0 + rng.uniform(-pos_sigma, pos_sigma, size=arr[0:3, :].shape)
+        arr[3:6, :] *= 1.0 + rng.uniform(-vel_sigma, vel_sigma, size=arr[3:6, :].shape)
+        arr[6, :] *= 1.0 + rng.uniform(-mass_sigma, mass_sigma, size=arr[6, :].shape)
+
+        # Preserve phase start node to stay near boundary/linkage constraints.
+        arr[:, 0] = X[:, 0]
+        # Keep phase mass physically plausible and monotone decreasing.
+        arr[6, :] = np.minimum.accumulate(arr[6, :])
+        arr[6, :] = np.clip(arr[6, :], 1.0e3, None)
+        return arr
+
+    def _build_randomized_initial_guess(self, base_guess, cfg, rng):
+        if not isinstance(base_guess, dict):
+            raise ValueError("Initial guess must be a dict.")
+
+        guess = copy.deepcopy(base_guess)
+
+        # Uniform +/-1% perturbation regime.
+        frac = 0.01
+        time_scale = float(1.0 + rng.uniform(-frac, frac))
+        pos_sigma = float(frac)
+        vel_sigma = float(frac)
+        mass_sigma = float(frac)
+        throttle_sigma = float(frac)
+        direction_sigma = float(frac)
+        direction_sigma_deg = float(np.degrees(np.arcsin(direction_sigma)))
+
+        # Time variables: perturb around guidance and clamp to physically valid minima.
+        t1 = float(guess.get("T1", cfg.sequence.min_stage_1_burn))
+        t3 = float(guess.get("T3", cfg.sequence.min_stage_2_burn))
+        guess["T1"] = max(cfg.sequence.min_stage_1_burn, t1 * time_scale)
+        guess["T3"] = max(cfg.sequence.min_stage_2_burn, t3 * time_scale)
+        if guess.get("T2", None) is not None:
+            guess["T2"] = max(0.0, float(guess["T2"]) * (1.0 + float(rng.uniform(-frac, frac))))
+
+        # State trajectories.
+        for key in ("X1", "X2", "X3"):
+            val = guess.get(key, None)
+            if val is not None:
+                guess[key] = self._perturb_state_history(val, rng, pos_sigma, vel_sigma, mass_sigma)
+
+        # Throttle histories.
+        for key in ("TH1", "TH3"):
+            val = guess.get(key, None)
+            if val is None:
+                continue
+            th = np.array(val, dtype=float, copy=True)
+            th *= 1.0 + rng.uniform(-throttle_sigma, throttle_sigma, size=th.shape)
+            th = np.clip(th, cfg.sequence.min_throttle, 1.0)
+            guess[key] = th
+
+        # Direction histories.
+        for key in ("TD1", "TD3"):
+            val = guess.get(key, None)
+            if val is None:
+                continue
+            td = np.array(val, dtype=float, copy=True)
+            td *= 1.0 + rng.uniform(-direction_sigma, direction_sigma, size=td.shape)
+            guess[key] = self._normalize_direction_history(td)
+
+        params = {
+            "time_scale": time_scale,
+            "pos_sigma": pos_sigma,
+            "vel_sigma": vel_sigma,
+            "mass_sigma": mass_sigma,
+            "throttle_sigma": throttle_sigma,
+            "direction_sigma_deg": direction_sigma_deg,
+        }
+        return guess, params
 
     def run_all(self, monte_carlo_samples=200):
         """Runs all analysis modules sequentially."""
@@ -621,9 +819,9 @@ class ReliabilitySuite:
 
         # Q1: Credible minimum-fuel solution (local optimum robustness).
         ran_any |= self._run_if_enabled(
-            "initial_guess_robustness",
-            "Initial-guess robustness",
-            self.analyze_initial_guess_robustness
+            "randomized_multistart",
+            "Randomized multi-start robustness",
+            self.analyze_randomized_multistart
         )
         ran_any |= self._run_if_enabled("grid_independence", "Grid independence", self.analyze_grid_independence)
         ran_any |= self._run_if_enabled(
@@ -657,6 +855,12 @@ class ReliabilitySuite:
             "Global sensitivity ranking",
             self.analyze_global_sensitivity,
             N_samples=mc_n
+        )
+        ran_any |= self._run_if_enabled(
+            "q2_uncertainty_budget",
+            "Q2 uncertainty budget",
+            self.analyze_q2_uncertainty_budget,
+            parameter_samples=max(30, min(60, mc_n // 6))
         )
 
         # Q3: Code correctness/reliability sanity checks.
@@ -697,6 +901,18 @@ class ReliabilitySuite:
             ran_any |= self._run_if_enabled("drift", "Drift analysis", self.analyze_drift, opt_res, sim_res)
         else:
             print("\n[Skip] All deep-dive tests are disabled in RELIABILITY_ANALYSIS_TOGGLES.")
+
+        # Q6/Q7: Limitations and conclusion synthesis.
+        ran_any |= self._run_if_enabled(
+            "model_limitations",
+            "Model limitations",
+            self.analyze_model_limitations
+        )
+        ran_any |= self._run_if_enabled(
+            "q7_conclusion_support",
+            "Q7 conclusion support",
+            self.analyze_q7_conclusion_support
+        )
 
         if not ran_any:
             print("\nNo analyses executed. Enable tests in RELIABILITY_ANALYSIS_TOGGLES in config.py.")
@@ -768,29 +984,42 @@ class ReliabilitySuite:
         else:
             print(f"\n>>> {debug.Style.YELLOW}WARN: Cannot assess grid independence because node 100 or 140 failed.{debug.Style.RESET}")
         
-        # Visualization: Convergence vs Cost
-        fig, ax1 = plt.subplots(figsize=(10, 6))
-        
-        # Filter valid runs for plotting
+        # Visualization: convergence and computational cost on separate axes/panels.
         valid_indices = [i for i, m in enumerate(masses) if np.isfinite(m)]
-        valid_nodes = [node_counts[i] for i in valid_indices]
-        valid_masses = [masses[i] for i in valid_indices]
-        valid_runtimes = [runtimes[i] for i in valid_indices]
-        
-        color = 'tab:blue'
-        ax1.set_xlabel('Number of Nodes')
-        ax1.set_ylabel('Final Mass (kg)', color=color)
-        ax1.plot(valid_nodes, valid_masses, 'o-', color=color, label='Final Mass')
-        ax1.tick_params(axis='y', labelcolor=color)
-        ax1.grid(True)
-        
-        ax2 = ax1.twinx()
-        color = 'tab:red'
-        ax2.set_ylabel('Runtime (s)', color=color)
-        ax2.plot(valid_nodes, valid_runtimes, 'x--', color=color, label='Runtime')
-        ax2.tick_params(axis='y', labelcolor=color)
-        
-        plt.title('Grid Independence Study: Convergence & Cost')
+        if len(valid_indices) == 0:
+            print("  No converged grid points available for plotting.")
+            return
+
+        valid_nodes = np.array([node_counts[i] for i in valid_indices], dtype=float)
+        valid_masses = np.array([masses[i] for i in valid_indices], dtype=float)
+        valid_runtimes = np.array([runtimes[i] for i in valid_indices], dtype=float)
+        ref_node = int(valid_nodes[-1])
+        ref_mass = float(valid_masses[-1])
+        mass_err = np.abs(valid_masses - ref_mass)
+
+        fig, (ax1, ax2, ax3) = plt.subplots(
+            3, 1, figsize=(10, 9), sharex=True, gridspec_kw={"height_ratios": [1.2, 1.0, 1.0]}
+        )
+
+        ax1.plot(valid_nodes, valid_masses, "o-", color="tab:blue", label="Final mass")
+        ax1.axhline(ref_mass, color="tab:blue", linestyle="--", alpha=0.5, label=f"Reference (N={ref_node})")
+        if np.isfinite(m_100) and np.isfinite(m_140):
+            ax1.scatter([100, 140], [m_100, m_140], color="k", s=40, zorder=3)
+        ax1.set_ylabel("Final Mass (kg)")
+        ax1.set_title("Grid Independence: Objective Convergence and Computational Cost")
+        ax1.grid(True, alpha=0.3)
+        ax1.legend(loc="best")
+
+        ax2.semilogy(valid_nodes, np.maximum(mass_err, 1e-12), "o-", color="tab:purple", label=f"|m(N)-m({ref_node})|")
+        ax2.axhline(100.0, color="tab:orange", linestyle="--", alpha=0.8, label="Criterion (100 kg)")
+        ax2.set_ylabel("Mass Error (kg)")
+        ax2.grid(True, which="both", alpha=0.3)
+        ax2.legend(loc="best")
+
+        ax3.plot(valid_nodes, valid_runtimes, "x--", color="tab:red")
+        ax3.set_xlabel("Number of Nodes")
+        ax3.set_ylabel("Runtime (s)")
+        ax3.grid(True, alpha=0.3)
         self._finalize_figure(fig, "grid_independence_convergence_cost")
 
     # 2. INTEGRATOR TOLERANCE SWEEP
@@ -856,41 +1085,59 @@ class ReliabilitySuite:
         plt.gca().invert_xaxis() # Standard convention: higher precision (lower tol) to the right
         self._finalize_figure(fig, "integrator_tolerance_convergence")
 
-    def analyze_initial_guess_robustness(self, n_trials=5):
-        debug._print_sub_header("Initial-Guess Robustness (Warm-Start Variants)")
-        variants = [
-            {"label": "nominal", "start_shift": 0.0, "end_shift": 0.0, "gain_scale": 1.00},
-            {"label": "early_pitch", "start_shift": -3.0, "end_shift": -3.0, "gain_scale": 1.00},
-            {"label": "late_pitch", "start_shift": 3.0, "end_shift": 3.0, "gain_scale": 1.00},
-            {"label": "low_gain", "start_shift": 0.0, "end_shift": 0.0, "gain_scale": 0.70},
-            {"label": "high_gain", "start_shift": 0.0, "end_shift": 0.0, "gain_scale": 1.30},
-        ]
-        n_use = max(1, min(int(n_trials), len(variants)))
+    def analyze_randomized_multistart(self, n_trials=8):
+        debug._print_sub_header("Randomized Multi-Start Robustness")
+        n_use = max(4, int(n_trials))
+        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+
         rows = []
         masses = []
         runtimes = []
-        successes = 0
+        success_flags = []
+        labels = []
 
-        print(f"{'Case':<12} | {'Status':<10} | {'Final Mass (kg)':<15} | {'Runtime (s)':<10}")
-        print("-" * 58)
+        print(
+            f"{'Trial':<7} | {'Guess':<8} | {'Time x':<8} | {'Pos %':<7} | {'Vel %':<7} | "
+            f"{'Mass %':<8} | {'Throt %':<8} | {'Dir (deg)':<10} | {'Status':<10} | "
+            f"{'Final Mass (kg)':<15} | {'Runtime (s)':<10}"
+        )
+        print("-" * 141)
 
         for i in range(n_use):
             cfg = copy.deepcopy(self.base_config)
             env_cfg = copy.deepcopy(self.base_env_config)
-            v = variants[i]
-
-            base_start = cfg.sequence.pitch_start_time
-            base_end = cfg.sequence.pitch_end_time
-            cfg.sequence.pitch_start_time = max(0.0, base_start + v["start_shift"])
-            cfg.sequence.pitch_end_time = max(cfg.sequence.pitch_start_time + 1.0, base_end + v["end_shift"])
-            cfg.sequence.pitch_gain = max(0.0, cfg.sequence.pitch_gain * v["gain_scale"])
-
             env_i = Environment(env_cfg)
             veh_i = Vehicle(cfg, env_i)
+
+            with suppress_stdout():
+                base_guess = guidance.get_initial_guess(cfg, veh_i, env_i, num_nodes=cfg.num_nodes)
+
+            if i == 0:
+                # Always include nominal guidance warm start as deterministic anchor.
+                label = "nominal"
+                guess_i = copy.deepcopy(base_guess)
+                params = {
+                    "time_scale": 1.0,
+                    "pos_sigma": 0.0,
+                    "vel_sigma": 0.0,
+                    "mass_sigma": 0.0,
+                    "throttle_sigma": 0.0,
+                    "direction_sigma_deg": 0.0,
+                }
+            else:
+                label = f"rand_{i:02d}"
+                guess_i, params = self._build_randomized_initial_guess(base_guess, cfg, rng)
+
             t0 = time.time()
             try:
                 with suppress_stdout():
-                    res = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
+                    res = solve_optimal_trajectory(
+                        cfg,
+                        veh_i,
+                        env_i,
+                        print_level=0,
+                        initial_guess_override=guess_i
+                    )
                 ok = bool(res.get("success", False))
                 m_final = float(res["X3"][6, -1]) if ok else np.nan
             except Exception:
@@ -898,55 +1145,116 @@ class ReliabilitySuite:
                 m_final = np.nan
             dt = time.time() - t0
 
-            successes += int(ok)
+            labels.append(label)
             masses.append(m_final)
             runtimes.append(dt)
-            rows.append((v["label"], int(ok), m_final, dt))
-            print(f"{v['label']:<12} | {('Converged' if ok else 'Failed'):<10} | {m_final:<15.2f} | {dt:<10.2f}")
+            success_flags.append(int(ok))
 
+            status = "Converged" if ok else "Failed"
+            rows.append((
+                i + 1, label, params["time_scale"],
+                params["pos_sigma"], params["vel_sigma"], params["mass_sigma"],
+                params["throttle_sigma"], params["direction_sigma_deg"],
+                int(ok), m_final, dt
+            ))
+            print(
+                f"{i+1:<7} | {label:<8} | {params['time_scale']:<8.3f} | "
+                f"{100.0 * params['pos_sigma']:<7.2f} | {100.0 * params['vel_sigma']:<7.2f} | "
+                f"{100.0 * params['mass_sigma']:<8.2f} | {100.0 * params['throttle_sigma']:<8.2f} | "
+                f"{params['direction_sigma_deg']:<10.2f} | {status:<10} | {m_final:<15.2f} | {dt:<10.2f}"
+            )
+
+        success_rate = float(np.mean(success_flags)) if len(success_flags) > 0 else 0.0
         valid_masses = np.array([m for m in masses if np.isfinite(m)], dtype=float)
+        if len(valid_masses) > 0:
+            best_mass = float(np.max(valid_masses))
+            mass_gap_kg = [(best_mass - m) if np.isfinite(m) else np.nan for m in masses]
+        else:
+            best_mass = np.nan
+            mass_gap_kg = [np.nan for _ in masses]
+
         mass_spread = float(np.max(valid_masses) - np.min(valid_masses)) if len(valid_masses) > 1 else np.nan
-        if len(valid_masses) >= 1:
-            mass_ref = float(np.median(valid_masses))
-            mass_delta_g = [((m - mass_ref) * 1000.0) if np.isfinite(m) else np.nan for m in masses]
-        else:
-            mass_ref = np.nan
-            mass_delta_g = [np.nan for _ in masses]
-        success_rate = successes / n_use
+
         print(f"\nSuccess rate: {success_rate:.1%}")
+        if np.isfinite(best_mass):
+            print(f"Best final mass among converged runs: {best_mass:.3f} kg")
         if np.isfinite(mass_spread):
-            print(f"Final-mass spread across successful runs: {mass_spread:.6f} kg ({mass_spread*1000.0:.2f} g)")
+            print(f"Final-mass spread across converged runs: {mass_spread:.3f} kg")
         if success_rate >= 0.8 and (not np.isfinite(mass_spread) or mass_spread < 300.0):
-            print(f">>> {debug.Style.GREEN}PASS: Optimization is robust to warm-start variants.{debug.Style.RESET}")
+            print(f">>> {debug.Style.GREEN}PASS: Multi-start test supports robust local optimum.{debug.Style.RESET}")
         else:
-            print(f">>> {debug.Style.YELLOW}WARN: Warm-start sensitivity detected (or low convergence rate).{debug.Style.RESET}")
+            print(f">>> {debug.Style.YELLOW}WARN: Multi-start reveals convergence/objective sensitivity.{debug.Style.RESET}")
 
         self._save_table(
-            "initial_guess_robustness",
-            ["case", "solver_success", "final_mass_kg", "final_mass_delta_g", "runtime_s"],
+            "randomized_multistart",
             [
-                (rows[i][0], rows[i][1], rows[i][2], mass_delta_g[i], rows[i][3])
+                "trial", "label", "time_scale",
+                "position_noise_sigma", "velocity_noise_sigma", "mass_noise_sigma",
+                "throttle_noise_sigma", "direction_noise_sigma_deg",
+                "solver_success", "final_mass_kg", "final_mass_gap_to_best_kg", "runtime_s"
+            ],
+            [
+                (
+                    rows[i][0], rows[i][1], rows[i][2],
+                    rows[i][3], rows[i][4], rows[i][5], rows[i][6], rows[i][7],
+                    rows[i][8], rows[i][9], mass_gap_kg[i], rows[i][10]
+                )
                 for i in range(len(rows))
             ]
         )
 
-        fig, ax1 = plt.subplots(figsize=(10, 6))
         x = np.arange(n_use)
-        ax1.bar(x, runtimes, color="tab:blue", alpha=0.35, label="Runtime (s)")
-        ax2 = ax1.twinx()
-        ax2.plot(x, mass_delta_g, "o-", color="tab:green", label="Final mass delta (g)")
-        labels = [variants[i]["label"] for i in range(n_use)]
-        ax1.set_xticks(x)
-        ax1.set_xticklabels(labels, rotation=20)
-        ax1.set_ylabel("Runtime (s)")
-        ax2.set_ylabel("Final Mass Delta (g)")
-        if np.isfinite(mass_ref):
-            ax2.axhline(0.0, color="tab:green", linestyle="--", alpha=0.4)
-        ax1.set_title("Warm-Start Variant Robustness")
-        lines, labels_l = ax1.get_legend_handles_labels()
-        lines2, labels_r = ax2.get_legend_handles_labels()
-        ax2.legend(lines + lines2, labels_l + labels_r, loc="best")
-        self._finalize_figure(fig, "initial_guess_robustness")
+        fig, (ax1, ax2, ax3) = plt.subplots(
+            3, 1, figsize=(11, 9), sharex=True, gridspec_kw={"height_ratios": [0.9, 1.2, 1.0]}
+        )
+
+        ax1.bar(x, success_flags, color=["tab:green" if s else "tab:red" for s in success_flags], alpha=0.7)
+        ax1.set_ylim(-0.05, 1.15)
+        ax1.set_ylabel("Success (0/1)")
+        ax1.set_title("Randomized Multi-Start Robustness")
+        ax1.grid(True, axis="y", alpha=0.3)
+
+        success_idx = [i for i, m in enumerate(masses) if np.isfinite(m)]
+        if len(success_idx) > 0:
+            ax2.plot(
+                success_idx,
+                [mass_gap_kg[i] for i in success_idx],
+                "o-",
+                color="tab:blue",
+                label="Fuel gap to best"
+            )
+            ax2.axhline(0.0, color="tab:blue", linestyle="--", alpha=0.6, label="Best run")
+        fail_idx = [i for i, ok in enumerate(success_flags) if not ok]
+        if len(fail_idx) > 0:
+            ax2.scatter(fail_idx, [0.0] * len(fail_idx), marker="x", color="tab:red", label="Failed")
+        ax2.set_ylabel("Gap to Best (kg)")
+        ax2.grid(True, alpha=0.3)
+        ax2.legend(loc="best")
+
+        ax3.bar(x, runtimes, color="tab:purple", alpha=0.55)
+        ax3.set_ylabel("Runtime (s)")
+        ax3.set_xlabel("Multi-start Trial")
+        ax3.grid(True, axis="y", alpha=0.3)
+
+        xticks = [i for i in range(n_use) if i == 0 or (i % 2 == 1)]
+        ax3.set_xticks(xticks)
+        ax3.set_xticklabels([labels[i] for i in xticks], rotation=25)
+
+        summary = (
+            f"Trials: {n_use}\n"
+            f"Success: {success_rate:.1%}\n"
+            + (f"Mass spread: {mass_spread:.3f} kg" if np.isfinite(mass_spread) else "Mass spread: n/a")
+        )
+        ax2.text(
+            0.02,
+            0.95,
+            summary,
+            transform=ax2.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.7"),
+        )
+        self._finalize_figure(fig, "randomized_multistart")
 
     def analyze_collocation_defect_audit(self):
         debug._print_sub_header("Collocation Defect Audit")
@@ -1026,26 +1334,194 @@ class ReliabilitySuite:
         )
 
         eps = 1e-18
-        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=False)
-        for phase_name, pos_s, vel_s, m_s, _ in phase_series:
-            ax1.semilogy(np.maximum(pos_s, eps), label=f"{phase_name.title()} position defect")
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+        total_intervals = int(sum(len(s[1]) for s in phase_series))
+        offset = 0
+        for phase_name, pos_s, vel_s, m_s, rel_s in phase_series:
+            idx = np.arange(offset, offset + len(pos_s))
+            ax1.semilogy(idx, np.maximum(pos_s, eps), label=f"{phase_name.title()} position defect")
+            ax2.semilogy(idx, np.maximum(rel_s, eps), label=f"{phase_name.title()} max relative defect")
+            offset += len(pos_s)
+            if offset < total_intervals:
+                ax1.axvline(offset - 0.5, color="0.5", linestyle="--", linewidth=0.8, alpha=0.6)
+                ax2.axvline(offset - 0.5, color="0.5", linestyle="--", linewidth=0.8, alpha=0.6)
+
         ax1.set_ylabel("Position Defect (m)")
         ax1.set_title("Collocation Defect Audit")
-        ax1.legend()
-        ax1.grid(True, which="both", ls="-")
-        for phase_name, _, _, _, rel_s in phase_series:
-            ax2.semilogy(np.maximum(rel_s, eps), label=f"{phase_name.title()} max relative defect")
-        ax2.set_xlabel("Interval Index")
+        ax1.legend(loc="best")
+        ax1.grid(True, which="both", ls="-", alpha=0.3)
+
+        ax2.axhline(1e-4, color="tab:orange", linestyle="--", alpha=0.8, label="Pass threshold (1e-4)")
+        ax2.set_xlabel("Global Interval Index")
         ax2.set_ylabel("Max Relative Defect (-)")
-        ax2.legend()
-        ax2.grid(True, which="both", ls="-")
+        ax2.legend(loc="best")
+        ax2.grid(True, which="both", ls="-", alpha=0.3)
         self._finalize_figure(fig, "collocation_defect_audit")
 
+
+    def _compute_drift_metrics(self, optimization_data, simulation_data):
+        """
+        Compute phase-wise optimizer-vs-simulator drift metrics.
+        Mirrors debug.analyze_trajectory_drift logic but returns structured values.
+        """
+        if not isinstance(optimization_data, dict) or not isinstance(simulation_data, dict):
+            return {"valid": False, "reason": "invalid_input"}
+
+        phases_opt = []
+        try:
+            N1 = optimization_data["X1"].shape[1]
+            t1_end = float(optimization_data["T1"])
+            phases_opt.append({"t": np.linspace(0.0, t1_end, N1), "x": optimization_data["X1"], "label": "Phase 1"})
+
+            current_t = t1_end
+            if "X2" in optimization_data and float(optimization_data.get("T2", 0.0)) > 1e-4:
+                N2 = optimization_data["X2"].shape[1]
+                t2_end = current_t + float(optimization_data["T2"])
+                phases_opt.append({"t": np.linspace(current_t, t2_end, N2), "x": optimization_data["X2"], "label": "Phase 2"})
+                current_t = t2_end
+
+            N3 = optimization_data["X3"].shape[1]
+            t3_end = current_t + float(optimization_data["T3"])
+            phases_opt.append({"t": np.linspace(current_t, t3_end, N3), "x": optimization_data["X3"], "label": "Phase 3"})
+        except Exception:
+            return {"valid": False, "reason": "bad_opt_data"}
+
+        t_sim = simulation_data.get("t", None)
+        y_sim = simulation_data.get("y", None)
+        if not isinstance(t_sim, np.ndarray) or not isinstance(y_sim, np.ndarray):
+            return {"valid": False, "reason": "bad_sim_data"}
+        if y_sim.ndim != 2 or y_sim.shape[0] < 7 or len(t_sim) < 2 or y_sim.shape[1] != len(t_sim):
+            return {"valid": False, "reason": "bad_sim_shape"}
+
+        split_indices = [0] + (np.where(np.diff(t_sim) <= 1e-9)[0] + 1).tolist() + [len(t_sim)]
+        sim_segments = []
+        for i in range(len(split_indices) - 1):
+            a = int(split_indices[i])
+            b = int(split_indices[i + 1])
+            if b - a >= 2:
+                sim_segments.append({"t": t_sim[a:b], "y": y_sim[:, a:b]})
+
+        if len(phases_opt) != len(sim_segments):
+            return {"valid": False, "reason": "phase_count_mismatch"}
+
+        phase_rows = []
+        max_pos_err = 0.0
+        max_vel_err = 0.0
+        max_mass_err = 0.0
+
+        for p_opt, p_sim in zip(phases_opt, sim_segments):
+            f_sim = interp1d(
+                p_sim["t"], p_sim["y"], axis=1,
+                kind="linear", bounds_error=False, fill_value="extrapolate"
+            )
+            y_interp = f_sim(p_opt["t"])
+            pos_err = np.linalg.norm(p_opt["x"][0:3, :] - y_interp[0:3, :], axis=0)
+            vel_err = np.linalg.norm(p_opt["x"][3:6, :] - y_interp[3:6, :], axis=0)
+            mass_err = np.abs(p_opt["x"][6, :] - y_interp[6, :])
+            p_max = float(np.max(pos_err))
+            v_max = float(np.max(vel_err))
+            m_max = float(np.max(mass_err))
+            phase_rows.append((p_opt["label"], p_max, v_max, m_max))
+            max_pos_err = max(max_pos_err, p_max)
+            max_vel_err = max(max_vel_err, v_max)
+            max_mass_err = max(max_mass_err, m_max)
+
+        pass_flag = bool(max_pos_err <= 2000.0 and max_vel_err <= 30.0 and max_mass_err <= 500.0)
+        return {
+            "valid": True,
+            "phase_rows": phase_rows,
+            "max_pos_m": float(max_pos_err),
+            "max_vel_m_s": float(max_vel_err),
+            "max_mass_kg": float(max_mass_err),
+            "pass_flag": int(pass_flag)
+        }
 
     # 3. DRIFT ANALYSIS
     def analyze_drift(self, opt_res, sim_res):
         debug._print_sub_header("3. Drift Analysis (Opt vs Sim)")
-        debug.analyze_trajectory_drift(opt_res, sim_res)
+        drift = self._compute_drift_metrics(opt_res, sim_res)
+        if not drift.get("valid", False):
+            reason = drift.get("reason", "unknown")
+            print(f"  Drift analysis could not be completed ({reason}).")
+            self._save_table(
+                "drift_summary",
+                ["metric", "value"],
+                [("valid", 0), ("reason", reason)]
+            )
+            return
+
+        print(f"{'Phase':<10} | {'Max Pos (m)':<12} | {'Max Vel (m/s)':<14} | {'Max Mass (kg)':<14}")
+        print("-" * 62)
+        for phase, p_max, v_max, m_max in drift["phase_rows"]:
+            print(f"{phase:<10} | {p_max:<12.3f} | {v_max:<14.4f} | {m_max:<14.4f}")
+        print(f"  Max Position Drift: {drift['max_pos_m']:.3f} m")
+        print(f"  Max Velocity Drift: {drift['max_vel_m_s']:.4f} m/s")
+        print(f"  Max Mass Drift:     {drift['max_mass_kg']:.4f} kg")
+        if drift["pass_flag"]:
+            print(f">>> {debug.Style.GREEN}PASS: Simulation concurs with optimizer trajectory.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}WARN: Drift exceeds reliability thresholds.{debug.Style.RESET}")
+
+        self._save_table(
+            "drift_phase_metrics",
+            ["phase", "max_position_drift_m", "max_velocity_drift_m_s", "max_mass_drift_kg"],
+            drift["phase_rows"]
+        )
+        self._save_table(
+            "drift_summary",
+            ["metric", "value"],
+            [
+                ("valid", 1),
+                ("max_position_drift_m", drift["max_pos_m"]),
+                ("max_velocity_drift_m_s", drift["max_vel_m_s"]),
+                ("max_mass_drift_kg", drift["max_mass_kg"]),
+                ("pass_flag", drift["pass_flag"]),
+                ("threshold_position_m", 2000.0),
+                ("threshold_velocity_m_s", 30.0),
+                ("threshold_mass_kg", 500.0),
+            ]
+        )
+
+        phases = [r[0] for r in drift["phase_rows"]]
+        pos_vals = [r[1] for r in drift["phase_rows"]]
+        vel_vals = [r[2] for r in drift["phase_rows"]]
+        mass_vals = [r[3] for r in drift["phase_rows"]]
+        x = np.arange(len(phases))
+
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+        # Use log-scale bars so tiny drifts remain visible against large thresholds.
+        def _plot_drift_panel(ax, vals, threshold, color, ylabel):
+            vals_arr = np.asarray(vals, dtype=float)
+            vals_plot = np.maximum(vals_arr, 1e-9)
+            finite_vals = vals_plot[np.isfinite(vals_plot)]
+            if finite_vals.size == 0:
+                finite_vals = np.array([1e-9], dtype=float)
+            ax.bar(x, vals_plot, color=color, alpha=0.8)
+            ax.axhline(threshold, color="tab:orange", linestyle="--", alpha=0.8, label="Threshold")
+            ax.set_yscale("log")
+            y_min = min(np.min(finite_vals) * 0.6, threshold * 1e-4)
+            y_max = max(np.max(finite_vals) * 2.0, threshold * 2.0)
+            ax.set_ylim(max(y_min, 1e-10), y_max)
+            ax.set_ylabel(ylabel)
+            ax.grid(True, which="both", axis="y", alpha=0.3)
+
+        _plot_drift_panel(ax1, pos_vals, 2000.0, "tab:blue", "Position Drift (m)")
+        ax1.legend(loc="best")
+        _plot_drift_panel(ax2, vel_vals, 30.0, "tab:green", "Velocity Drift (m/s)")
+        _plot_drift_panel(ax3, mass_vals, 500.0, "tab:purple", "Mass Drift (kg)")
+        ax3.set_xticks(x)
+        ax3.set_xticklabels(phases)
+
+        fig.suptitle("Optimizer vs Simulator Drift by Phase")
+        self._finalize_figure(fig, "drift_summary")
+
+        self._summary["q3_drift"] = {
+            "max_position_drift_m": drift["max_pos_m"],
+            "max_velocity_drift_m_s": drift["max_vel_m_s"],
+            "max_mass_drift_kg": drift["max_mass_kg"],
+            "pass_flag": drift["pass_flag"],
+        }
 
     # 11. CHAOS / LYAPUNOV ANALYSIS (Upgrade 2)
     def analyze_chaos_lyapunov(self):
@@ -1134,6 +1610,17 @@ class ReliabilitySuite:
             ["time_s", "delta_r_raw_m", "delta_r_for_log_m", "log_delta_r"],
             [(t_dense[i], delta_r_raw[i], delta_r[i], log_delta[i]) for i in range(len(t_dense))]
         )
+        self._save_table(
+            "finite_time_divergence_summary",
+            ["metric", "value"],
+            [
+                ("growth_rate_s_inv", growth_rate),
+                ("fit_r2", r2),
+                ("final_divergence_km", final_div),
+                ("fit_t_start_s", float(t_dense[idx_start])),
+                ("fit_t_end_s", float(t_dense[idx_end - 1])),
+            ]
+        )
         
         print("  Note: this compares nominal dynamics to a perturbed-parameter run.")
         print("  It is a finite-time sensitivity metric, not a formal Lyapunov exponent.")
@@ -1159,6 +1646,11 @@ class ReliabilitySuite:
         plt.legend()
         self._finalize_figure(fig, "chaos_lyapunov")
         print(f">>> {debug.Style.GREEN}PASS: Finite-time sensitivity analysis complete.{debug.Style.RESET}")
+        self._summary["q7_finite_time"] = {
+            "growth_rate_s_inv": float(growth_rate),
+            "fit_r2": float(r2),
+            "final_divergence_km": float(final_div),
+        }
 
     # 13. BIFURCATION ANALYSIS (Upgrade 4)
     def analyze_bifurcation(self):
@@ -1179,37 +1671,139 @@ class ReliabilitySuite:
         orbit_errors = []
         orbit_ok_flags = []
         strict_ok_flags = []
+        path_ok_flags = []
+        q_ok_flags = []
+        g_ok_flags = []
+        max_q_vals = []
+        max_g_vals = []
         statuses = []
+        cache = {}
+
+        def _evaluate_case(mult):
+            key = float(np.round(mult, 12))
+            if key in cache:
+                return cache[key]
+
+            cfg = copy.deepcopy(self.base_config)
+            cfg.stage_1.thrust_vac *= mult
+            cfg.stage_2.thrust_vac *= mult
+
+            try:
+                with suppress_stdout():
+                    veh_bif = Vehicle(cfg, self.env)
+                    sim_res = run_simulation(opt_res, veh_bif, cfg)
+                metrics = evaluate_terminal_state(sim_res, cfg, self.base_env_config)
+                traj = self._trajectory_diagnostics(sim_res, veh_bif, cfg)
+                path = self._evaluate_path_compliance(traj, cfg)
+                strict_path_ok = int(self._is_strict_path_success(metrics, traj, cfg))
+
+                if strict_path_ok:
+                    status = "Orbit"
+                elif bool(metrics.get("strict_ok", False)):
+                    status = "PATH"
+                elif metrics["terminal_valid"]:
+                    status = metrics["status"]
+                else:
+                    status = "SIM_ERROR"
+            except Exception:
+                metrics = {
+                    "terminal_valid": False,
+                    "orbit_ok": False,
+                    "fuel_margin_kg": np.nan,
+                    "r_f_m": np.nan,
+                    "v_f_m_s": np.nan,
+                }
+                path = {
+                    "path_ok": False,
+                    "q_ok": False,
+                    "g_ok": False,
+                    "max_q_pa": np.nan,
+                    "max_g": np.nan,
+                }
+                strict_path_ok = 0
+                status = "SIM_ERROR"
+
+            rec = {
+                "thrust_multiplier": float(mult),
+                "final_altitude_km": metrics["r_f_m"] / 1000.0 if metrics["terminal_valid"] else np.nan,
+                "final_velocity_m_s": metrics["v_f_m_s"] if metrics["terminal_valid"] else np.nan,
+                "fuel_margin_kg": metrics["fuel_margin_kg"],
+                "orbit_error": normalized_orbit_error(metrics),
+                "orbit_ok": int(bool(metrics.get("orbit_ok", False))),
+                "strict_ok": strict_path_ok,
+                "path_ok": int(path["path_ok"]),
+                "q_ok": int(path["q_ok"]),
+                "g_ok": int(path["g_ok"]),
+                "max_q_pa": float(path["max_q_pa"]),
+                "max_g": float(path["max_g"]),
+                "status": status,
+            }
+            cache[key] = rec
+            return rec
+
+        def _find_orbit_error_crossings(xs, errs, threshold=1.0):
+            xs = np.asarray(xs, dtype=float)
+            errs = np.asarray(errs, dtype=float)
+            out = []
+            for i in range(1, len(xs)):
+                x0, x1 = xs[i - 1], xs[i]
+                e0, e1 = errs[i - 1], errs[i]
+                if not (np.isfinite(e0) and np.isfinite(e1)):
+                    continue
+                f0 = e0 - threshold
+                f1 = e1 - threshold
+                if abs(f0) < 1e-12:
+                    out.append(float(x0))
+                if f0 * f1 < 0.0:
+                    out.append(float(np.interp(0.0, [f0, f1], [x0, x1])))
+                if i == len(xs) - 1 and abs(f1) < 1e-12:
+                    out.append(float(x1))
+            # unique + sorted with numerical tolerance
+            uniq = []
+            for x in sorted(out):
+                if len(uniq) == 0 or abs(x - uniq[-1]) > 1e-8:
+                    uniq.append(x)
+            return uniq
+
+        def _bisect_orbit_boundary(x_lo, x_hi, max_iter=18):
+            # Requires bracketing f(x)=orbit_error-1 with opposite signs.
+            f_lo = _evaluate_case(x_lo)["orbit_error"] - 1.0
+            f_hi = _evaluate_case(x_hi)["orbit_error"] - 1.0
+            if not (np.isfinite(f_lo) and np.isfinite(f_hi)) or (f_lo * f_hi > 0.0):
+                return np.nan
+            lo, hi = float(x_lo), float(x_hi)
+            flo, fhi = float(f_lo), float(f_hi)
+            for _ in range(max_iter):
+                mid = 0.5 * (lo + hi)
+                f_mid = _evaluate_case(mid)["orbit_error"] - 1.0
+                if not np.isfinite(f_mid):
+                    break
+                if flo * f_mid <= 0.0:
+                    hi, fhi = mid, float(f_mid)
+                else:
+                    lo, flo = mid, float(f_mid)
+            if np.isfinite(flo) and np.isfinite(fhi) and abs(fhi - flo) > 1e-14:
+                return float(np.interp(0.0, [flo, fhi], [lo, hi]))
+            return float(0.5 * (lo + hi))
         
         print(f"{'Thrust Mult':<12} | {'Final Alt (km)':<15} | {'Orbit Err':<10} | {'Status':<10}")
         print("-" * 62)
         
         for mult in multipliers:
-            # Perturb
-            cfg = copy.deepcopy(self.base_config)
-            cfg.stage_1.thrust_vac *= mult
-            cfg.stage_2.thrust_vac *= mult
-            
-            # Run Sim (Open Loop)
-            with suppress_stdout():
-                veh_bif = Vehicle(cfg, self.env)
-                sim_res = run_simulation(opt_res, veh_bif, cfg)
-            
-            metrics = evaluate_terminal_state(sim_res, cfg, self.base_env_config)
-            final_alts.append(metrics["r_f_m"] / 1000.0 if metrics["terminal_valid"] else np.nan)
-            final_vels.append(metrics["v_f_m_s"] if metrics["terminal_valid"] else np.nan)
-            margins.append(metrics["fuel_margin_kg"])
-            orbit_err = normalized_orbit_error(metrics)
+            rec = _evaluate_case(float(mult))
+            final_alts.append(rec["final_altitude_km"])
+            final_vels.append(rec["final_velocity_m_s"])
+            margins.append(rec["fuel_margin_kg"])
+            orbit_err = rec["orbit_error"]
             orbit_errors.append(orbit_err)
-            orbit_ok_flags.append(int(bool(metrics.get("orbit_ok", False))))
-            strict_ok_flags.append(int(bool(metrics.get("strict_ok", False))))
-
-            if metrics["strict_ok"]:
-                status = "Orbit"
-            elif metrics["terminal_valid"]:
-                status = metrics["status"]
-            else:
-                status = "SIM_ERROR"
+            orbit_ok_flags.append(rec["orbit_ok"])
+            strict_ok_flags.append(rec["strict_ok"])
+            path_ok_flags.append(rec["path_ok"])
+            q_ok_flags.append(rec["q_ok"])
+            g_ok_flags.append(rec["g_ok"])
+            max_q_vals.append(rec["max_q_pa"])
+            max_g_vals.append(rec["max_g"])
+            status = rec["status"]
             statuses.append(status)
             orbit_err_str = f"{orbit_err:8.3f}" if np.isfinite(orbit_err) else "   nan   "
             print(f"{mult:<12.2f} | {final_alts[-1]:<15.1f} | {orbit_err_str:<10} | {status:<10}")
@@ -1218,34 +1812,61 @@ class ReliabilitySuite:
             "bifurcation_thrust_sweep",
             [
                 "thrust_multiplier", "final_altitude_km", "final_velocity_m_s",
-                "fuel_margin_kg", "normalized_orbit_error", "orbit_ok", "strict_ok", "status"
+                "fuel_margin_kg", "normalized_orbit_error",
+                "orbit_ok", "strict_ok", "path_ok", "q_ok", "g_ok", "max_q_pa", "max_g", "status"
             ],
             [
                 (
                     multipliers[i], final_alts[i], final_vels[i], margins[i],
-                    orbit_errors[i], orbit_ok_flags[i], strict_ok_flags[i], statuses[i]
+                    orbit_errors[i], orbit_ok_flags[i], strict_ok_flags[i], path_ok_flags[i],
+                    q_ok_flags[i], g_ok_flags[i], max_q_vals[i], max_g_vals[i], statuses[i]
                 )
                 for i in range(len(multipliers))
             ]
         )
 
-        # Feasibility boundary is defined by normalized orbit error = 1.
-        critical_mult = None
-        for i in range(1, len(multipliers)):
-            e0 = orbit_errors[i - 1]
-            e1 = orbit_errors[i]
-            if not (np.isfinite(e0) and np.isfinite(e1)):
-                continue
-            f0 = e0 - 1.0
-            f1 = e1 - 1.0
-            if abs(f0) < 1e-12:
-                critical_mult = float(multipliers[i - 1])
-                break
-            if f0 * f1 < 0.0:
-                critical_mult = float(np.interp(0.0, [f0, f1], [multipliers[i - 1], multipliers[i]]))
-                break
+        # Feasibility boundaries are defined by normalized orbit error = 1.
+        coarse_crossings = _find_orbit_error_crossings(multipliers, orbit_errors, threshold=1.0)
+        lower_boundary = np.nan
+        upper_boundary = np.nan
 
-        fuel_boundary = None
+        # Start with coarse estimates.
+        if len(coarse_crossings) > 0:
+            lower_candidates = [c for c in coarse_crossings if c <= 1.0 + 1e-12]
+            upper_candidates = [c for c in coarse_crossings if c >= 1.0 - 1e-12]
+            if len(lower_candidates) > 0:
+                lower_boundary = float(max(lower_candidates))
+            if len(upper_candidates) > 0:
+                upper_boundary = float(min(upper_candidates))
+
+        # Refine boundaries near nominal by bisection when bracket exists.
+        e_nom = _evaluate_case(1.0)["orbit_error"]
+        if np.isfinite(e_nom) and e_nom <= 1.0:
+            # Left side: outside (error>1) -> inside (error<=1) at x=1.
+            left_out = np.nan
+            for x in sorted([float(x) for x in multipliers if x < 1.0], reverse=True):
+                ex = _evaluate_case(x)["orbit_error"]
+                if np.isfinite(ex) and ex > 1.0:
+                    left_out = x
+                    break
+            if np.isfinite(left_out):
+                left_refined = _bisect_orbit_boundary(left_out, 1.0)
+                if np.isfinite(left_refined):
+                    lower_boundary = float(left_refined)
+
+            # Right side: inside at x=1 -> outside (error>1).
+            right_out = np.nan
+            for x in sorted([float(x) for x in multipliers if x > 1.0]):
+                ex = _evaluate_case(x)["orbit_error"]
+                if np.isfinite(ex) and ex > 1.0:
+                    right_out = x
+                    break
+            if np.isfinite(right_out):
+                right_refined = _bisect_orbit_boundary(1.0, right_out)
+                if np.isfinite(right_refined):
+                    upper_boundary = float(right_refined)
+
+        fuel_boundary = np.nan
         for i in range(1, len(multipliers)):
             if margins[i-1] <= 0.0 <= margins[i]:
                 fuel_boundary = float(np.interp(0.0, [margins[i-1], margins[i]], [multipliers[i-1], multipliers[i]]))
@@ -1253,6 +1874,36 @@ class ReliabilitySuite:
             if margins[i-1] >= 0.0 >= margins[i]:
                 fuel_boundary = float(np.interp(0.0, [margins[i-1], margins[i]], [multipliers[i-1], multipliers[i]]))
                 break
+
+        lower_margin_pct = (1.0 - lower_boundary) * 100.0 if np.isfinite(lower_boundary) else np.nan
+        upper_margin_pct = (upper_boundary - 1.0) * 100.0 if np.isfinite(upper_boundary) else np.nan
+        margin_candidates = [m for m in [lower_margin_pct, upper_margin_pct] if np.isfinite(m)]
+        min_margin_pct = float(np.min(margin_candidates)) if len(margin_candidates) > 0 else np.nan
+        idx_nom = int(np.argmin(np.abs(multipliers - 1.0)))
+        nominal_orbit_error = float(orbit_errors[idx_nom]) if np.isfinite(orbit_errors[idx_nom]) else np.nan
+        nominal_status = statuses[idx_nom]
+        critical_mult = lower_boundary if np.isfinite(lower_boundary) else upper_boundary
+
+        self._save_table(
+            "bifurcation_summary",
+            ["metric", "value"],
+            [
+                ("lower_orbit_boundary_thrust_multiplier", lower_boundary),
+                ("upper_orbit_boundary_thrust_multiplier", upper_boundary),
+                ("fuel_boundary_thrust_multiplier", fuel_boundary),
+                ("lower_margin_percent", lower_margin_pct),
+                ("upper_margin_percent", upper_margin_pct),
+                ("min_margin_percent", min_margin_pct),
+                ("nominal_orbit_error", nominal_orbit_error),
+                ("nominal_status", nominal_status),
+            ]
+        )
+        self._summary["q5_bifurcation"] = {
+            "lower_boundary": lower_boundary,
+            "upper_boundary": upper_boundary,
+            "min_margin_percent": min_margin_pct,
+            "nominal_orbit_error": nominal_orbit_error,
+        }
 
         # 3. Plotting
         fig, ax1 = plt.subplots(figsize=(10, 6))
@@ -1272,15 +1923,28 @@ class ReliabilitySuite:
         ax2.axhline(1.0, color='tab:orange', linestyle=':', alpha=0.7, label='Orbit threshold (=1)')
         ax2.tick_params(axis='y', labelcolor=color)
 
-        if critical_mult is not None:
-            ax1.axvline(critical_mult, color='purple', linestyle='-.', alpha=0.7, label=f'Feasibility boundary ~ {critical_mult:.3f}')
-            print(f"  Estimated orbit-feasibility boundary near thrust multiplier {critical_mult:.3f}")
+        if np.isfinite(lower_boundary):
+            ax1.axvline(lower_boundary, color='purple', linestyle='-.', alpha=0.7, label=f'Lower boundary ~ {lower_boundary:.4f}')
+        if np.isfinite(upper_boundary):
+            ax1.axvline(upper_boundary, color='purple', linestyle='-.', alpha=0.7, label=f'Upper boundary ~ {upper_boundary:.4f}')
+        if np.isfinite(lower_boundary) or np.isfinite(upper_boundary):
+            if np.isfinite(lower_boundary) and np.isfinite(upper_boundary):
+                print(
+                    f"  Orbit-feasibility window: [{lower_boundary:.6f}, {upper_boundary:.6f}] "
+                    f"(width {(upper_boundary - lower_boundary) * 100.0:.4f}%)"
+                )
+            else:
+                print("  Partial orbit-feasibility boundary estimate available.")
         else:
             print("  No orbit-feasibility crossing (error=1) found within scanned thrust range.")
-        if fuel_boundary is not None:
+        if np.isfinite(fuel_boundary):
             print(f"  Fuel-margin boundary near thrust multiplier {fuel_boundary:.3f}")
         else:
             print("  No fuel-margin sign change in scanned thrust range (not fuel-limited here).")
+        if np.isfinite(min_margin_pct):
+            print(f"  Nominal-to-cliff minimum thrust margin: {min_margin_pct:.2f}%")
+        else:
+            print("  Could not estimate nominal-to-cliff thrust margin from sweep range.")
         
         plt.title('Bifurcation Analysis: Sensitivity to Thrust\n(Open-Loop Control Feasibility)')
         self._finalize_figure(fig, "bifurcation_thrust")
@@ -1353,6 +2017,74 @@ class ReliabilitySuite:
             ["mission_success", "dv_theoretical_m_s", "dv_actual_m_s", "losses_m_s", "efficiency_percent"],
             [(int(mission_success), dv_theoretical, dv_actual, dv_actual - dv_theoretical, efficiency)]
         )
+
+        losses = dv_actual - dv_theoretical
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+        # Left: direct Delta-V comparison.
+        bar_labels = ["Theoretical Min", "Actual Trajectory"]
+        bar_vals = [dv_theoretical, dv_actual]
+        bar_colors = ["tab:blue", "tab:green"]
+        bars = ax1.bar(bar_labels, bar_vals, color=bar_colors, alpha=0.8)
+        for bar, val in zip(bars, bar_vals):
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                val + 0.015 * max(bar_vals),
+                f"{val:.0f} m/s",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        delta_sign = "+" if losses >= 0.0 else "-"
+        ax1.annotate(
+            f"{delta_sign}{abs(losses):.0f} m/s",
+            xy=(1, dv_actual),
+            xytext=(0.48, 0.92),
+            textcoords="axes fraction",
+            arrowprops=dict(arrowstyle="->", color="0.25"),
+            ha="center",
+            va="center",
+            fontsize=10,
+        )
+        ax1.set_ylabel("Delta-V (m/s)")
+        ax1.set_title("Delta-V Budget Comparison")
+        ax1.grid(True, axis="y", alpha=0.3)
+
+        # Right: efficiency summary with report threshold.
+        eff_color = "tab:green" if efficiency >= 85.0 else "tab:orange"
+        x_max = max(100.0, efficiency + 8.0)
+        ax2.barh(["Mission Efficiency"], [efficiency], color=eff_color, alpha=0.85)
+        ax2.axvline(85.0, color="tab:orange", linestyle="--", alpha=0.8, label="85% reference")
+        ax2.set_xlim(0.0, x_max)
+        ax2.set_xlabel("Efficiency (%)")
+        ax2.set_title("Efficiency Summary")
+        ax2.grid(True, axis="x", alpha=0.3)
+        ax2.legend(loc="lower right")
+        ax2.text(
+            efficiency + 1.0,
+            0,
+            f"{efficiency:.1f}%",
+            va="center",
+            ha="left",
+            fontsize=10,
+            color=eff_color,
+        )
+        ax2.text(
+            0.03,
+            0.95,
+            (
+                f"Burn 1: {dv_burn1:.0f} m/s\n"
+                f"Burn 2: {dv_burn2:.0f} m/s\n"
+                f"Losses: {losses:.0f} m/s"
+            ),
+            transform=ax2.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.7"),
+        )
+
+        fig.suptitle("Theoretical Efficiency (Hohmann Reference vs Simulated Trajectory)")
+        self._finalize_figure(fig, "theoretical_efficiency")
         
         if mission_success and efficiency > 85.0:
             print(f">>> {debug.Style.GREEN}PASS: High efficiency (>85%). Trajectory is near-optimal.{debug.Style.RESET}")
@@ -1423,6 +2155,13 @@ class ReliabilitySuite:
         slope_rk = float(coeff_rk[0])
         print(f"  Estimated Euler order (dt<=0.1s): {slope_eu:.2f} (expected ~1)")
         print(f"  Estimated RK4 order (dt<=0.1s):   {slope_rk:.2f} (expected ~4)")
+        euler_pass = int(abs(slope_eu - 1.0) <= 0.25)
+        rk4_pass = int(abs(slope_rk - 4.0) <= 0.35)
+        overall_pass = int(bool(euler_pass and rk4_pass))
+        if overall_pass:
+            print(f">>> {debug.Style.GREEN}PASS: Formal integrator orders match theory.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}WARN: Measured formal order deviates from theory.{debug.Style.RESET}")
 
         self._save_table(
             "smooth_integrator_benchmark",
@@ -1434,6 +2173,17 @@ class ReliabilitySuite:
             ["method", "slope"],
             [("Euler", slope_eu), ("RK4", slope_rk)]
         )
+        self._save_table(
+            "smooth_integrator_benchmark_summary",
+            ["metric", "value"],
+            [
+                ("euler_slope", slope_eu),
+                ("rk4_slope", slope_rk),
+                ("euler_pass", euler_pass),
+                ("rk4_pass", rk4_pass),
+                ("overall_pass", overall_pass),
+            ]
+        )
 
         fig = plt.figure(figsize=(10, 6))
         plt.loglog(dt_values, euler_errors, "o-r", label=f"Euler (slope={slope_eu:.2f})")
@@ -1444,6 +2194,11 @@ class ReliabilitySuite:
         plt.grid(True, which="both", ls="-", alpha=0.3)
         plt.legend()
         self._finalize_figure(fig, "smooth_integrator_benchmark")
+        self._summary["q3_integrator_order"] = {
+            "euler_slope": slope_eu,
+            "rk4_slope": slope_rk,
+            "pass_flag": overall_pass,
+        }
 
     # 16. CONSERVATIVE INVARIANT TEST
     def analyze_conservative_invariants(self):
@@ -1493,8 +2248,15 @@ class ReliabilitySuite:
         rel_e = np.abs((energy - e0) / (abs(e0) + 1e-16))
         rel_h = np.abs((h_mag - h0) / (abs(h0) + 1e-16))
 
-        print(f"  Max relative energy drift:         {np.max(rel_e):.3e}")
-        print(f"  Max relative angular momentum drift:{np.max(rel_h):.3e}")
+        max_rel_e = float(np.max(rel_e))
+        max_rel_h = float(np.max(rel_h))
+        print(f"  Max relative energy drift:         {max_rel_e:.3e}")
+        print(f"  Max relative angular momentum drift:{max_rel_h:.3e}")
+        pass_flag = int(bool(max_rel_e <= 1e-8 and max_rel_h <= 1e-8))
+        if pass_flag:
+            print(f">>> {debug.Style.GREEN}PASS: Conservative invariants are preserved.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}WARN: Invariant drift is larger than expected.{debug.Style.RESET}")
 
         self._save_table(
             "conservative_invariants",
@@ -1502,6 +2264,16 @@ class ReliabilitySuite:
             [
                 (float(res.t[i]), float(energy[i]), float(h_mag[i]), float(rel_e[i]), float(rel_h[i]))
                 for i in range(len(res.t))
+            ]
+        )
+        self._save_table(
+            "conservative_invariants_summary",
+            ["metric", "value"],
+            [
+                ("max_rel_energy_drift", max_rel_e),
+                ("max_rel_angular_momentum_drift", max_rel_h),
+                ("pass_flag", pass_flag),
+                ("threshold", 1e-8),
             ]
         )
 
@@ -1515,6 +2287,11 @@ class ReliabilitySuite:
         ax2.grid(True, which="both", alpha=0.3)
         fig.suptitle("Conservative Invariant Check (Two-Body Dynamics)")
         self._finalize_figure(fig, "conservative_invariants")
+        self._summary["q3_invariants"] = {
+            "max_rel_energy_drift": max_rel_e,
+            "max_rel_angular_momentum_drift": max_rel_h,
+            "pass_flag": pass_flag,
+        }
 
     # 17. MONTE CARLO PRECISION TARGET
     def analyze_monte_carlo_precision_target(
@@ -1535,6 +2312,7 @@ class ReliabilitySuite:
         opt_res = self._get_baseline_opt_res()
         rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
         successes = 0
+        path_failures = 0
         n = 0
         batch_rows = []
         stop_reason = "max_samples"
@@ -1545,7 +2323,10 @@ class ReliabilitySuite:
             for _ in range(n_batch):
                 thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
                 result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
-                successes += int(result["terminal"]["strict_ok"])
+                successes += int(result["strict_path_ok"])
+                path_failures += int(
+                    bool(result["terminal"].get("strict_ok", False)) and not bool(result["strict_path_ok"])
+                )
             n += n_batch
 
             lo, hi = wilson_interval(successes, n, z=1.96)
@@ -1574,6 +2355,7 @@ class ReliabilitySuite:
             f"CI=[{final_lo*100:.2f}, {final_hi*100:.2f}], "
             f"Half-width={final_half*100:.2f}% ({final_rel_half*100:.1f}% relative)"
         )
+        print(f"  Path-violation reclassifications: {path_failures}")
         print(f"  Runtime: {elapsed:.1f}s")
         if stop_reason != "target_precision":
             print(
@@ -1685,12 +2467,17 @@ class ReliabilitySuite:
             thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
             result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
             tm = result["terminal"]
+            path = result["path"]
             alt_err = tm["alt_err_m"] if tm["terminal_valid"] else np.nan
             vel_err = tm["vel_err_m_s"] if tm["terminal_valid"] else np.nan
             fuel_margin = tm["fuel_margin_kg"] if tm["terminal_valid"] else np.nan
+            strict_ok = int(result["strict_path_ok"])
+            status = tm["status"]
+            if bool(tm.get("strict_ok", False)) and not bool(result["strict_path_ok"]):
+                status = "PATH"
             rows.append((
                 i + 1, thrust_mult, isp_mult, dens_mult,
-                alt_err, vel_err, fuel_margin, int(tm["strict_ok"]), tm["status"]
+                alt_err, vel_err, fuel_margin, strict_ok, int(path["q_ok"]), int(path["g_ok"]), status
             ))
             if np.isfinite(alt_err) and np.isfinite(vel_err) and np.isfinite(fuel_margin):
                 X.append([thrust_mult, isp_mult, dens_mult])
@@ -1707,7 +2494,8 @@ class ReliabilitySuite:
             "global_sensitivity_samples",
             [
                 "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
-                "altitude_error_m", "velocity_error_m_s", "fuel_margin_kg", "strict_success", "status"
+                "altitude_error_m", "velocity_error_m_s", "fuel_margin_kg",
+                "strict_success", "q_ok", "g_ok", "status"
             ],
             rows
         )
@@ -1816,6 +2604,366 @@ class ReliabilitySuite:
         fig.suptitle("Global Sensitivity Ranking (PRCC + Bootstrap Confidence Intervals)")
         self._finalize_figure(fig, "global_sensitivity_ranking")
 
+    # 19. Q2 UNCERTAINTY BUDGET (MINIMUM FUEL)
+    def analyze_q2_uncertainty_budget(self, parameter_samples=30):
+        debug._print_sub_header("19. Q2 Uncertainty Budget (Minimum Fuel)")
+        print("Quantifying minimum-fuel uncertainty split: numerical vs parameter sources.")
+
+        opt_nom = self._get_baseline_opt_res()
+        m_final_nom = self._extract_final_mass_from_opt(opt_nom)
+        if not np.isfinite(m_final_nom):
+            print("  Baseline optimization did not return a valid final mass. Skipping.")
+            return
+        fuel_nominal = float(self.base_config.launch_mass - m_final_nom)
+
+        # --- A) Numerical component 1: transcription/grid sensitivity of objective ---
+        node_counts = [120, 130, 140]
+        grid_rows = []
+        grid_fuels = []
+
+        print("\n  [A] Grid sensitivity on minimum fuel:")
+        print(f"  {'Nodes':<6} | {'Status':<10} | {'Min Fuel (kg)':<15} | {'Runtime (s)':<10}")
+        print("  " + "-" * 52)
+        for N in node_counts:
+            cfg = copy.deepcopy(self.base_config)
+            cfg.num_nodes = int(N)
+            t0 = time.time()
+            try:
+                with suppress_stdout():
+                    env_i = Environment(self.base_env_config)
+                    veh_i = Vehicle(cfg, env_i)
+                    opt_i = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
+                ok = bool(opt_i.get("success", False))
+                m_final_i = self._extract_final_mass_from_opt(opt_i) if ok else np.nan
+                fuel_i = float(cfg.launch_mass - m_final_i) if np.isfinite(m_final_i) else np.nan
+                status = "Converged" if ok and np.isfinite(fuel_i) else "Failed"
+            except Exception:
+                ok = False
+                fuel_i = np.nan
+                status = "Error"
+            dt = float(time.time() - t0)
+            if np.isfinite(fuel_i):
+                grid_fuels.append(fuel_i)
+            grid_rows.append((N, int(ok), status, fuel_i, dt))
+            print(f"  {N:<6d} | {status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}")
+
+        sigma_grid = float(np.std(grid_fuels, ddof=1)) if len(grid_fuels) >= 2 else np.nan
+
+        # --- B) Numerical component 2: integrator tolerance sensitivity in verification ---
+        integrator_tols = [
+            (1e-9, 1e-12),
+            (1e-10, 1e-13),
+            (1e-11, 1e-14),
+            (1e-12, 1e-14),
+        ]
+        integ_rows = []
+        integ_fuels = []
+
+        print("\n  [B] Integrator sensitivity on verified terminal fuel:")
+        print(f"  {'RTOL':<8} | {'ATOL':<8} | {'Status':<10} | {'Path':<6} | {'Fuel Used (kg)':<15}")
+        print("  " + "-" * 62)
+        for rtol, atol in integrator_tols:
+            with suppress_stdout():
+                sim_i = run_simulation(opt_nom, self.veh, self.base_config, rtol=rtol, atol=atol)
+            term_i = evaluate_terminal_state(sim_i, self.base_config, self.base_env_config)
+            traj_i = self._trajectory_diagnostics(sim_i, self.veh, self.base_config)
+            path_i = self._evaluate_path_compliance(traj_i, self.base_config)
+            strict_path_i = int(self._is_strict_path_success(term_i, traj_i, self.base_config))
+            m_final_sim = self._extract_final_mass_from_sim(sim_i)
+            fuel_sim = float(self.base_config.launch_mass - m_final_sim) if np.isfinite(m_final_sim) else np.nan
+            status = term_i.get("status", "SIM_ERROR")
+            if bool(term_i.get("strict_ok", False)) and not bool(strict_path_i):
+                status = "PATH"
+            integ_rows.append((
+                rtol, atol,
+                int(term_i.get("terminal_valid", False)),
+                int(term_i.get("strict_ok", False)),
+                strict_path_i,
+                int(path_i["q_ok"]), int(path_i["g_ok"]),
+                status, fuel_sim
+            ))
+            if np.isfinite(fuel_sim):
+                integ_fuels.append(fuel_sim)
+            print(f"  {rtol:<8.0e} | {atol:<8.0e} | {status:<10} | {strict_path_i:<6d} | {fuel_sim:<15.3f}")
+
+        sigma_integrator = float(np.std(integ_fuels, ddof=1)) if len(integ_fuels) >= 2 else np.nan
+        fuel_sim_nom = integ_rows[0][8] if len(integ_rows) > 0 else np.nan
+        bias_opt_vs_sim = abs(fuel_nominal - fuel_sim_nom) if np.isfinite(fuel_sim_nom) else np.nan
+
+        sigma_numerical = self._rss([sigma_grid, sigma_integrator, bias_opt_vs_sim])
+
+        # --- C) Parameter uncertainty on the minimum-fuel estimate ---
+        n_param = max(30, int(parameter_samples))
+        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        param_rows = []
+        param_fuels = []
+        print(f"\n  [C] Parameter uncertainty via re-optimization (N={n_param}):")
+        print(
+            f"  {'Run':<4} | {'Thrust':<7} | {'ISP':<7} | {'Density':<7} | "
+            f"{'Status':<10} | {'Min Fuel (kg)':<15} | {'Runtime (s)':<10}"
+        )
+        print("  " + "-" * 88)
+        for i in range(n_param):
+            thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
+            cfg_i = copy.deepcopy(self.base_config)
+            env_cfg_i = copy.deepcopy(self.base_env_config)
+            cfg_i.stage_1.thrust_vac *= thrust_mult
+            cfg_i.stage_2.thrust_vac *= thrust_mult
+            cfg_i.stage_1.isp_vac *= isp_mult
+            cfg_i.stage_2.isp_vac *= isp_mult
+            env_cfg_i.density_multiplier = dens_mult
+
+            t0 = time.time()
+            opt_success = False
+            strict_ok = False
+            strict_path_ok = False
+            fuel_i = np.nan
+            status = "OPT_FAIL"
+            path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+            try:
+                with suppress_stdout():
+                    env_i = Environment(env_cfg_i)
+                    veh_i = Vehicle(cfg_i, env_i)
+                    opt_i = solve_optimal_trajectory(cfg_i, veh_i, env_i, print_level=0)
+                opt_success = bool(opt_i.get("success", False))
+                if opt_success:
+                    m_final_i = self._extract_final_mass_from_opt(opt_i)
+                    if np.isfinite(m_final_i):
+                        fuel_i = float(cfg_i.launch_mass - m_final_i)
+                    with suppress_stdout():
+                        sim_i = run_simulation(opt_i, veh_i, cfg_i, rtol=1e-9, atol=1e-12)
+                    term_i = evaluate_terminal_state(sim_i, cfg_i, env_cfg_i)
+                    traj_i = self._trajectory_diagnostics(sim_i, veh_i, cfg_i)
+                    path_i = self._evaluate_path_compliance(traj_i, cfg_i)
+                    strict_ok = bool(term_i.get("strict_ok", False))
+                    strict_path_ok = bool(self._is_strict_path_success(term_i, traj_i, cfg_i))
+                    status = term_i.get("status", "SIM_ERROR")
+                    if strict_ok and not strict_path_ok:
+                        status = "PATH"
+            except Exception:
+                status = "ERROR"
+                path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+
+            dt = float(time.time() - t0)
+            if opt_success and strict_path_ok and np.isfinite(fuel_i):
+                param_fuels.append(fuel_i)
+
+            param_rows.append((
+                i + 1, thrust_mult, isp_mult, dens_mult,
+                int(opt_success), int(strict_ok), int(strict_path_ok),
+                int(path_i["q_ok"]), int(path_i["g_ok"]), status, fuel_i, dt
+            ))
+            print(
+                f"  {i+1:<4d} | {thrust_mult:<7.3f} | {isp_mult:<7.3f} | {dens_mult:<7.3f} | "
+                f"{status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}"
+            )
+
+        sigma_parameter = float(np.std(param_fuels, ddof=1)) if len(param_fuels) >= 2 else np.nan
+        param_mean = float(np.mean(param_fuels)) if len(param_fuels) > 0 else np.nan
+        param_p025 = float(np.percentile(param_fuels, 2.5)) if len(param_fuels) > 0 else np.nan
+        param_p975 = float(np.percentile(param_fuels, 97.5)) if len(param_fuels) > 0 else np.nan
+        valid_param_rate = float(len(param_fuels) / max(n_param, 1))
+        sigma_param_ci_low = np.nan
+        sigma_param_ci_high = np.nan
+        if len(param_fuels) >= 8:
+            rng_boot = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+            arr = np.array(param_fuels, dtype=float)
+            boots = np.zeros(1200, dtype=float)
+            for b in range(len(boots)):
+                idx = rng_boot.integers(0, len(arr), size=len(arr))
+                boots[b] = np.std(arr[idx], ddof=1)
+            sigma_param_ci_low = float(np.percentile(boots, 2.5))
+            sigma_param_ci_high = float(np.percentile(boots, 97.5))
+
+        # --- D) Total uncertainty and contribution split ---
+        sigma_total = self._rss([sigma_numerical, sigma_parameter])
+        ci95_half_width = 1.96 * sigma_total if np.isfinite(sigma_total) else np.nan
+        sigma_total_ci_low = self._rss([sigma_numerical, sigma_param_ci_low]) if np.isfinite(sigma_param_ci_low) else np.nan
+        sigma_total_ci_high = self._rss([sigma_numerical, sigma_param_ci_high]) if np.isfinite(sigma_param_ci_high) else np.nan
+
+        if np.isfinite(sigma_total) and sigma_total > 0.0:
+            var_total = sigma_total * sigma_total
+            num_var = sigma_numerical * sigma_numerical if np.isfinite(sigma_numerical) else 0.0
+            param_var = sigma_parameter * sigma_parameter if np.isfinite(sigma_parameter) else 0.0
+            numerical_share_pct = 100.0 * num_var / var_total
+            parameter_share_pct = 100.0 * param_var / var_total
+        else:
+            numerical_share_pct = np.nan
+            parameter_share_pct = np.nan
+
+        if np.isfinite(ci95_half_width) and ci95_half_width > 0.0:
+            rounding_step_kg = float(10.0 ** np.floor(np.log10(ci95_half_width)))
+            reported_uncertainty_kg = float(np.round(ci95_half_width / rounding_step_kg) * rounding_step_kg)
+            reported_fuel_kg = float(np.round(fuel_nominal / rounding_step_kg) * rounding_step_kg)
+        else:
+            rounding_step_kg = np.nan
+            reported_uncertainty_kg = np.nan
+            reported_fuel_kg = np.nan
+
+        print("\n  Q2 uncertainty budget summary (minimum fuel):")
+        print(f"    Baseline minimum fuel (nominal): {fuel_nominal:.3f} kg")
+        print(f"    Numerical sigma (kg):            {sigma_numerical:.3f}")
+        print(f"      - Grid sigma (kg):             {sigma_grid:.3f}")
+        print(f"      - Integrator sigma (kg):       {sigma_integrator:.3f}")
+        print(f"      - Opt-vs-sim bias (kg):        {bias_opt_vs_sim:.3f}")
+        print(f"    Parameter sigma (kg):            {sigma_parameter:.3f}")
+        if np.isfinite(sigma_param_ci_low) and np.isfinite(sigma_param_ci_high):
+            print(f"      - Parameter sigma 95% CI (kg): [{sigma_param_ci_low:.3f}, {sigma_param_ci_high:.3f}]")
+        print(f"    Total sigma (kg):                {sigma_total:.3f}")
+        if np.isfinite(sigma_total_ci_low) and np.isfinite(sigma_total_ci_high):
+            print(f"      - Total sigma range from sigma_param CI (kg): [{sigma_total_ci_low:.3f}, {sigma_total_ci_high:.3f}]")
+        print(f"    95% half-width (kg):             {ci95_half_width:.3f}")
+        print(f"    Variance share numerical:        {numerical_share_pct:.1f}%")
+        print(f"    Variance share parameter:        {parameter_share_pct:.1f}%")
+        print(f"    Valid parameter solves:          {len(param_fuels)}/{n_param} ({100.0*valid_param_rate:.1f}%)")
+        if np.isfinite(reported_fuel_kg) and np.isfinite(reported_uncertainty_kg):
+            print(
+                f"    Suggested report form:            "
+                f"{reported_fuel_kg:.0f} +/- {reported_uncertainty_kg:.0f} kg (95%)"
+            )
+
+        if len(param_fuels) < 20:
+            print(
+                f">>> {debug.Style.YELLOW}WARN: Too few valid parameter re-optimizations for a stable "
+                f"parameter-uncertainty estimate.{debug.Style.RESET}"
+            )
+
+        self._save_table(
+            "q2_uncertainty_grid",
+            ["nodes", "solver_success", "status", "minimum_fuel_kg", "runtime_s"],
+            grid_rows
+        )
+        self._save_table(
+            "q2_uncertainty_integrator",
+            [
+                "rtol", "atol", "terminal_valid", "strict_ok",
+                "strict_path_ok", "q_ok", "g_ok", "status", "fuel_used_kg"
+            ],
+            integ_rows
+        )
+        self._save_table(
+            "q2_uncertainty_parameter_samples",
+            [
+                "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
+                "optimizer_success", "strict_ok", "strict_path_ok", "q_ok", "g_ok",
+                "status", "minimum_fuel_kg", "runtime_s"
+            ],
+            param_rows
+        )
+        self._save_table(
+            "q2_uncertainty_budget",
+            ["metric", "value"],
+            [
+                ("baseline_minimum_fuel_kg", fuel_nominal),
+                ("sigma_grid_kg", sigma_grid),
+                ("sigma_integrator_kg", sigma_integrator),
+                ("bias_opt_vs_sim_kg", bias_opt_vs_sim),
+                ("sigma_numerical_kg", sigma_numerical),
+                ("sigma_parameter_kg", sigma_parameter),
+                ("sigma_parameter_ci_low_95_kg", sigma_param_ci_low),
+                ("sigma_parameter_ci_high_95_kg", sigma_param_ci_high),
+                ("sigma_total_kg", sigma_total),
+                ("sigma_total_from_sigma_param_ci_low_kg", sigma_total_ci_low),
+                ("sigma_total_from_sigma_param_ci_high_kg", sigma_total_ci_high),
+                ("ci95_half_width_kg", ci95_half_width),
+                ("numerical_variance_share_percent", numerical_share_pct),
+                ("parameter_variance_share_percent", parameter_share_pct),
+                ("parameter_valid_rate", valid_param_rate),
+                ("parameter_mean_minimum_fuel_kg", param_mean),
+                ("parameter_p2p5_minimum_fuel_kg", param_p025),
+                ("parameter_p97p5_minimum_fuel_kg", param_p975),
+                ("report_rounding_step_kg", rounding_step_kg),
+                ("report_value_kg", reported_fuel_kg),
+                ("report_uncertainty_kg", reported_uncertainty_kg),
+            ]
+        )
+
+        fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+        ax1, ax2, ax3, ax4 = axes.flatten()
+
+        # Grid objective sensitivity.
+        grid_nodes_plot = np.array([r[0] for r in grid_rows if np.isfinite(r[3])], dtype=float)
+        grid_fuels_plot = np.array([r[3] for r in grid_rows if np.isfinite(r[3])], dtype=float)
+        if len(grid_nodes_plot) > 0:
+            grid_delta = grid_fuels_plot - fuel_nominal
+            ax1.plot(grid_nodes_plot, grid_delta, "o-", color="tab:blue")
+            ax1.axhline(0.0, color="tab:blue", linestyle="--", alpha=0.5, label="Nominal N=140")
+            ax1.set_xlabel("Collocation Nodes")
+            ax1.set_ylabel("Delta Minimum Fuel (kg)")
+            ax1.legend(loc="best")
+        else:
+            ax1.text(0.5, 0.5, "No converged grid runs", transform=ax1.transAxes, ha="center", va="center")
+        ax1.set_title("Numerical: Grid Sensitivity")
+        ax1.grid(True, alpha=0.3)
+
+        # Integrator sensitivity.
+        tol_plot = np.array([r[0] for r in integ_rows if np.isfinite(r[8])], dtype=float)
+        fuel_plot = np.array([r[8] for r in integ_rows if np.isfinite(r[8])], dtype=float)
+        if len(tol_plot) > 0:
+            ref_fuel = fuel_plot[-1]
+            drift = np.abs(fuel_plot - ref_fuel)
+            ax2.loglog(tol_plot, np.maximum(drift, 1e-12), "s-", color="tab:orange")
+            ax2.invert_xaxis()
+            ax2.set_xlabel("Integrator rtol")
+            ax2.set_ylabel("|Fuel Drift| vs tightest (kg)")
+        else:
+            ax2.text(0.5, 0.5, "No valid integrator runs", transform=ax2.transAxes, ha="center", va="center")
+        ax2.set_title("Numerical: Integrator Sensitivity")
+        ax2.grid(True, which="both", alpha=0.3)
+
+        # Parameter uncertainty distribution.
+        if len(param_fuels) > 0:
+            ax3.hist(param_fuels, bins=min(12, max(5, len(param_fuels))), color="tab:green", alpha=0.75, edgecolor="k")
+            ax3.axvline(fuel_nominal, color="tab:blue", linestyle="--", linewidth=1.5, label="Nominal")
+            ax3.set_xlabel("Minimum Fuel (kg)")
+            ax3.set_ylabel("Count")
+            ax3.legend(loc="best")
+        else:
+            ax3.text(0.5, 0.5, "No valid parameter re-optimizations", transform=ax3.transAxes, ha="center", va="center")
+        ax3.set_title("Parameter Uncertainty (Re-optimization)")
+        ax3.grid(True, axis="y", alpha=0.3)
+
+        # Contribution split.
+        comp_labels = ["Grid", "Integrator", "Opt-Sim bias", "Numerical", "Parameter", "Total"]
+        comp_vals = [sigma_grid, sigma_integrator, bias_opt_vs_sim, sigma_numerical, sigma_parameter, sigma_total]
+        comp_plot = [1e-6 if (not np.isfinite(v) or v <= 0.0) else float(v) for v in comp_vals]
+        colors = ["tab:blue", "tab:orange", "tab:gray", "tab:purple", "tab:green", "tab:red"]
+        ax4.bar(comp_labels, comp_plot, color=colors, alpha=0.8)
+        ax4.set_ylabel("Uncertainty sigma (kg, log scale)")
+        ax4.set_yscale("log")
+        ax4.set_title("Q2 Uncertainty Budget")
+        ax4.tick_params(axis="x", rotation=20)
+        ax4.grid(True, axis="y", alpha=0.3)
+        if np.isfinite(numerical_share_pct) and np.isfinite(parameter_share_pct):
+            ax4.text(
+                0.02,
+                0.97,
+                (
+                    f"Variance shares:\n"
+                    f"Numerical {numerical_share_pct:.3f}%\n"
+                    f"Parameter {parameter_share_pct:.3f}%\n"
+                    f"95% half-width: {ci95_half_width:.0f} kg"
+                ),
+                transform=ax4.transAxes,
+                va="top",
+                ha="left",
+                bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.7")
+            )
+
+        fig.suptitle("Q2: Minimum-Fuel Accuracy and Uncertainty Split")
+        self._finalize_figure(fig, "q2_uncertainty_budget")
+        self._summary["q2_budget"] = {
+            "baseline_minimum_fuel_kg": fuel_nominal,
+            "sigma_numerical_kg": sigma_numerical,
+            "sigma_parameter_kg": sigma_parameter,
+            "sigma_parameter_ci_low_95_kg": sigma_param_ci_low,
+            "sigma_parameter_ci_high_95_kg": sigma_param_ci_high,
+            "sigma_total_kg": sigma_total,
+            "ci95_half_width_kg": ci95_half_width,
+            "numerical_variance_share_percent": numerical_share_pct,
+            "parameter_variance_share_percent": parameter_share_pct,
+        }
+
     # 21. EVENT-TIME CONVERGENCE
     def analyze_event_time_convergence(self):
         debug._print_sub_header("21. Event-Time Convergence vs Integrator Tolerance")
@@ -1897,7 +3045,6 @@ class ReliabilitySuite:
             print(f"  Max |Δt Max-Q| over sweep: {np.max(finite_q):.3f} s")
         if len(finite_g) > 0:
             print(f"  Max |Δt Max-G| over sweep: {np.max(finite_g):.3f} s")
-        dq_val = np.array([r[6] for r in drift_rows[:-1]], dtype=float)
         dg_val = np.array([r[7] for r in drift_rows[:-1]], dtype=float)
         if np.any(np.isfinite(dg_val)) and np.nanmax(dg_val) < 0.05 and np.any(np.isfinite(finite_g)) and np.nanmax(finite_g) > 1.0:
             print("  Note: Max-G time drift is large while peak value drift is tiny (flat-peak timing ambiguity).")
@@ -1935,15 +3082,20 @@ class ReliabilitySuite:
             for ix, thrust in enumerate(thrust_vals):
                 result = self._simulate_uncertainty_case(opt_res, thrust, 1.0, dens)
                 tm = result["terminal"]
-                success = int(tm["strict_ok"])
+                path = result["path"]
+                success = int(result["strict_path_ok"])
                 margin = tm["fuel_margin_kg"] if tm["terminal_valid"] else np.nan
                 orbit_err = normalized_orbit_error(tm)
                 success_map[iy, ix] = success
                 margin_map[iy, ix] = margin
                 orbit_err_map[iy, ix] = orbit_err
+                status = tm["status"]
+                if bool(tm.get("strict_ok", False)) and not bool(result["strict_path_ok"]):
+                    status = "PATH"
                 rows.append((
                     float(thrust), float(dens), int(success), float(margin),
-                    float(orbit_err), float(tm["alt_err_m"]), float(tm["vel_err_m_s"]), tm["status"]
+                    float(orbit_err), float(tm["alt_err_m"]), float(tm["vel_err_m_s"]),
+                    int(path["q_ok"]), int(path["g_ok"]), status
                 ))
 
         self._save_table(
@@ -1951,7 +3103,7 @@ class ReliabilitySuite:
             [
                 "thrust_multiplier", "density_multiplier", "strict_success",
                 "fuel_margin_kg", "normalized_orbit_error",
-                "altitude_error_m", "velocity_error_m_s", "status"
+                "altitude_error_m", "velocity_error_m_s", "q_ok", "g_ok", "status"
             ],
             rows
         )
@@ -2003,9 +3155,243 @@ class ReliabilitySuite:
 
         strict_count = int(np.sum(success_map))
         total_count = int(success_map.size)
+        strict_fraction = strict_count / max(total_count, 1)
+        orbit_feasible = np.isfinite(orbit_err_map) & (orbit_err_map <= 1.0)
+        orbit_feasible_count = int(np.sum(orbit_feasible))
+        orbit_feasible_fraction = orbit_feasible_count / max(total_count, 1)
+
+        dens_idx_nom = int(np.argmin(np.abs(density_vals - 1.0)))
+        row_nom = orbit_err_map[dens_idx_nom, :]
+        row_lower = np.nan
+        row_upper = np.nan
+
+        # Interpolate threshold crossings on nominal-density row.
+        row_crossings = []
+        for i in range(1, len(thrust_vals)):
+            e0 = row_nom[i - 1]
+            e1 = row_nom[i]
+            if not (np.isfinite(e0) and np.isfinite(e1)):
+                continue
+            f0 = e0 - 1.0
+            f1 = e1 - 1.0
+            if abs(f0) < 1e-12:
+                row_crossings.append(float(thrust_vals[i - 1]))
+            if f0 * f1 < 0.0:
+                row_crossings.append(float(np.interp(0.0, [f0, f1], [thrust_vals[i - 1], thrust_vals[i]])))
+            if i == len(thrust_vals) - 1 and abs(f1) < 1e-12:
+                row_crossings.append(float(thrust_vals[i]))
+        row_crossings = sorted(row_crossings)
+        if len(row_crossings) > 0:
+            row_lower = float(min(row_crossings))
+            row_upper = float(max(row_crossings))
+        else:
+            # Fallback: use discrete feasible band if no crossing can be interpolated.
+            row_mask = np.isfinite(row_nom) & (row_nom <= 1.0)
+            if np.any(row_mask):
+                row_lower = float(np.min(thrust_vals[row_mask]))
+                row_upper = float(np.max(thrust_vals[row_mask]))
+        margin_lower_pct = (1.0 - row_lower) * 100.0 if np.isfinite(row_lower) else np.nan
+        margin_upper_pct = (row_upper - 1.0) * 100.0 if np.isfinite(row_upper) else np.nan
+        margin_candidates = [m for m in [margin_lower_pct, margin_upper_pct] if np.isfinite(m)]
+        min_margin_pct = float(np.min(margin_candidates)) if len(margin_candidates) > 0 else np.nan
+
+        self._save_table(
+            "bifurcation_2d_summary",
+            ["metric", "value"],
+            [
+                ("strict_success_fraction", strict_fraction),
+                ("orbit_feasible_fraction", orbit_feasible_fraction),
+                ("nominal_density_row_lower_thrust", row_lower),
+                ("nominal_density_row_upper_thrust", row_upper),
+                ("nominal_density_row_lower_margin_percent", margin_lower_pct),
+                ("nominal_density_row_upper_margin_percent", margin_upper_pct),
+                ("nominal_density_row_min_margin_percent", min_margin_pct),
+            ]
+        )
+        self._summary["q5_bifurcation_2d"] = {
+            "strict_success_fraction": strict_fraction,
+            "orbit_feasible_fraction": orbit_feasible_fraction,
+            "nominal_row_min_margin_percent": min_margin_pct,
+        }
+
         print(f"  Strict-success points: {strict_count}/{total_count}")
+        print(f"  Orbit-feasible points (error<=1): {orbit_feasible_count}/{total_count}")
+        if np.isfinite(min_margin_pct):
+            print(f"  Nominal-density row minimum thrust margin: {min_margin_pct:.2f}%")
         self._finalize_figure(fig, "bifurcation_2d_map")
         print(f">>> {debug.Style.GREEN}PASS: 2D bifurcation map generated.{debug.Style.RESET}")
+
+    # 23. MODEL LIMITATIONS REGISTER (Q6)
+    def analyze_model_limitations(self):
+        debug._print_sub_header("23. Model Limitations and Validity Bounds")
+        print("Documenting modeling assumptions, likely bias directions, and mitigation evidence.")
+
+        rows = [
+            (
+                "open_loop_control",
+                "No feedback controller; controls are replayed open-loop.",
+                "Tends to overstate fragility under perturbations.",
+                "finite_time_sensitivity, bifurcation, bifurcation_2d_map",
+                "High",
+            ),
+            (
+                "reduced_dof",
+                "Translational dynamics only (no full attitude/actuator dynamics).",
+                "Can misestimate controllability and steering losses.",
+                "drift, conservative_invariants",
+                "High",
+            ),
+            (
+                "aero_prop_models",
+                "Aerodynamics and propulsion use reduced lookup/parametric models.",
+                "Bias in drag/thrust loss estimates and fuel optimum.",
+                "theoretical_efficiency, q2_uncertainty_budget",
+                "Medium",
+            ),
+            (
+                "atmosphere_uncertainty",
+                "Atmospheric uncertainty modeled with scalar density multiplier.",
+                "May underrepresent profile/wind-structure uncertainty.",
+                "global_sensitivity, monte_carlo_precision_target",
+                "Medium",
+            ),
+            (
+                "numerical_transcription",
+                "Finite collocation grid and finite solver tolerances.",
+                "Can introduce discretization/integration bias in objective.",
+                "grid_independence, integrator_tolerance, q2_uncertainty_budget",
+                "Medium",
+            ),
+            (
+                "ideal_staging",
+                "Stage transitions are idealized without hardware faults.",
+                "Underestimates real mission risk and contingency fuel.",
+                "event_time_convergence, drift",
+                "Medium",
+            ),
+        ]
+
+        self._save_table(
+            "model_limitations",
+            ["id", "assumption", "likely_impact", "mitigation_evidence", "severity"],
+            rows,
+        )
+
+        sev_map = {"High": 3, "Medium": 2, "Low": 1}
+        severity_score = int(np.sum([sev_map.get(r[4], 1) for r in rows]))
+        high_count = int(np.sum([1 for r in rows if r[4] == "High"]))
+        print(f"  Documented limitations: {len(rows)}")
+        print(f"  High-severity limitations: {high_count}")
+        self._save_table(
+            "model_limitations_summary",
+            ["metric", "value"],
+            [
+                ("n_limitations", len(rows)),
+                ("n_high_severity", high_count),
+                ("severity_score", severity_score),
+            ],
+        )
+        self._summary["q6_limitations"] = {
+            "n_limitations": len(rows),
+            "n_high_severity": high_count,
+            "severity_score": severity_score,
+        }
+
+    # 24. CONCLUSION SUPPORT SYNTHESIS (Q7)
+    def analyze_q7_conclusion_support(self):
+        debug._print_sub_header("24. Q7 Conclusion Support Synthesis")
+        print("Synthesizing evidence for the final engineering conclusion.")
+
+        q2 = self._summary.get("q2_budget", {})
+        q5 = self._summary.get("q5_bifurcation", {})
+        q7 = self._summary.get("q7_finite_time", {})
+
+        # Fallback to saved summary tables if upstream tests were skipped.
+        ci95_half_width_kg = q2.get("ci95_half_width_kg", self._get_saved_metric("q2_uncertainty_budget", "ci95_half_width_kg"))
+        param_share_pct = q2.get(
+            "parameter_variance_share_percent",
+            self._get_saved_metric("q2_uncertainty_budget", "parameter_variance_share_percent"),
+        )
+        num_share_pct = q2.get(
+            "numerical_variance_share_percent",
+            self._get_saved_metric("q2_uncertainty_budget", "numerical_variance_share_percent"),
+        )
+        min_margin_pct = q5.get("min_margin_percent", self._get_saved_metric("bifurcation_summary", "min_margin_percent"))
+        lower_boundary = q5.get(
+            "lower_boundary",
+            self._get_saved_metric("bifurcation_summary", "lower_orbit_boundary_thrust_multiplier")
+        )
+        upper_boundary = q5.get(
+            "upper_boundary",
+            self._get_saved_metric("bifurcation_summary", "upper_orbit_boundary_thrust_multiplier")
+        )
+        growth_rate = q7.get("growth_rate_s_inv", self._get_saved_metric("finite_time_divergence_summary", "growth_rate_s_inv"))
+        fit_r2 = q7.get("fit_r2", self._get_saved_metric("finite_time_divergence_summary", "fit_r2"))
+        final_div_km = q7.get(
+            "final_divergence_km",
+            self._get_saved_metric("finite_time_divergence_summary", "final_divergence_km"),
+        )
+        boundary_width_pct = (
+            (upper_boundary - lower_boundary) * 100.0
+            if np.isfinite(lower_boundary) and np.isfinite(upper_boundary)
+            else np.nan
+        )
+
+        evidence_rows = [
+            ("q2_ci95_half_width_kg", ci95_half_width_kg),
+            ("q2_parameter_variance_share_percent", param_share_pct),
+            ("q2_numerical_variance_share_percent", num_share_pct),
+            ("q5_min_thrust_margin_percent", min_margin_pct),
+            ("q5_lower_boundary_thrust_multiplier", lower_boundary),
+            ("q5_upper_boundary_thrust_multiplier", upper_boundary),
+            ("q5_boundary_width_percent", boundary_width_pct),
+            ("q7_growth_rate_s_inv", growth_rate),
+            ("q7_growth_fit_r2", fit_r2),
+            ("q7_final_divergence_km", final_div_km),
+        ]
+
+        # Pragmatic decision rule for "open-loop fragility" support.
+        growth_supported = bool(np.isfinite(growth_rate) and np.isfinite(fit_r2) and growth_rate > 0.0 and fit_r2 >= 0.7)
+        # Require a valid bracket around nominal thrust to avoid treating degenerate zero-width artifacts as evidence.
+        has_nominal_bracket = bool(
+            np.isfinite(lower_boundary) and np.isfinite(upper_boundary)
+            and lower_boundary < 1.0 < upper_boundary
+            and (upper_boundary - lower_boundary) > 1e-4
+        )
+        cliff_supported = bool(
+            has_nominal_bracket and np.isfinite(min_margin_pct) and min_margin_pct > 0.0 and min_margin_pct <= 3.0
+        )
+        uncertainty_supported = bool(np.isfinite(param_share_pct) and np.isfinite(num_share_pct) and param_share_pct > num_share_pct)
+        support_score = int(growth_supported) + int(cliff_supported) + int(uncertainty_supported)
+        conclusion_supported = int(support_score >= 2)
+
+        self._save_table(
+            "q7_conclusion_support",
+            ["metric", "value"],
+            evidence_rows
+            + [
+                ("growth_supported", int(growth_supported)),
+                ("cliff_supported", int(cliff_supported)),
+                ("has_nominal_bracket", int(has_nominal_bracket)),
+                ("uncertainty_supported", int(uncertainty_supported)),
+                ("support_score", support_score),
+                ("conclusion_supported", conclusion_supported),
+            ],
+        )
+
+        print(f"  Growth evidence (finite-time sensitivity): {int(growth_supported)}")
+        print(f"  Cliff-edge evidence (bifurcation margin): {int(cliff_supported)}")
+        print(f"  Valid nominal bracket in bifurcation sweep: {int(has_nominal_bracket)}")
+        print(f"  Uncertainty evidence (parameter > numerical): {int(uncertainty_supported)}")
+        if conclusion_supported:
+            print(f">>> {debug.Style.GREEN}PASS: Evidence supports the Q7 engineering conclusion.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}WARN: Evidence is incomplete for a strong Q7 claim.{debug.Style.RESET}")
+
+        self._summary["q7_conclusion"] = {
+            "support_score": support_score,
+            "conclusion_supported": conclusion_supported,
+        }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reliability and robustness analysis suite.")

@@ -6,10 +6,18 @@ import numpy as np
 from config import ScalingConfig
 import warnings
 import time
+import copy
 import guidance
 import debug
 
-def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
+def solve_optimal_trajectory(
+    config,
+    vehicle,
+    environment,
+    print_level=5,
+    initial_guess_override=None,
+    solver_max_cpu_time=None
+):
     """
     Formulates and solves the trajectory optimization problem using CasADi.
     """
@@ -266,11 +274,16 @@ def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
     opti.minimize(-X3[6, -1])
     
     # --- 5. INITIALIZATION ---
-    print(f"[Optimizer] Calling Guidance module for Warm Start...")
     t_guess = time.time()
-    # Guidance generates N+1 points (nodes) from N intervals.
-    guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N)
-    print(f"[Optimizer] Guidance generated in {time.time() - t_guess:.2f}s")
+    if initial_guess_override is None:
+        print(f"[Optimizer] Calling Guidance module for Warm Start...")
+        # Guidance generates N+1 points (nodes) from N intervals.
+        guess = guidance.get_initial_guess(config, vehicle, environment, num_nodes=N)
+        print(f"[Optimizer] Guidance generated in {time.time() - t_guess:.2f}s")
+    else:
+        print(f"[Optimizer] Using external warm-start guess...")
+        guess = copy.deepcopy(initial_guess_override)
+        print(f"[Optimizer] External guess loaded in {time.time() - t_guess:.2f}s")
     
     # DEBUG: Analyze Guidance Guess
     x1_end = guess["X1"][:, -1]
@@ -308,7 +321,12 @@ def solve_optimal_trajectory(config, vehicle, environment, print_level=5):
     
     # --- 6. SOLVE ---
     print(f"[Optimizer] Starting IPOPT solver (Max Iter={config.max_iter})...")
-    opti.solver("ipopt", {"expand": True}, {"max_iter": config.max_iter, "tol": 1e-6, "print_level": print_level})
+    ipopt_opts = {"max_iter": config.max_iter, "tol": 1e-6, "print_level": print_level}
+    if solver_max_cpu_time is not None:
+        max_cpu_time = float(solver_max_cpu_time)
+        if max_cpu_time > 0.0:
+            ipopt_opts["max_cpu_time"] = max_cpu_time
+    opti.solver("ipopt", {"expand": True}, ipopt_opts)
     
     # --- 6a. DEBUG STRUCTURE ---
     debug.debug_optimization_structure(opti)
