@@ -1,0 +1,9 @@
+metric,value
+lower_orbit_boundary_thrust_multiplier,0.998959693909
+upper_orbit_boundary_thrust_multiplier,1.00103745624
+fuel_boundary_thrust_multiplier,nan
+lower_margin_percent,0.104030609131
+upper_margin_percent,0.103745624207
+min_margin_percent,0.103745624207
+nominal_orbit_error,0.000328877205693
+nominal_status,Orbit

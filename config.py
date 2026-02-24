@@ -161,7 +161,7 @@ class ReliabilityAnalysisToggles:
     Enables/disables each analysis block in relabilityanalysis.py.
     Field order mirrors ReliabilitySuite.run_all() execution order.
     """
-    initial_guess_robustness: bool = True
+    randomized_multistart: bool = True
     grid_independence: bool = True
     collocation_defect_audit: bool = True
     theoretical_efficiency: bool = True
@@ -169,12 +169,15 @@ class ReliabilityAnalysisToggles:
     event_time_convergence: bool = True
     monte_carlo_precision_target: bool = True
     global_sensitivity: bool = True
+    q2_uncertainty_budget: bool = True
     smooth_integrator_benchmark: bool = True
     conservative_invariants: bool = True
     finite_time_sensitivity: bool = True
     bifurcation: bool = True
     bifurcation_2d_map: bool = True
     drift: bool = True
+    model_limitations: bool = True
+    q7_conclusion_support: bool = True
 
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(

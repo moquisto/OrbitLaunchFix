@@ -82,12 +82,12 @@ Run the report-focused validation suite:
 The reliability suite is scoped to answer the following report questions:
 
 1. **Q1: Have we found a credible minimum-fuel solution (within this model)?**
-   * **Tests**: `grid_independence`, `collocation_defect_audit`, `initial_guess_robustness`, `theoretical_efficiency`.
-   * **Role**: Shows the solution is not a mesh artifact, satisfies dynamics consistently, is not overly warm-start dependent, and is benchmarked against a theoretical delta-v floor.
+   * **Tests**: `grid_independence`, `collocation_defect_audit`, `randomized_multistart`, `theoretical_efficiency`.
+   * **Role**: Shows the solution is not a mesh artifact, satisfies dynamics consistently, is robust under randomized starts in guidance space, and is benchmarked against a theoretical delta-v floor.
 
-2. **Q2: How accurate is the result, and where does uncertainty lie?**
-   * **Tests**: `integrator_tolerance`, `event_time_convergence`, `monte_carlo_precision_target`, `global_sensitivity`.
-   * **Role**: Quantifies numerical sensitivity to integrator settings and statistical uncertainty under parameter variation (with absolute + relative CI precision targets), then ranks dominant uncertainty drivers with bootstrap confidence intervals.
+2. **Q2: How accurate is the minimum-fuel result, and where does uncertainty lie?**
+   * **Tests**: `integrator_tolerance`, `event_time_convergence`, `monte_carlo_precision_target`, `global_sensitivity`, `q2_uncertainty_budget`.
+   * **Role**: Quantifies numerical sensitivity to integrator settings and statistical uncertainty under parameter variation, then builds an explicit uncertainty budget for minimum fuel (numerical sigma, parameter sigma, total sigma, and contribution split).
 
 3. **Q3: Is the code working as intended and reliable?**
    * **Tests**: `drift`, `smooth_integrator_benchmark`, `conservative_invariants`.
@@ -98,12 +98,12 @@ The reliability suite is scoped to answer the following report questions:
    * **Role**: Identifies open-loop feasibility boundaries via normalized orbit-error thresholds (not just fuel margin), showing where small parameter changes trigger mission failure.
 
 5. **Q6: What are the model limitations and validity bounds?**
-   * **Tests**: No single dedicated test; informed by all results and modeling assumptions.
-   * **Role**: Defines where conclusions are valid and prevents over-claiming beyond modeled physics.
+   * **Tests**: `model_limitations` (with supporting context from all other analyses).
+   * **Role**: Documents explicit assumptions, likely bias directions, and validity bounds to prevent over-claiming beyond modeled physics.
 
 6. **Q7: What is the main engineering conclusion?**
-   * **Test support**: `finite_time_sensitivity` (plus Q2/Q5 evidence).
-   * **Role**: Supports the conclusion that open-loop solutions are sensitive and motivates feedback guidance for practical robustness.
+   * **Test support**: `finite_time_sensitivity`, `q7_conclusion_support` (plus Q2/Q5 evidence).
+   * **Role**: Synthesizes sensitivity, cliff-edge margin, and uncertainty dominance into a defendable engineering conclusion.
 
 ### 3. Global Launch Heatmap
 Generate a heatmap of fuel costs across different latitudes:

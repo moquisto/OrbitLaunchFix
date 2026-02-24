@@ -1,0 +1,17 @@
+metric,value
+q2_ci95_half_width_kg,17152.7380938
+q2_parameter_variance_share_percent,99.9999926017
+q2_numerical_variance_share_percent,7.39834798579e-06
+q5_min_thrust_margin_percent,0.103745624207
+q5_lower_boundary_thrust_multiplier,0.998959693909
+q5_upper_boundary_thrust_multiplier,1.00103745624
+q5_boundary_width_percent,0.207776233338
+q7_growth_rate_s_inv,0.00662289942923
+q7_growth_fit_r2,0.906534948648
+q7_final_divergence_km,3.81195127771
+growth_supported,1
+cliff_supported,1
+has_nominal_bracket,1
+uncertainty_supported,1
+support_score,3
+conclusion_supported,1
