@@ -1,141 +1,240 @@
-# Starship Block 2 Trajectory Optimization & Simulation
+# Starship Block 2 Trajectory Optimization and Reliability Analysis
 
-## Overview
-This project implements a high-fidelity trajectory optimization and simulation framework for the SpaceX Starship (Block 2 / IFT-6 configuration) launch vehicle. It solves the "Launch-to-Orbit" optimal control problem, determining the steering and throttle commands required to deliver maximum payload to a 420 km Circular Low Earth Orbit (LEO).
+High-fidelity launch-to-orbit optimization for a Starship Block 2 style two-stage vehicle, with forward simulation verification and a report-oriented reliability suite.
 
-The core philosophy of this project is **"Optimize-then-Simulate"**:
-1.  **Optimize**: Use **CasADi** and **IPOPT** (Interior Point Optimizer) to find the mathematically optimal trajectory.
-2.  **Simulate**: Verify the solution using **SciPy** (`solve_ivp`) in a rigorous forward-time simulation to ensure physical validity.
-3.  **Verify**: Run targeted reliability checks to quantify optimality credibility, numerical/statistical uncertainty, and code reliability.
+The project follows an explicit workflow:
 
-## Key Features
+1. Optimize a fuel-minimal ascent trajectory with direct collocation (CasADi + IPOPT).
+2. Re-fly the optimized controls in forward time (`solve_ivp`) to verify physical consistency.
+3. Quantify confidence with targeted reliability analyses (optimality, uncertainty, robustness, drift, and bifurcation behavior).
 
-### 1. High-Fidelity Physics Engine
-*   **Gravity Model**: Includes **J2 Perturbation** to account for Earth's oblateness (bulge at the equator), alongside standard central gravity.
-*   **Atmosphere**: Implements the **US Standard Atmosphere 1976** (US76) from 0 to 1000 km.
-    *   Uses **B-spline interpolation** for the optimizer (smooth gradients).
-    *   Uses fast linear interpolation for the simulation.
-*   **Wind**: Models atmospheric co-rotation (wind speed increases with altitude due to Earth's rotation).
+## What This Repository Contains
 
-### 2. Detailed Vehicle Model (Starship Block 2)
-*   **Multi-Stage Dynamics**: Explicitly handles the mass and thrust discontinuities during the "Hot Staging" event between the Super Heavy Booster and the Starship Upper Stage.
-*   **Aerodynamics**:
-    *   **Mach-dependent Drag**: Uses lookup tables for $C_d$ vs. Mach number.
-    *   **Angle of Attack (AoA)**: Calculates crossflow drag to penalize flying sideways (high AoA).
-*   **Propulsion**:
-    *   **Variable ISP**: Linearly interpolates Specific Impulse ($I_{sp}$) based on atmospheric pressure (Sea Level to Vacuum).
-    *   **Throttling**: Constrains engine throttle between 40% and 100%.
+- A two-stage ascent optimal control solver with structural/path constraints.
+- A unified physics model used by both optimizer and simulator (same dynamics/environment core).
+- Visualization tools for kinematics, loads, controls, and 3D trajectory.
+- A comprehensive reliability suite that exports figures and CSV evidence for report questions.
 
-### 3. Reliability & Analysis Suite
-*   **Q1 (Optimality Credibility)**: Grid Independence, Collocation Defect Audit, Initial-Guess Robustness, and Theoretical Delta-V Efficiency.
-*   **Q2 (Accuracy & Uncertainty)**: Integrator Tolerance, Event-Time Convergence, Monte Carlo Precision Target, and Global Sensitivity Ranking.
-*   **Q3 (Code Reliability)**: Optimizer-vs-Simulator Drift plus numerical sanity benchmarks.
-*   **Q5/Q7 (Behavior & Conclusion Support)**: Bifurcation sweeps and finite-time sensitivity for open-loop fragility evidence.
+## Core Capabilities
 
-## File Structure
+- **Environment model**
+  - WGS84 Earth geometry
+  - Optional J2 perturbation
+  - US Standard Atmosphere 1976 up to 1000 km
+  - Atmosphere co-rotation wind model (`Omega x r`)
 
-### Core Modules
-*   **`config.py`**: The "Single Source of Truth". Contains all physical constants, vehicle specs (mass, thrust, aero), and simulation settings.
-*   **`environment.py`**: The physics world. Generates atmospheric lookups and calculates gravity/wind vectors. Handles the "Symbolic vs. Numeric" dispatch.
-*   **`vehicle.py`**: Defines the Equations of Motion (EOM). Calculates forces (Thrust, Drag, Gravity) and derivatives ($\dot{r}, \dot{v}, \dot{m}$).
+- **Vehicle model**
+  - Two-stage dynamics with explicit staging mass discontinuity
+  - Mach-dependent drag lookup tables
+  - Crossflow drag penalty via AoA
+  - Pressure-dependent ISP interpolation (`ISP_sl -> ISP_vac`)
+  - Throttle-constrained propulsion
 
-### Optimization & Simulation
-*   **`main.py`**: The Optimization Orchestrator. Sets up the CasADi `Opti` stack, defines constraints (path, terminal, staging), and runs the solver.
-*   **`simulation.py`**: The Verification Engine. Takes the optimal control schedule and propagates the dynamics using `scipy.integrate.solve_ivp`.
-*   **`guidance.py`**: Generates initial guesses (warm starts) to help the optimizer converge.
+- **Optimization model**
+  - Direct collocation using RK4 defect constraints
+  - Decision variables across booster + optional coast + upper-stage phases
+  - Path constraints for dynamic pressure and sensed G-load
+  - Terminal constraints for target circular orbit and inclination
+  - Objective: maximize final mass (equivalently minimize fuel used)
 
-### Analysis & Tools
-*   **`analysis.py`**: Visualization tools to plot trajectory, velocity, dynamic pressure (Q), and AoA.
-*   **`debug.py`**: Extensive diagnostic suite. Checks scaling, physics consistency, and post-flight metrics (Delta-V budget, orbital elements).
-*   **`relabilityanalysis.py`**: Runs the report-focused reliability suite (optimality credibility, uncertainty quantification, drift checks, bifurcation, and sensitivity).
-*   **`testplot.py`**: Generates a global heatmap showing fuel consumption vs. Launch Latitude.
+- **Reliability/validation model**
+  - Grid independence, defect audits, randomized multistart
+  - Integrator/event-time convergence checks
+  - Monte Carlo uncertainty and sensitivity ranking
+  - Drift and invariant checks
+  - Bifurcation and finite-time sensitivity evidence
 
-## Installation & Requirements
+## Repository Structure
 
-This project requires Python 3.8+ and the following libraries:
+| Path | Purpose |
+| --- | --- |
+| `config.py` | Single source of truth for vehicle, environment, sequence, and reliability toggles |
+| `environment.py` | Atmosphere/gravity/wind model with symbolic + compiled numeric parity |
+| `vehicle.py` | Full equations of motion and aerodynamic/propulsion force model |
+| `guidance.py` | Warm-start trajectory generator for the NLP |
+| `main.py` | Optimization orchestrator and default end-to-end mission run |
+| `simulation.py` | Forward simulation verifier (`solve_ivp`) using optimized controls |
+| `analysis.py` | Mission plots and comparison dashboards |
+| `relabilityanalysis.py` | Reliability suite with figure/CSV export and CLI flags |
+| `testplot.py` | Global latitude-dependent launch cost heatmap utility |
+| `reliability_outputs/` | Timestamped output folders from reliability runs |
+| `REFERENCE/` | Course/project reference material |
+
+## Requirements
+
+- Python 3.8+
+- `numpy`
+- `scipy`
+- `matplotlib`
+- `casadi`
+- `ussa1976`
+
+Install:
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
 pip install numpy scipy matplotlib casadi ussa1976
 ```
 
-## Usage
+## Quick Start
 
-### 1. Standard Mission Optimization
-Run the main script to optimize the trajectory for the configuration defined in `config.py`:
+### 1. Run the full optimize -> simulate -> plot flow
 
-    ```bash
-    python main.py
-    ```
-**Output**:
-*   Console logs showing optimizer progress and verification checks.
-*   Interactive plots: Altitude, Velocity, Ground Track, AoA, Forces, and 3D Trajectory.
+```bash
+python main.py
+```
 
-### 2. Reliability Analysis
-Run the report-focused validation suite:
+What this does:
 
-    ```bash
-    python relabilityanalysis.py
-    ```
+- Prints mission config and preflight diagnostics.
+- Solves the collocation problem in IPOPT.
+- Runs forward verification simulation.
+- Prints objective/fuel-margin summary.
+- Opens mission visualization windows.
 
-## Final Report Questions and Evidence
+### 2. Run reliability suite (report evidence pipeline)
 
-The reliability suite is scoped to answer the following report questions:
+```bash
+python relabilityanalysis.py --no-show
+```
 
-1. **Q1: Have we found a credible minimum-fuel solution (within this model)?**
-   * **Tests**: `grid_independence`, `collocation_defect_audit`, `randomized_multistart`, `theoretical_efficiency`.
-   * **Role**: Shows the solution is not a mesh artifact, satisfies dynamics consistently, is robust under randomized starts in guidance space, and is benchmarked against a theoretical delta-v floor.
+Important: the filename is `relabilityanalysis.py` (missing the second `i`) in this repository.
 
-2. **Q2: How accurate is the minimum-fuel result, and where does uncertainty lie?**
-   * **Tests**: `integrator_tolerance`, `event_time_convergence`, `monte_carlo_precision_target`, `global_sensitivity`, `q2_uncertainty_budget`.
-   * **Role**: Quantifies numerical sensitivity to integrator settings and statistical uncertainty under parameter variation, then builds an explicit uncertainty budget for minimum fuel (numerical sigma, parameter sigma, total sigma, and contribution split).
+Default behavior:
 
-3. **Q3: Is the code working as intended and reliable?**
-   * **Tests**: `drift`, `smooth_integrator_benchmark`, `conservative_invariants`.
-   * **Role**: Verifies optimizer/simulator consistency and checks integrator behavior in controlled benchmark scenarios.
+- Creates `reliability_outputs/<timestamp>/`.
+- Saves figures to `figures/` (PNG + PDF).
+- Saves tabular outputs to `data/` (CSV).
+- Uses random seed `1337` unless overridden.
 
-4. **Q5: How close are we to cliff-edge failure behavior?**
-   * **Tests**: `bifurcation`, `bifurcation_2d_map`.
-   * **Role**: Identifies open-loop feasibility boundaries via normalized orbit-error thresholds (not just fuel margin), showing where small parameter changes trigger mission failure.
+CLI options:
 
-5. **Q6: What are the model limitations and validity bounds?**
-   * **Tests**: `model_limitations` (with supporting context from all other analyses).
-   * **Role**: Documents explicit assumptions, likely bias directions, and validity bounds to prevent over-claiming beyond modeled physics.
+```text
+--output-dir <path>   Custom output directory
+--seed <int>          RNG seed for reproducible Monte Carlo analyses
+--mc-samples <int>    Monte Carlo sample count (default: 200)
+--no-show             Do not open interactive plot windows
+--no-save             Do not save figures/CSV outputs
+```
 
-6. **Q7: What is the main engineering conclusion?**
-   * **Test support**: `finite_time_sensitivity`, `q7_conclusion_support` (plus Q2/Q5 evidence).
-   * **Role**: Synthesizes sensitivity, cliff-edge margin, and uncertainty dominance into a defendable engineering conclusion.
+Example reproducible run:
 
-### 3. Global Launch Heatmap
-Generate a heatmap of fuel costs across different latitudes:
+```bash
+python relabilityanalysis.py \
+  --seed 1337 \
+  --mc-samples 300 \
+  --no-show \
+  --output-dir reliability_outputs/baseline_seed1337
+```
 
-    ```bash
-    python testplot.py
-    ```
+### 3. Run global launch heatmap utility
 
-## Methodology
+```bash
+python testplot.py
+```
 
-### The Optimization Problem
-We formulate the launch as a **Direct Collocation** problem:
-*   **Objective**: Maximize $m_{final}$ (Minimize fuel consumption).
-*   **State Variables**: Position ($r_x, r_y, r_z$), Velocity ($v_x, v_y, v_z$), Mass ($m$).
-*   **Control Variables**: Thrust Vector ($T_x, T_y, T_z$).
-*   **Constraints**:
-    *   Initial State: Launchpad coordinates (Cape Canaveral).
-    *   Terminal State: Altitude = 420 km, Eccentricity $\approx$ 0, Inclination target.
-    *   Path Constraints: Max Dynamic Pressure (Max Q), G-Load limits, Angle of Attack limits.
+This performs a latitude sweep and renders a 3D globe-style fuel-cost heatmap.
 
-### Initialization (Warm Start)
-Non-linear optimization solvers (like IPOPT) are sensitive to the initial guess. This project includes a **Guidance Module** (`guidance.py`) that generates a physically plausible "Gravity Turn" trajectory using a heuristic control law. This "Warm Start" significantly improves convergence stability compared to a cold start.
+## Configuration Guide (`config.py`)
 
-### Verification
-Since optimizers can exploit mathematical loopholes (e.g., discrete time steps), the **Simulation** phase acts as a referee. It interpolates the control inputs found by CasADi and re-integrates the trajectory using a variable-step integrator (RK45). A close match between the two confirms the solution is flyable.
+Edit `StarshipBlock2`, `EARTH_CONFIG`, and `RELIABILITY_ANALYSIS_TOGGLES` directly.
+
+### High-impact mission/solver parameters
+
+- `payload_mass`
+- `target_altitude`
+- `target_inclination` (`None` => defaults to absolute launch latitude)
+- `num_nodes` (collocation resolution)
+- `max_iter` (IPOPT iteration limit)
+- `max_q_limit`
+- `max_g_load`
+- `sequence.min_throttle`
+- `sequence.separation_delay` (enables optional coast phase)
+
+### Environment switches
+
+- `use_j2_perturbation`
+- `density_multiplier` (used in uncertainty studies)
+- `launch_latitude`, `launch_longitude`, `initial_rotation` (directly affect launch geometry and inertial alignment)
+
+Note: `EnvConfig.use_wind_model` exists in config but is not currently used as an active runtime toggle.
+
+### Reliability toggles
+
+The `ReliabilityAnalysisToggles` dataclass controls which test blocks execute in `ReliabilitySuite.run_all()`.
+
+## Model and Assumptions
+
+- 3D inertial-frame translational dynamics.
+- No active closed-loop guidance in verification; optimized open-loop control schedule is replayed.
+- Stage separation modeled as an instantaneous mass reset.
+- Aerodynamics are table/heuristic based (Mach-Cd + crossflow term), not full CFD.
+- Atmospheric properties from USSA1976 with interpolation/smoothing choices made for optimizer robustness.
+
+Treat conclusions as valid within this modeling envelope, not as flight-certified truth.
+
+## Reliability Suite Coverage (Report Mapping)
+
+The reliability suite is structured to support question-driven reporting:
+
+- **Q1** credible optimum: grid independence, collocation defect audit, multistart robustness, theoretical efficiency.
+- **Q2** uncertainty/accuracy: integrator sensitivity, event-time convergence, Monte Carlo precision, global sensitivity, uncertainty budget.
+- **Q3** code reliability: optimizer-vs-simulator drift and benchmark checks.
+- **Q5** cliff-edge behavior: bifurcation sweeps and 2D feasibility mapping.
+- **Q6** model limitations: explicit validity/limitation documentation.
+- **Q7** engineering conclusion support: finite-time sensitivity + cross-test evidence synthesis.
+
+## Expected Outputs
+
+### `main.py`
+
+- Terminal diagnostics for optimization and simulation phases.
+- Fuel-margin summary at final state.
+- Multiple interactive matplotlib figures:
+  - Mission overview (altitude/velocity, mass, ground track, ascent profile)
+  - Aerodynamics and dynamics (Q/Mach, AoA, gamma/pitch, heating proxy)
+  - Controls and loads (throttle, G-load, forces, thrust vector, envelope)
+  - 3D trajectory with projected orbit
+
+### `relabilityanalysis.py`
+
+- Timestamped output directory containing:
+  - `data/*.csv` for numerical evidence tables
+  - `figures/*.png` and `figures/*.pdf` for report-ready visualizations
 
 ## Troubleshooting
 
-*   **Optimizer Fails**: Check the console output. `debug.py` will automatically print a "Failure Diagnosis", checking for:
-    *   **Scaling Issues**: Variables should be order-of-magnitude ~1.0.
-    *   **Infeasible Constraints**: e.g., Target orbit is too high for the fuel available.
-    *   **Jacobian Singularity**: Mathematical formulation issues.
-*   **Simulation Drift**: If the optimized path diverges from the simulation:
-    *   Increase `num_nodes` in `config.py`.
-    *   Tighten integrator tolerances in `simulation.py`.
+- **Optimization fails to converge**
+  - Increase `max_iter`.
+  - Reduce problem stiffness temporarily (e.g., fewer `num_nodes`) to localize issues.
+  - Keep warm start enabled (`guidance.py`) and verify reasonable initial trajectory.
+
+- **Simulation drifts from optimizer trajectory**
+  - Increase `num_nodes` in collocation.
+  - Tighten simulation tolerances in `run_simulation(..., rtol, atol)`.
+  - Inspect drift diagnostics printed by `main.py`/`debug.py`.
+
+- **Very slow reliability runs**
+  - Use `--no-show`.
+  - Lower `--mc-samples` for exploratory passes.
+  - Disable selected blocks via `RELIABILITY_ANALYSIS_TOGGLES`.
+
+- **Dependency/build issues**
+  - Ensure the active virtual environment is being used.
+  - Upgrade `pip` before installing scientific packages.
+
+## Reproducibility Notes
+
+- Use fixed `--seed` in reliability runs.
+- Keep configuration snapshots with output directories.
+- Export to a deterministic `--output-dir` for direct run-to-run comparison.
+
+## Academic Context
+
+This repository appears structured for simulation/modeling coursework and report-backed engineering argumentation. It is most useful when run as:
+
+1. Baseline optimization/simulation (`main.py`)
+2. Reliability evidence generation (`relabilityanalysis.py`)
+3. Comparative scenario sweeps (`testplot.py` and config edits)

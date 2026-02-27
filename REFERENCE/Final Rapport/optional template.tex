@@ -1,0 +1,56 @@
+\documentclass[a4paper,12pt]{article}
+
+\usepackage{geometry}       % Required for page layout.
+\usepackage{hyperref}       % Required for hyperlinks.
+\usepackage{graphicx}       % Required for figures.
+\usepackage{subfig}         % Required for minipages.
+
+\newgeometry{vmargin={25.4mm}, hmargin={27mm,27mm}}
+\setlength\parindent{0pt}   % Disable paragraph indent.
+
+\title{your title}
+\author{your name}
+
+\begin{document}
+\maketitle
+
+\section*{Exercise 1.1}
+
+\subsection*{a}
+
+Some text about some result. This is shown in figure \ref{yourLabel}.
+
+\begin{figure}[!ht]
+    \centering
+    \includegraphics[scale=1]{figure1.png}
+    \caption{Some caption goes here.}
+    \label{yourLabel}
+\end{figure}
+
+\subsection*{b}
+
+Some text about some other result, as can be seen in figure \ref{anotherLabel}.
+
+\begin{figure}[!ht]
+    \centering
+    \begin{minipage}{.5\textwidth}
+        \centering
+        \includegraphics[scale=1]{figure2.png}
+        \captionof*{figure}{$\omega = 1$}
+    \end{minipage}%
+    \begin{minipage}{.5\textwidth}
+        \centering
+        \includegraphics[scale=1]{figure3.png}
+        \captionof*{figure}{$\omega = 2$}
+    \end{minipage}
+    \caption{Oscillations for different $\omega$.}
+    \label{anotherLabel}
+\end{figure}
+
+\section*{Exercise 1.2}
+
+\subsection*{a}
+
+Some more text.
+
+\end{document}
