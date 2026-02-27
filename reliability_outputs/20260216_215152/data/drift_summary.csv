@@ -1,9 +1,0 @@
-metric,value
-valid,1
-max_position_drift_m,2.11932793042
-max_velocity_drift_m_s,0.00793938144605
-max_mass_drift_kg,0.941249021795
-pass_flag,1
-threshold_position_m,2000
-threshold_velocity_m_s,30
-threshold_mass_kg,500
