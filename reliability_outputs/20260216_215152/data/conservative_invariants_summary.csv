@@ -1,5 +1,0 @@
-metric,value
-max_rel_energy_drift,1.69444103587e-10
-max_rel_angular_momentum_drift,8.47221374758e-11
-pass_flag,1
-threshold,1e-08

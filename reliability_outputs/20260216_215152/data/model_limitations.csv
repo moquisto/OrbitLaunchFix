@@ -1,7 +1,0 @@
-id,assumption,likely_impact,mitigation_evidence,severity
-open_loop_control,No feedback controller; controls are replayed open-loop.,Tends to overstate fragility under perturbations.,"finite_time_sensitivity, bifurcation, bifurcation_2d_map",High
-reduced_dof,Translational dynamics only (no full attitude/actuator dynamics).,Can misestimate controllability and steering losses.,"drift, conservative_invariants",High
-aero_prop_models,Aerodynamics and propulsion use reduced lookup/parametric models.,Bias in drag/thrust loss estimates and fuel optimum.,"theoretical_efficiency, q2_uncertainty_budget",Medium
-atmosphere_uncertainty,Atmospheric uncertainty modeled with scalar density multiplier.,May underrepresent profile/wind-structure uncertainty.,"global_sensitivity, monte_carlo_precision_target",Medium
-numerical_transcription,Finite collocation grid and finite solver tolerances.,Can introduce discretization/integration bias in objective.,"grid_independence, integrator_tolerance, q2_uncertainty_budget",Medium
-ideal_staging,Stage transitions are idealized without hardware faults.,Underestimates real mission risk and contingency fuel.,"event_time_convergence, drift",Medium
