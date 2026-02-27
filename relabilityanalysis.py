@@ -1533,11 +1533,12 @@ class ReliabilitySuite:
         with suppress_stdout():
             sim_nom = run_simulation(opt_res, self.veh, self.base_config)
             
-        # 2. Perturbed Run (Perturb Thrust by 0.1%)
-        # Changing thrust is more sensitive than density for open-loop divergence
-        print("Generating Perturbed Trajectory (Thrust + 0.1%)...")
+        # 2. Perturbed Run (Perturb thrust by +0.1% on both stages)
+        # Changing thrust is more sensitive than density for open-loop divergence.
+        print("Generating Perturbed Trajectory (Thrust + 0.1% on both stages)...")
         pert_config = copy.deepcopy(self.base_config)
         pert_config.stage_1.thrust_vac *= 1.001
+        pert_config.stage_2.thrust_vac *= 1.001
         pert_veh = Vehicle(pert_config, self.env)
         
         with suppress_stdout():

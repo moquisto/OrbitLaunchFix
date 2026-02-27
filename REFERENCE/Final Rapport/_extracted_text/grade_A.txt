@@ -1,0 +1,475 @@
+
+
+===== PAGE 1 =====
+
+Ne u tro n Tra n s p o rt Th ro u g h Ho m o g e n e o u s / In h o m o g e n e o u s S la b
+Ma te ria l
+1 Simulation
+1.1 P hysics and M ode l
+In this s im ula tio n, w e c o ns ide r e la s tic a nd inc o he re n t s c a tte ring o f ne utro ns in a bulk m a te ria l. Fo r s uc h a
+phe no m e no n, a n inc ide n t ne utro n e n te rs them a te ria l a nd w ill bepro neto in te ra c t w ith them a te ria l, w ith
+w ha t c a n be c o ns ide re d a f xe d a ve ra g e ra teβ, w hic h w ill be de te rm ine d b y the e ne rg y o f the ne utro n.
+T he s e in te ra c tio ns c o ns is t o f m a inly tw o type s ; n uc le a r in te ra c tio n, w he n the ne utro n in te ra c ts w ith
+the n uc le i o f the m a te ria l, a nd m a g ne tic in te ra c tio ns , w he n the m a g ne tic f e ld o f the m a te ria l a to m s a f e c t
+the ne utro n (ha ving a no n-ze ro dipo le m o m e n t). As w e w ill o nly loo k a t the e ve n ts o f a ne utro n e s c a ping
+the bulk o r be ing a bs o rbe d, w e ne g le c t the m a g ne tic in te ra c tio ns , a s the ir e f e c t is m a inly to c ha ng e the
+ne utro n traje c to ry b y s o m e s m a ll a ng le . As fo r the n uc le a r in te ra c tio n, w he n the ne utro n in te ra c ts w ith
+a n uc le i, o ne o f tw o thing s w ill oc c ur. T he ne utro n m a y e ithe r be a bs o rbe d in to the n uc le i o r be s c a tte re d
+in to s o m e ra ndo m dire c tio n inf ue nc e d b y the inc ide n t dire c tio n a nd o the r fa c to rs a t in te ra c tio n. In the
+c a s e the ne utro n is s c a tte re d, it m a y the n tra ve l furthe r in to the m a te ria l un til it a g a in in te ra c ts w ith o r
+e s c a pe s the bulk.
+In be tw e e n in te ra c tio ns , w e m ode l the ne utro n to tra ve ling undis turbe d a s a pa rtic le . No rm a lly ,
+ne utro ns w o uld a ls o be a ble in te ra c t w ith e a c h o the r during the tra ns po rt proc e s s , c a us ing w ha t is c a lle d
+inc o he re n t. But to in ve s tig a tem e re ly thepe ne tra tivea bility o f thene utro n in a m a te ria l, s uc h in te ra c tio ns
+a re ne g lig ible .
+Fo r this s im ula tio n, w e a s s um e a m ode l w he re the n uc le a r in te ra c tio ns a re e q ua lly like ly to oc c ur a t
+a n y po in t in s pa c e tra ve rs e d b y the ne utro n. In re a lity , this w o uld be de pe nde n t o n the n um be r de ns ity
+o f the m a te ria l, but fo r a re a s o na ble le ng th s c a le o f ra dia tio n s hie lding , w e c a n a ppro xim a te the m a te ria l
+to be q uite de ns e . In s uc h a c a s e , the le ng th l tra ve le d b y the ne utro n be tw e e n in te ra c tio ns c a n be
+c o ns ide re d e xpo ne n tia lly dis tribute d, w ith a pro ba bility de ns ity
+pl (x) = 1
+λ e−x/λ (1 )
+fo r x > 0 a nd the m e a n fre e pa thλ, re la te d to the in te ra c tio n ra te b yλ= v/βw ith ne utro n s pe e d v.
+At the e ve n t o f in te ra c tio n, the ne utro n is e ithe r a bs o rbe d o r s c a tte re d. T he s e e ve n ts a re ra ndo m a nd
+a re o n a ve ra g e de te rm ine d b y the pro pe rtie s o f the m a te ria l in q ue s tio n. We the re fo re in troduc e pa ra m -
+e te rs pa a nd ps a s be ing the pro ba bilitie s o f a bs o rptio n a nd s c a tte ring , re s pe c tive ly , a ls o re pre s e n ting the
+1
+
+===== PAGE 2 =====
+
+properties of the material in question. Although these two events in reality aren’t completely exhaustive,
+e.g. there is a possibility of ﬁssion occurring in some materials for which the number of scattered neu-
+trons increase, we do not include any other eﬀects in our model. We therefore state in this model that
+pa +ps = 1. But we will allow to modify the deﬁnition of pa andps as being position dependent in order
+to examine material inhomogeneity. In particular, we say that given that our material is a mix between
+two materials of diﬀerent scattering properties, the values of pa and ps are set by which element nucleus
+the neutron interacts with. This will also be determined randomly based on the assumed proportion of
+material particles.
+At scattering, we assume that the neutron is equally likely to scatter in any direction. This is not in
+general true, but should for most isolating materials be a good approximation. More formally, we say
+that the probability to scatter in the inﬁnitesimal solid angle dΩ = sin θdθdφ, p(θ,φ )dθdφ, is
+p(θ,φ )dθdφ = sinθ
+4π dθdφ (2)
+This also give probabilities for each angle
+pθ =
+∫ 2π
+0
+p(θ,φ )dφ = sinθ
+2 , (3)
+and
+pφ =
+∫ π
+0
+p(θ,φ )dθ = 1
+2π. (4)
+In our simulation of a neutron trajectory, we make use of (1) and (2) to determine the trajectory
+after scattering events, although, in doing this, we make a simpliﬁcation that the trajectory need only
+be observed in one dimension. In doing this, we assume the bulk material to have a depth d, say in the
+z-direction, being considerably smaller than the other dimension sizes for the length scale considered.
+Thus escape in any direction other than along the z-axis is negligible. We shall therefore only make use
+of (1) and (3) in calculating the distance traveled in the z-direction, l cosθ.
+1.2 Monte Carlo simulation
+Using the model above, we can sample neutron trajectories and calculate probabilities of incidents neu-
+trons being reﬂected (exiting the material from incident side), absorbed, and/or transmitted (exiting the
+material on the other side), by calculating the fraction of simulated neutrons experiencing each case. In
+this simulation, picking a random angle and travel distance between interactions is needed. For that we
+pick a number k from a uniformly random number generator creating numbers between 0 and 1. Then
+for the random variable X∈ [a,b ], with random distribution p(x), we actually want to sample from, we
+deﬁne
+k =
+∫ x
+a
+p(s)ds =P (X <x) (5)
+which deﬁnes a corresponding random numberx∈ [a,b ] sampled fromX. For the travel distance between
+interactions, this gives
+l =−λ lnk (6)
+and for the scattering direction, cos θ, gives
+cosθ = 1− 2k (7)
+2
+
+===== PAGE 3 =====
+
+For this simulation procedure, we consider a certain number of simulations, W , and do the following
+for each one:
+1. Consider a neutron being incident to the material border plane, entering the material perpendicular
+to the plane, i.e. with cos θ = 1 and z = 0. We generate l by (6), and update the z position.
+2. Now, the neutron is considered to interact with the material. A random number k∈ [0, 1] is drawn
+to determine if the neutron is absorbed ( k < pa) or scattered ( k≥ pa). If the material is a mix
+between two elements, of two diﬀerent pa with fraction s material 1, then with pa is used in the
+previous procedure is randomized using s as the probability to interact with material 1 and 1 −s
+for material 2.
+3. If it is absorbed, we increase the absorb counter Na =Na + 1 and repeat from step 1.
+4. The neutron is scattered into an arbitrary direction, determining cos θ according to (7), and travels
+a distance l determined by (6). The z position is updated according to znew =z +l cosθ.
+5. If the neutron has been reﬂected ( z < 0), we update the reﬂection counter Nc = Nc + 1 and
+repeat from Step 1. If it has been transmitted through the material ( z > d), then we update the
+transmission counter Nt =Nt + 1 and continue from Step 1. Otherwise, we repeat from Step 2.
+A code listing for this simulation is given in the Appendix.
+2 Problem
+Using the model and Monte Carlo method described, we will investigate the behavior of neutron trans-
+mission through the slab when varying the diﬀerent physical parameters, ps, λ, d, involved. We will
+attempt to answer the question: How does the attenuation of the neutron transmission intensity change
+when varying the physical involved?
+We will also investigate the change in the transport process when changing the absorption capabilities
+of the bulk material. In particular, we will examine how a uniform mix (material atoms uniformly
+randomly distributed in the bulk) between two materials when varying the proportions of the two material
+and compare with the case of a pure, homogeneous slab. We will attempt to answer the question: Could
+one increase the shielding capabilities of a slab better by proportions of a better shielding material, better
+than increase the depth of the slab?
+3 Method
+3.1 Measurement and analysis
+In this Monte Carlo, we will measure the probabilities of transmission (pt), reﬂection (pr) and absorption
+(pc) of neutrons as they are aﬀected by the parameters involved. Any probability pi which we attempt
+to determine, will be measured as the fraction of neutrons experiencing the given event out of the W
+simulations performed, i.e. we measure
+pi = Ni
+W = 1
+W
+W∑
+k=1
+xi,k (8)
+3
+
+===== PAGE 4 =====
+
+using the outcomes of the stochastic variables Xi,k∈{ 0, 1} describing measurement of the kth neutron
+experiencing the speciﬁed event i.
+To obtain error estimates of obtained values, we make use of the Central Limit Theorem. For large
+enough W , which limit we will have to examine, the mean values of stochastic variable outcomes, xi,k,
+will be approximately normally distributed, and the standard deviation of the mean value calculated from
+(8) can be approximated by
+σ2
+i =
+∑W
+k=1(xi,k−pi)2
+W 2 (9)
+for large enough W . Knowing the variance of the normally distributed mean values, we can construct a
+99% conﬁdence interval
+Iconf,i = [pi− 2.576σi,pi + 2.576σi] (10)
+having 99% probability of enclosing the correct value. The size of this interval is used as our error
+estimate.
+But other than just using these error measurements, we need to determine the number W required to
+obtain a small enough error, while also analyzing the sensitivity of the error as we vary our parameters.
+As such, for the ﬁrst basic test of the model, we vary the number of iterations and observe how the error
+changes.
+3.2 Attenuation
+First we perform a test to see how well our model correspond to known behavior of neutron radiation,
+by measuring the attenuation of the transmitted neutron intensity (corresponding to the transmission
+probabilitypt) as a function of neutron energy and depth of the isolating bulk.
+The Beer-Lambert law of exponential attenuation is known to hold for neutron radiation, so we should
+expect exponential reduction of transmitted intensity when increasing bulk depth.
+The increase of neutron energy in our model corresponds to an increase in the mean free path λ. Also,
+since an increase in λ is the same as reducing the average number of nuclear interactions needed before
+being transmitted, one can suspect that increasing λ would have the same eﬀect as reducing the depth
+d. We therefore also examine the transmission intensity as a function of λ and the possible similarity to
+the dependence on d.
+3.3 Material inhomogeneity
+We examine the dependence of event probabilities on the material properties of scattering and absorption
+probabilities. In an attempt to answer how material impurities can aﬀect the system, we let the bulk be
+a mix between materials of varying absorption capabilities, and vary the proportion between materials.
+We compare the probabilities obtained from mixing two materials with the ones obtained from letting
+the bulk consist entirely of one material.
+4 Results and Analysis
+4.1 Attenuation
+In ﬁg. 1 we measured the transmission probability for diﬀerent bulk depths, using λ = 1, W = 10 5
+and ps = 2
+3. The estimated error, calculated according to (10), is also displayed at the data points.
+4
+
+===== PAGE 5 =====
+
+Although, as can be seen in the ﬁgure and ﬁg. 4 shows, the error estimates obtained are less than 0.005
+for these parameter conﬁgurations. This continues to be true for the results obtained in this section. An
+exponential function on the form of aebx was ﬁtted to the data in order to test if the Beer-Lambert law
+hold for this model.
+In ﬁg. 2 we measured the transmission probability using the same parameter conﬁguration as for
+ﬁg. 1, but for varying mean free path of the neutrons, instead of bulk depth. For this data, we also ﬁt a
+function on the formaeb/x, from the intuition that increasing mean free path reduces the average number
+of scattering/absorption events the same way as reducing the depth would.
+0 2 4 6
+0
+0.5
+1
+Bulk depth, d
+Transmission prob.,pt
+Measured values
+Fitted function
+Figure 1: Transmission probability as function
+of the bulk depth d, measured us-
+ing W = 10 5, λ = 1 and ps = 2
+3.
+Also showing ﬁtted exponential func-
+tion y =aebx.
+0 20 40 60
+0
+0.5
+1
+Mean free path, λ
+Transmission prob.,pt
+Measured values
+Fitted function
+Figure 2: Transmission probability as function
+of the mean free path λ, measured us-
+ing W = 105, d = 1 and ps = 2
+3. Also
+showing ﬁtted reciprocal exponential
+function y =aeb/x.
+As the data from both ﬁgs. 1 and 2 show good agreement with assumed exponential decays, we test
+the attenuation law for the combination of the two paramters, formed as the ratio r =d/λ. Keeping the
+same conﬁguration as before, but varying the ratio r, choosing t =√r and λ = 1/√r, we obtain ﬁg. 3.
+5
+
+===== PAGE 6 =====
+
+0 2 4 6
+0
+0.5
+1
+Depth, free-path ratio, d/λ
+Transmission prob.,pt
+Measured values
+Fitted function
+Figure 3: Transmission probability as function
+of the time and free path ratio r, mea-
+sured using W = 10 5, ps = 2
+3 and
+d =√r,λ = 1/√r, such thatr =d/λ.
+Also showing ﬁtted function y =aebr.
+0 2 4 6
+0
+2
+4
+·10−3
+Bulk depth, d
+Error in pt
+Figure 4: Calculated error estimate as function
+ofd obtained from test in ﬁg. 1. Simi-
+lar trends obtained for rest of attenu-
+ation test data.
+We test for convergence of results for other parameter conﬁgurations of W and ps in order to make
+sure that our obtained results are consistent. We do this, ﬁrst by running the same simulation for diﬀerent
+number of samples W , for diﬀerent depths d, keeping λ = 1 and ps = 2
+3 constant. The convergence plots
+in ﬁg. 5 show measured error estimate as a function of W for diﬀerent d and table 1 show the resulting
+transmission probability and error measured at the most exact measurement for each case of d.
+101 102 103 104 105 106 107
+10−4
+10−3
+10−2
+10−1
+Monte Carlo samples, W
+Error in pt
+d = 0 .01
+d = 0 .1
+d = 0 .50
+d = 1 .20
+d = 2 .50
+d = 4 .50
+Figure 5: Error measured as function of number
+of simulations W , for parametric se-
+tups keeping λ = 1 and ps = 2
+3 while
+varyingd.
+d pt at W = 107 pt error
+0.01 0.99334 ±6.6· 10−5
+0.10 0.9345 ±2.0· 10−4
+0.50 0.7064 ±3.7· 10−4
+1.20 0.4234 ±4.0· 10−4
+2.50 0.1556 ±3.0· 10−4
+4.50 0.0311 ±1.4· 10−4
+Table 1: Table of d values used for convergence
+tests in ﬁg. 5, and corresponding value
+of transmission probability pt obtained
+at the highest value of W tested.
+From ﬁg. 1 and ??, we saw that the error reaches a maximum for probabilities around pt≈ 0.5, and
+from ﬁg. 6 and table 1, we draw the same conclusion, also noting that the error is smaller than 0 .01 for
+6
+
+===== PAGE 7 =====
+
+all d if measurements are performed with W > 105 samples. We therefore continue using W = 105 for
+further simulations.
+Finally, we test if the exponential behavior of the attenuation is aﬀected by the scattering probability
+of the material. We redo the test done in ﬁg. 1 using diﬀerent scattering probabilitiesps and ﬁt exponential
+functions to the data in each case. ﬁg. 6 shows the obtained data plots and table 2 contains obtained
+parameter values as well as the R-squared goodness of ﬁt measure.
+0 2 4 6
+0
+0.5
+1
+Bulk depth, d
+Transmission prob.,pt
+ps = 0 .01
+ps = 0 .25
+ps = 0 .50
+ps = 0 .75
+ps = 0 .99
+Figure 6: Dependence of transmission probabil-
+ity on d as done in ﬁg. 1, remeasured
+for diﬀerent probabilities of scattering
+ps.
+ps b R2
+0.01 -0.997 0.99998
+0.25 -0.932 0.99993
+0.50 -0.836 0.99974
+0.75 -0.682 0.99968
+0.99 -0.301 0.9841
+Table 2: Exponential coeﬃcient b in ﬁty =aebx
+for data in ﬁg. 6, for the diﬀerent ps
+cases. Goodness of ﬁt measure R2 in-
+cluded.
+4.2 Material Inhomogeneity
+Here we wish to investigate how the overall absorption probability pc of the procedure is aﬀected by
+material properties. We ﬁrst measure the absorption probability of pure bulk materials of diﬀerent
+internal scattering probabilities ps. We use a parameter conﬁguration to obtain a reasonable maximum
+probability and error when using medium ps as in earlier studies, i.e. λ = d = 1 and W = 10 5. The
+result of this is shown in ﬁg. 7.
+Next we introduce impurities of varying degree into the material. We assume that original material
+being mixed has a scattering probability ps = 0.2 (pa deﬁned through pa = 1−ps) and is mixed with
+a material with ps = 0.8. Simulating with the same parameter conﬁguration as in ﬁg. 7 and using
+the percentage of pa = 0.8 material atoms as a measure, we obtain ﬁg. 8. Which shows a more linear
+transition of absorption probabilities from that of the ps = 0.8 material, to that of the ps = 0.2 material,
+when comparing to ﬁg. 7.
+7
+
+===== PAGE 8 =====
+
+0 0.2 0.4 0.6 0.8 1
+0
+0.2
+0.4
+0.6
+Scattering prob., ps
+Absorption prob., pc
+Figure 7: Probability of absorption as function
+of scattering probability ps, for d =
+λ = 1 and W = 10 5, letting bulk be
+homogeneous.
+0 0.2 0.4 0.6 0.8 1
+0.3
+0.4
+0.5
+0.6
+Percentage of material with ps = 0.8
+Absorption prob., pc
+Figure 8: Probability of absorption as function
+of the percentage of ps = 0.8 material,
+then letting 1−x be the percentage of
+ps = 0.2 material.
+5 Discussion and Conclusions
+In the Attenuation section, we the ﬁtted exponential function in ﬁg. 1 does not deviate from the data
+in any aspect measurable in the ﬁgure and is enclosed by the error bounds of the data points. We can
+therefore conclude that for the parameter conﬁguration tested, the attenuation follows Beer-Lambert’s
+law, being exponentially decreasing with slab depth.
+As we further tested the behavior when instead varying the mean free path of the neutrons, the
+ﬁtted exponential function aeb/x ﬁt the data just as well as in the last case, with measurements having a
+negligible error of less than 0.01 for allλ tested. When varying ratio instead of each parameter separately
+in ﬁg. 3, we had errors just as small as the ones measured in the previous, and there too an exponential
+function ﬁt to the data, with no mentionable deviation from the data. Considering the small errors
+between ﬁtted function and data points, we can safely conclude that the exponential attenuation holds
+for this model for the investigated parameter conﬁgurations, as it does with real neutron transmission.
+This, despite neglecting not obviously small contributions such as ﬁssion during nuclear interaction.
+Performing the convergence test in ﬁg. 5 and examining the measured error during the tests, such as
+in ﬁg. 4, we see that the error varies with the measured result. The error seems maximum for results
+measuring p≈ 0.5 and is reduced as the distance to either p = 0 or p = 1 is. This is likely an eﬀect
+of averaging results of a discrete stochastic variable only taking values of 0 and 1. As the values of the
+mean are bounded below by 0 and above 1, the variance can be predicted to be reduced for mean values
+measured close to 0 or 1. In the p≈ 0.5 case, the mean values can vary maximally in both directions,
+causing a greater variance to be measured.
+Further examining the behavior of the error estimate at low probability results, we see that while the
+error is reduced, the number of Monte Carlo samples W needed to converge toward the reduction trend
+is larger than for the other measurements. Both this and the reduced error for these measurements could
+come from the fact that we have a certain uncertainty in our result not completely encapsulated by the
+error estimation done according to (10). Since we are measuring probabilities as fractions of scores kept
+8
+
+===== PAGE 9 =====
+
+by repeated simulation, in order to measure a probability of order 10 −k, one would need a number of
+measurementsW of the order 10k or more. Thus it is not odd that the estimated error ﬂuctuates more
+for p≈ 0.01 when we are only using between W = 10 2 and W = 10 3 measurements. It is important
+to keep this in mind when using this kind of Monte Carlo simulation, relying on evaluation of discrete
+stochastic variables.
+But all in all, judging from the convergence plot in ﬁg. 5, the error seems to decrease asymptotically
+accordingO(W −1/2), and all measurements reach a satisfactory and probable error of less than 10 −2 for
+W = 105, which was used in the rest of our measurements.
+After taking this error analysis into consideration, the continued investigation of attenuation, now
+analyzing the eﬀect of the scattering probability ps showed in ﬁg. 6 and table 2 that decreasing ps
+changes the exponent. Fitted exponential functions still had extremely good agreement with obtained
+data, with the only case standing out was for ps = 0.99 with a goodness of ﬁt measure R2≈ 0.98. This
+shows that the exponential attenuation law shown to hold for one parameter conﬁguration, also hold when
+changing other physical parameters. To answer the question we stated in the problem statement: The
+attenuation of transmission intensity during neutron transport through a slab is exponential in the ratio
+of depth and mean free path, with the rate of intensity decay determined by the scattering probability
+of the material.
+Regarding the absorption probabilitypc as a function of the scattering probability of the slab, creating
+a mixture of two materials seems to create a material with average absorbing capabilities being the mean
+values of the materials, weighted by the respective fraction of material atoms, as indicated by the linear
+trend in ﬁg. 8. This means that by adding better absorbents to the slab, it would increase the material’s
+overall absorbing ability, but one would achieve a greater improvement by replacing the entire slab by
+a slightly better absorbent. Since increasing the depth also would increase absorptions considerably (as
+pt decreases exponentially and total probability is conserved pt +pc +pr = 1), creating mixed materials
+would probably not compare. The accuracy of this result though, is debatable, since it is based on the
+mixing of materials being uniform. The considerable simpliﬁcation in our model of randomly picking
+the interacting material would not hold for slightly non-uniform material distributions and also does not
+account for neutrons in the simulations arriving in the same location twice. One should probably have
+to add certain details to the model such as deﬁning intervals for the nuclei positions if keeping a discrete
+model is desirable. Although this would also mean a large amount of memory overhead for any decent
+accuracy, and is thus not attempted here.
+6 Appendix: Code listings
+Code listing showing C++ code for neutron transport simulating neutrons traveling through slabs with
+constant probabilities of scattering ps and absorption pa = 1−ps, with physical parameters, slab depth
+d and mean free path λ, and a number of simulations W .
+1 input : lambda , d , p s , p a and W
+2 enum Cases { absorb =0, r e f l e c t , s c a t t e r } ;
+3
+4 seed = chrono : : system clock : : now ( ) . t i m e s i n c ee p o c h ( ) . count ( ) ;
+5 mt19937 gen ( seed ) ;
+6 u n i f o r m r e a l d i s t r i b u t i o n<double > d i s t (0 , 1 ) ; // number generator
+7 vector <int > r e s u l t (3 , 0 ) ;
+8 vector <vector <int >> v a l s (W, vector <int >(3 , 0 ) ) ;
+9
+
+===== PAGE 10 =====
+
+9 double z = 0 ;
+10 double rand val = 0 ;
+11 f o r ( i n t l = 0 ; l < W; l++)
+12 {
+13 s t r i n g input ;
+14 z = 0 ;
+15 while ( z >= 0 && z <= d)
+16 {
+17 i f ( z != 0) // i f t h i s i s n ’ t s t a r t i n g point
+18 {
+19 rand val = d i s t ( gen ) ;
+20 i f ( rand val <= p a ) // absorption
+21 break ;
+22 }
+23
+24 // random angle and t r a v e l d i s t a n c e
+25 double angle rand = z == 0 ? 0 : d i s t ( gen ) ;
+26 double length rand = d i s t ( gen ) ;
+27 z += −lambda∗ log ( length rand )∗(1−2∗ angle rand ) ;
+28 }
+29
+30 // save r e s u l t
+31 i f ( z < 0)
+32 {
+33 r e s u l t [ r e f l e c t ]++;
+34 h i s t o r y [ l ] [ r e f l e c t ]++;
+35 }
+36 e l s e i f ( z > d)
+37 {
+38 r e s u l t [ s c a t t e r ]++;
+39 h i s t o r y [ l ] [ s c a t t e r ]++;
+40 }
+41 e l s e
+42 {
+43 r e s u l t [ absorb ]++;
+44 h i s t o r y [ l ] [ absorb ]++;
+45 }
+46 }
+47
+48 // c a l c u l a t i o n o f mean and variance using r e s u l t and v a l s . . .
+10

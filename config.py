@@ -170,14 +170,17 @@ class ReliabilityAnalysisToggles:
     monte_carlo_precision_target: bool = True
     global_sensitivity: bool = True
     q2_uncertainty_budget: bool = True
-    smooth_integrator_benchmark: bool = True
-    conservative_invariants: bool = True
+    # Appendix-level diagnostics; disabled by default to keep the main reliability
+    # pipeline focused on mission-relevant evidence.
+    smooth_integrator_benchmark: bool = False
+    conservative_invariants: bool = False
     finite_time_sensitivity: bool = True
     bifurcation: bool = True
     bifurcation_2d_map: bool = True
     drift: bool = True
     model_limitations: bool = True
-    q7_conclusion_support: bool = True
+    # Summary synthesis metric; disabled by default for lean report pipelines.
+    q7_conclusion_support: bool = False
 
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(

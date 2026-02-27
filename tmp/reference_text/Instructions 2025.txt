@@ -1,0 +1,88 @@
+
+
+===== PAGE 1 =====
+
+Instructions for UT-KTH Mechanical Engineering Seminar II Fall 2025 
+Introduction 
+This seminar (or more properly project) is a task that requires searching for information 
+beyond the course material, design of a study and perhaps a lot of engineering 
+approximations. The work is performed in a group and at the end of the project you will 
+hand in a jointly prepared account for each student’s individual contribution to the work.
+What do I need to do to pass? 
+In order to pass, the group must perform the project and report it with a poster. It is also 
+required that the group prepares and present as speciﬁed below for each seminar. You 
+must be present at the seminars (Nov 10, Nov 17, Nov 26, Dec 8) and at the poster 
+presentation (Dec 17). Your contribution to the work, as presented in the joint account, 
+must not be insigniﬁcant.
+What will we do in more detail? 
+Together with a group consisting of students from UT and KTH you will:
+1.Get acquainted with a ﬂow problem from an earlier exam at UT or KTH and get an 
+general understanding on what to do during the project. This is done before and 
+during Seminar 1 (Nov 10). 
+2.Solve as much as possible of the examproblem and prepare a 8 minute (not more!) 
+presentation describing the problem and its solution. The presentation is made at 
+Seminar 2 (Nov 17). 
+3.Identify a phenomenon or construction/design where the ﬂow case in the problem 
+occurs. An image illustrating your chosen phenomenon or construction should be 
+included in the presentation at seminar 2 (Nov 17). 
+4.Formulate a mathematical/physical model of the phenomenon or construction, where 
+the dynamics of the ﬂuid dynamical problem is included. Time dependent situations 
+are encouraged (e.g. a heartbeat, emptying or ﬁlling, starting, pumping, etc)! 
+5.Solve the model analytically or numerically (or with a combination of methods). Points 
+4 and 5 are reported in a suitable manner during 8 minutes at Seminar 3 (Nov 26). 
+6.Make (at least) one parameter study and make conclusions regarding how the 
+dynamics of the problem afect the phenomenon/construction. The accuracy of 
+numerical solutions shall be investigated by varying the resolution. 
+7.Produce a poster reporting the project. The posters are discussed in digital form at 
+Seminar 4 (Dec 8). 
+8.Present your poster at the poster presentation Dec 17. 
+ 
+
+
+===== PAGE 2 =====
+
+Detailed instructions for seminar 1 & 2  
+Seminar 1 
+At this seminar, you will discuss the exam problem and the project together with other 
+students working with the same problem. You shall have looked at the problem before the 
+seminar. After the seminar everyone shall understand the problem and have an idea on 
+how it can be solved. 
+You shall also get to know the other group members, have decided on how to 
+communicate, when to meet and how to structure your work.
+Seminar 2 
+At this seminar, your group shall present the solution of your problem. You will present the 
+solution for course colleagues who has worked on other problems. You shall also present 
+the phenomenon/construction you have chosen to study.
+The solution is to be presented in a suitable manner during 8 minutes. Note that this is a 
+fairly short time, why the presentation must be well prepared! The presentation shall ﬁnish 
+with an image showing the phenomenon/construction you have chosen to model and 
+study in the rest of the project.  
+
+
+
+===== PAGE 3 =====
+
+Please chose either problem 1 or 2
+Exam problem 1: 
+ As shown in the figure, water flows out from a hole at the bottom of a cylindrical container. Let 
+the area of the hole A, the depth of water H, the cross-sectional area of the container S, and 
+gravitational acceleration g. Answer the following questions. 
+(1)Water is continuously added to the container so that the depth of water is kept constant at H. 
+Find the volume flow rate Q of the water flowing out from the hole. 
+(2)Then, let us consider the case without adding water to the container. Assume that A i s  
+sufficiently small compared to S and find the time required to empty the container. 
+  
+Exam problem 2: 
+ As shown in the figure, two different kinds of liquid of density  and  flow into the mixer 
+from inlet 1 and 2 respectively, and are mixed to create liquid of uniform density  flowing out 
+from outlet 3. , ,  and , ,  are the cross-sectional area and the gauge pressure at 
+inlet 1, inlet 2, and outlet 3. Let ,  be the volume flow rate at inlet 1 and inlet 2. Using the 
+momentum conservation law, find the force,  and , exerted to the mixer for both the x and y 
+directions. 
+ 
+ρ1 ρ2
+ρ3
+A1A2A3 p1p2p3
+Q1Q2
+Fx Fy
+
