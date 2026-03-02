@@ -4,7 +4,7 @@
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Union
 
 @dataclass
 class ScalingConfig:
@@ -139,7 +139,7 @@ class TwoStageRocketConfig:
     sequence: SequenceConfig
     payload_mass: float   # [kg] Payload mass
     target_altitude: float = 420000.0  # [m] Target Orbit Altitude
-    target_inclination: Optional[float] = None   # [deg] Target Inclination. If None, defaults to Launch Latitude (Min Energy).
+    target_inclination: Union[float, None] = None   # [deg] Target Inclination. If None, defaults to Launch Latitude (Min Energy).
     num_nodes: int = 140  # Number of discretization nodes per phase
     max_iter: int = 2000  # Maximum number of iterations for the optimizer
     
@@ -166,16 +166,11 @@ class ReliabilityAnalysisToggles:
     collocation_defect_audit: bool = True
     theoretical_efficiency: bool = True
     integrator_tolerance: bool = True
-    event_time_convergence: bool = True
     monte_carlo_precision_target: bool = True
-    global_sensitivity: bool = True
     q2_uncertainty_budget: bool = True
-    # Appendix-level diagnostics; disabled by default to keep the main reliability
-    # pipeline focused on mission-relevant evidence.
-    smooth_integrator_benchmark: bool = False
-    conservative_invariants: bool = False
-    finite_time_sensitivity: bool = True
-    bifurcation: bool = True
+    # Keep foundational numerical-method checks enabled by default so
+    # report pipelines include explicit integrator-order evidence.
+    smooth_integrator_benchmark: bool = True
     bifurcation_2d_map: bool = True
     drift: bool = True
     model_limitations: bool = True

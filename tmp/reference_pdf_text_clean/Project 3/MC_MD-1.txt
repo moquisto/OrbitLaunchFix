@@ -1,0 +1,599 @@
+
+===== PAGE 1 =====
+
+Monte Carlo and
+molecular dynamics 
+simulations
+
+===== PAGE 2 =====
+
+Outline
+•What is Monte Carlo simulation and what can it do
+•Error sources and how to reduce them 
+•When is MC better than other methods?
+•Molecular Dynamics
+•Ensembles
+•Project descriptions
+
+===== PAGE 3 =====
+
+What is Monte Carlo simulation?
+•MC is any algorithm based on random numbers
+•Used for calculating multiple integrals, generate 
+probability distributions, growth phenomena, etc
+•Results are obtained as averages over random samples
+•MC can be exact in the sense systematic-error-free
+•Results are exact up to statistical errors
+•Better than deterministic methods 
+for large number of degrees of freedom
+
+
+===== PAGE 4 =====
+
+Hit-and-miss method•T o calculate an integral as the area under the graph of 
+a function:
+1.Inscribe the graph in a box
+2.Generate N random points in box
+3.Each point hits or misses target area
+4.Integral estimated from area ratio 
+ 
+ 
+ 
+•T o make this into a practical method we need to 
+understand:
+5.how to generalize to calculate any integral
+6.how to calculate the statistical error
+7.what to do if the error is large
+integralbox area∼n.o. hits in target areaN
+
+===== PAGE 5 =====
+
+Example: calculate pi
+•Inscribe a circle in a square
+•Throw stones/darts at random
+•Estimate pi from area ratio  
+ 
+ 
+ 
+•Requires throws distributed uniformly in the 
+integration volume, which can be done easily 
+in a box geometry but not in general 
+π=4circle areasquare area∼4hits in circlenumber of points+statistical error
+
+===== PAGE 6 =====
+
+Simple MC
+•Calculate area as average of random samples 
+ 
+ 
+ 
+ 
+•Here xi are independent uniform random numbers in [a,b]
+•Convergence is ok if the variance is small 
+Otherwise convergence can be poor
+•Not clear when the slow convergence is useful even with 
+small variance! 
+f=1b−af(x)dxab∫=1Nf(xi)i=1N∑±σNσ2=f2−f2
+
+===== PAGE 7 =====
+
+The hit-and-miss method can 
+calculate any volume integral
+•Big variance main source of bad convergence
+•T wo sources of big variance:
+1.Box volume too big 
+Try to make it similar to the integration volume 
+The difﬁculty is to generate random points 
+uniformly distributed in the volume 
+2.Function varies too rapidly (next topic) 
+f=1Vboxf(!r)ddr=1Nf(!ri)i=1N∑∫±σNσ2=f2−f2
+set f=0 outside V
+
+===== PAGE 8 =====
+
+Standard error of the mean
+•Note the crucial assumption of independent random samples: 
+•For dependent random samples we instead have 
+Δ2=1Nfii=1N∑⎛⎝⎜⎞⎠⎟−f⎡⎣⎢⎤⎦⎥2==1N2fifji,j=1N∑−2Nfii,j=1N∑f+f2==1N2fifji,j=1N∑+1N2f2−f2()i=1N∑−2f2+f2==1N2f2−f2()i=1N∑=f2−f2N=σ2NΔ=σNσ2=f2−f2≈1Nfi2i=1N∑−1Nfii=1N∑⎛⎝⎜⎞⎠⎟2Δ=σNindependenti≠j⇒⟨fifj⟩=⟨fi⟩⟨fj⟩
+
+===== PAGE 9 =====
+
+When is MC better than deterministic methods?
+•In deterministic methods the 
+convergence goes as N-k 
+N=n.o. function evaluations
+•Rectangular, midpoint methods: k=1
+•Trapetz, Simpson methods: k=2
+•d-dimensional integral:  error~N-k/d  
+N1/d points used in each dimension
+•MC converges faster when  
+N-k/d > N-1/2  or d>2k
+•MC wins for d>4 
+•In practice MC is the only good 
+method for integrals with a large 
+number of degrees of freedom
+•Example: statistical mechanics
+RN=f(xi)Δxi=1N∑MN=f(12[xi+xi+1])Δxi=1N∑TN=12[f(xi)+f(xi+1)]Δxi=1N∑=    =12f(x1)+12f(xN)+f(xi)i=2N−1∑⎡⎣⎢⎤⎦⎥ΔxSN=13[f(x1)+4f(x2)+2f(x3)+...       +2f(xN−2)+4f(xN−1)+f(xN)]Δx=f(x1)+f(xN)+4f(xi)i=2,4,...N−1∑+2f(xi)i=3,5,...N−2∑⎡⎣⎢⎤⎦⎥Δx
+Integration schemes
+
+===== PAGE 10 =====
+
+Derivation of integration errors
+• Integration in one mesh interval by Taylor’s formula:
+• The rectangular and midpoint methods integrate a constant function exactly
+• The error for one subinterval is therefore  ~dx2~1/N2
+• The error summed up over N intervals is  ~N/N2=1/N
+• The Trapetz method integrates linear functions exactly
+• The error for one subinterval is therefore  ~dx3~1/N3
+• The error summed up over N intervals is  ~N/N3=1/N2
+• Simpsons rule can be obtained from Trapetz by SN=(4T2N-TN)/3
+• The error it therefore  ~1/N2  as for Trapetz
+f(xi+x)=f(xi)+f'(xi)x+12f''(xi)x2+13!f'''(xi)x3+...=cmxm∑⇒fdx=xixi+1∫dmΔxm+1m=0∑     where Δx=xi+1−xi and cm, dm are different constants
+
+===== PAGE 11 =====
+
+Metropolis algorithm
+•The Metropolis algorithm is used to 
+calculate averages of the form 
+ 
+ 
+ 
+ 
+•Construct a sequence of random 
+points that converges towards the 
+target distribution
+•The sequence of points is constructed 
+as a Markov process:  
+a random walk deﬁned by 
+constructing a transition probability Tij 
+from one value xi to another value xj
+•The distribution of points approaches 
+P(x) after many steps
+•A common choice is 
+ 
+      
+f=f(x)P(x)dx∫P(x)dx∫Tij=min1,P(xj)P(xi)⎧⎨⎩⎫⎬⎭
+Metropolis algorithm:
+1.Choose a trial point                    where            
+     is a uniform random number in
+2.If                                      where r is a 
+random number in [0,1], then accept the 
+change and set 
+3.Otherwise reject the change and set 
+4.Repeat from step 1 until enough points 
+have been generated
+5.Skip N0 initial points to approach the 
+target distribution P(x) and form averages 
+as 
+ 
+6.A complication is that successive points 
+are correlated which means that the 
+statistical error is 
+−δ,δ[]w=P(xj)/P(xi)>rxi+1=xxi+1=xif≈1Nf(xi)i=N0N0+N∑>σ/N
+j
+di
+xj=xi+di
+
+===== PAGE 12 =====
+
+Correctness of Metropolis MC
+•Requirements:
+•existence of stationary distribution
+•uniqueness of stationary distribution
+•Simpler, but stricter requirement: 
+detailed balance:
+•Rewrite: 
+•Split process into proposal distribution g 
+and acceptance ratio A: 
+•Insert:
+•Choose acceptance criterion
+
+
+===== PAGE 13 =====
+
+Molecular 
+Dynamics
+Simulation of bio-
+molecules can aid 
+understanding of 
+diseases and help 
+design new drugs
+
+
+===== PAGE 14 =====
+
+Newton’s equation of motion
+•Can be used for simulating any type of (classical) 
+particle dynamics, ranging from:
+•dynamics of atoms and electrons
+•to celestial dynamics 
+m i
+d
+2
+x i
+dt
+2
+= fi (x )= r i V (x )
+
+===== PAGE 15 =====
+
+012 3
+r/σ
+−2
+0
+2
+4
+6
+V/ε
+Molecular interactions
+Vij (rij )=4 ✏ij
+"✓
+ij
+rij
+◆12
+
+✓
+ij
+rij
+◆6
+#
+Vij (rij )=
+qiqj
+4⇡✏ 0rij
+Lennard-Jones potential models 
+Van der Waals interactions
+Between atom i and j:
+012 3
+r
+−2
+0
+2
+4
+6
+V=1/r
+Coulomb potential models 
+electrostatics interactions
+Between atom i and j:
+
+===== PAGE 16 =====
+
+Periodic boundary conditions
+We can only simulate ﬁnite, small systems.
+We want to avoid boundaries around
+the system, since boundary effects
+would dominate in most cases.
+A solution:
+   periodic boundary conditions
+   in the example here, particle
+   1 interacts with particle 2
+   over the periodic boundary
+   (shorter distance than within
+   the same cell)
+
+===== PAGE 17 =====
+
+Taking some time steps
+
+
+===== PAGE 18 =====
+
+
+
+===== PAGE 19 =====
+
+MD is chaotic
+•Since MD involves non-linear equations for many 
+particles, you can expect chaotic behavior 
+•However, we are almost never interested in 
+following the trajectory if one (or more) particle 
+over a long time. 
+•Rather we are interested in more global 
+equilibrium and/or dynamic properties.
+
+===== PAGE 20 =====
+
+Studying equilibrium properties 
+with MD or MC 
+•Molecular dynamics simulations are often used to study 
+equilibrium properties: 
+•Structures of liquids, crystals, polymer melts, proteins 
+•Structures of interfaces, e.g. water liquid-vapor interfaces 
+•Distributions of, for instance, ions in liquids
+•Structural ﬂuctuations of proteins and polymers (this is not 
+dynamics!)
+•Phase diagrams (Monte Carlo is often better suited) 
+•. . .
+•For all this the “dynamics” part of MD is only used for sampling 
+
+===== PAGE 21 =====
+
+Skin
+•Y our skin forms a 
+barrier for molecules 
+exiting or entering your 
+body
+•But it would be useful 
+to administer drugs 
+through the skin
+•How do molecules 
+move through the skin?
+
+===== PAGE 22 =====
+
+Studying dynamic properties with MD 
+•Some examples of Molecular dynamics used for dynamics: 
+•Diffusion
+•Viscosity
+•Dynamics of phase transitions
+•Figuring out how proteins work in our bodies
+•Drugs binding to proteins (more kinetics than dynamics) 
+•Liquids spreading on surfaces
+•. . .
+
+===== PAGE 23 =====
+
+Electrowetting of water + Na+ + Cl-
+
+
+===== PAGE 24 =====
+
+Ensembles in statistical mechanics
+•Microcanonical ensemble: system isolated from environment, 
+energy E=constant, particle number N=constant 
+•Canonical ensemble: divide a microcanonical ensemble into 
+two parts, called the ”system” and the ”heat bath or 
+reservoir”, that can exchange energy but not particles.  
+E≠constant, instead T=constant
+•Grand canonical ensemble: the system and reservoir can 
+exchange energy and particles.  
+
+===== PAGE 25 =====
+
+Microcanonical ensemble
+•Microcanonical ensemble: system isolated from 
+environment 
+energy E=constant, particle number N=constant 
+•Basic postulate of statistical mechanics (Gibbs): all 
+accessible states are equally probable  
+ 
+ 
+•Ensemble average of A:                         
+(ergodic hypothesis: ensemble average = time average)
+Ps=1/Ωif state s is accessible0else, ⎧⎨⎩Ω=number of accessible statesA=Ass=1Ω∑Ps
+
+===== PAGE 26 =====
+
+Canonical ensemble
+•Canonical ensemble: divide a microcanonical 
+ensemble into two parts, called the ”system” and 
+the ”heat bath or reservoir”, that can exchange 
+energy, but not particles. 
+•The temperature T, equilibrium Boltzmann 
+distribution P , partition function Z, free energy F , 
+entropy S,  and ensemble average <A> are given by: 
+Ps=1Ze−βEs , β=1/kT , Z=e−βEss∑ , F=-kTlnZ=E−TS , S=klnΩ(E) , A=AsPss∑
+
+===== PAGE 27 =====
+
+Changing ensemble in MD
+•By default molecular dynamics conserves the total 
+energy and thus you get a microcanonical 
+ensemble
+•How to obtain a canonical ensemble? 
+Add a thermostat 
+•How to obtain a constant-NpT ensemble? 
+Add a thermostat and a barostat
+•Note: thermostat and barostat need carefully 
+designed algorithms and implementations to obtain 
+the correct ensemble!
+
+===== PAGE 28 =====
+
+Thermostats in MD
+•Andersen thermostat: Every n-th step (n is a parameter):
+•choose a particle at random or loop over all atoms
+•re-assign random velocities from a Boltzmann distribution,  
+take vx/y/z from Gaussian distribution with σ2 = kBT/m , μ = 0, m =1
+•Advantage: very simple to implement Disadvantage: strong 
+disruption of dynamics 
+•Bussi thermostat:
+•Scale the velocities and add noise to the velocities
+•Nosé-Hoover thermostat:
+•Add the kinetic energy as a degree of freedom in the Hamiltonian 
+Advantage: smaller disruption of dynamics 
+•Disadvantage: can be tricky to implement and control 
+
+===== PAGE 29 =====
+
+Metropolis method: system in contact with a heat bath
+•A heat bath is considered to be so much bigger than the system 
+so that it can give or take energy to the system without changing 
+its temperature
+•Generate trial moves, accept a move if 
+•Non-equilibrium states appear initially in the simulation and show 
+up as a transient in the measured energy and other quantities
+•Such transient states must not be included when measuring 
+ensemble average, in order to avoid bias in the estimates of the 
+equilibrium properties 
+•After the initial transient has decayed, equilibrium is reached and 
+the distribution of energy and other quantities becomes stationary
+•In equilibrium the ﬂuctuations of the system are distributed 
+according to the Boltzmann distribution
+e−ΔE/kT>[random number in (0,1)]
+
+===== PAGE 30 =====
+
+Energy ﬂuctuations
+•In a thermal system the potential energy ﬂuctuations 
+as the system samples different states/conﬁgurations
+•The energy ﬂuctuations are measured by the heat 
+capacity, and the relative energy ﬂuctuations tend to 
+zero in the limit of a large number of particles: 
+ 
+ 
+ 
+ 
+•Deﬁnition of heat capacity: the amount of heat to be 
+supplied to a given mass of a material to produce a 
+unit change in its temperature
+C =
+E
+T
+=
+( E )
+2
+kB T 2
+=
+hE
+2
+ih E i
+2
+kB T 2
+⇠ N )
+ E
+E
+⇠
+p
+N
+N
+=
+1
+p
+N
+! 0
+v
+where the subscript v on Cv indicates constant volume,
+there is also Cp which is at constant pressure
+
+===== PAGE 31 =====
+
+Computing the pressure
+•Using the mechanical deﬁnition of the pressure as 
+momentum ﬂux, the, instantaneous, pressure is:
+  
+where  is the nr. of dimensions and 
+the virial of the force is deﬁned as: 
+  
+(this is the derivative of the potential with respect 
+to the volume)
+P=2
+dV(Ekin−Ξ)
+d
+Ξ=−1
+2∑i<j
+Fijrij
+
+===== PAGE 32 =====
+
+Examples of interacting models
+•The simplest non-ideal gas model is the hard rod/disk/sphere 
+model in 1/2/3 dimensions respectively
+•Consider particles with radius a without long range interactions 
+but with an inﬁnite hard-core repulsion if they come closer than 
+2a 
+•At low density the system is a liquid, and at high density a packed 
+solid is obtained
+•Computer simulations suggest that there is a solid-liquid transition 
+at some intermediate density for hard disks and spheres
+•A common model for a ﬁnite-range interacting gas is given by a 
+Lennard-Jones potential:  
+ 
+•This model can describe solid, liquid and gas phases and the 
+transitions between these phases are conveniently studied by MC 
+V(r)=4εσr⎛⎝⎜⎞⎠⎟12−σr⎛⎝⎜⎞⎠⎟6⎡⎣⎢⎢⎤⎦⎥⎥
+
+===== PAGE 33 =====
+
+Radial Distribution Function
+•The structure of a liquid is difﬁcult to analyze, 
+for N atoms you have a 3N-dimensional system
+•Y ou can look at low-dimensional distributions:
+•g(1)(x), the probability to ﬁnd a particle at position x: 
+useful for a crystal, uniform for a liquid
+•g(2)(r), the radial distribution function, which gives 
+ the probability of ﬁnding a particle at distance r 
+ from another particle, relative to an ideal gas
+•Calculating g(r), which is essentially a histogram normalized by r (in 2D):
+•Choose a bin width and make a list of bins up to a certain maximum distance
+•For one or more conﬁgurations do a loop over all particles pairs (which are 
+N(N-1)/2); for each pair determine the distance and add 1 to the 
+corresponding bin
+•g(r)= bin_count(r) / (shell_area x #conf. x rho x N/2), where the shell_area = 
+2 pi ((r+binwith)2 - r2) and rho is the particle density
+example: g(r) of a LJ liquid
+
+===== PAGE 34 =====
+
+References
+•Courses at physics:
+•Computational Physics (SI2530) MD+MC
+•Biophysics (SI2720), focus on proteins, contains MD (labs)
+•2 listed + 2 non-listed Statistical Physics courses
+•PhD-level: Advanced Molecular Dynamics (SI3450)
+•Good book:
+•“Understanding Molecular Simulation” Frenkel & Smit
+•Bussi thermostat: https://arxiv.org/abs/0803.4060
+•Fancy pictures of simulated bio-molecules (our competitor): 
+http://www.ks.uiuc.edu/Gallery/Science-New/ 
+
+===== PAGE 35 =====
+
+Projects: Monte Carlo
+3.1) Use the Metropolis method to calculate:
+hxi=
+Z1
+0
+x
+2
+e
+x
+dx
+Z1
+0
+xe
+x
+dx
+Here P(x)= xe x
+.T r y d i ↵erent values of the parameter  in the range between
+0.1 and 10. Plot the standard error assuming independent samples: the standard
+deviation of xi divided by
+p
+N, RMS averaged over mutiple MC runs:
+s
+average over runs
+✓
+var( x)
+N
+◆
+Compare the with the RMS di ↵erence of the averages with the exact answer:
+q
+average over runs (average within run (x) 2)2
+Plot these as a function of and try to explain the results.
+Also plot the acceptance rate of moves as a function of .
+
+===== PAGE 36 =====
+
+Projects: Molecular Dynamics
+3.2 a) Implement the LJ potential and force (with =1a n d ✏=1 )i nt h et e m p l a t e .
+A correct implementation should give good conservation of the total energy. Use a
+temperature of 1 and increase the time step until things go very wrong. Study the
+quality of the integration by monitoring the drift in the total energy for several
+di↵erent time steps just before things go wrong.
+3.2 b) Run a LJ simulation with initial velocities at a temperature of 0.2. What
+happens with the kinetic and potential energy?
+3.2 c) Implement an Andersen thermostat that thermalises all particles simultane-
+ously at a ﬁxed step interval and run simulations at T =1 and 0.2. What di ↵erences
+in collective behavior do you observe between 1 and 0.2 at long times? A physics
+question: can you explain what you see?
+3.2 d) Use MD with the thermostat to calculate the average energy and heat ca-
+pacity between T =0 .2a n d1 . M a k es u r et h er e s u l t sa r es u ciently converged
+(choose your own deﬁnition of su cient). Can you explain the behavior of the
+heat capacity from the behavior of the system that you observe in the animations?
+
+===== PAGE 37 =====
+
+Projects: Molecular Dynamics (continued)
+3.2 e) Now we will look at the pressure. Can you explain the di ↵erences in pressure
+between the di ↵erent temperatures? Also run with a 4 times as large unit cell by
+doubling L. What happens to the pressure at di ↵erent T? How does the pressure
+compare with that of an ideal gas?

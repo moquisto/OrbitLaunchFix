@@ -1,0 +1,44 @@
+# REFERENCE/Final Rapport/grading criteria.pdf
+# pages=1
+
+
+
+===== PAGE 1 =====
+
+Grading criteria, the minimum counts
+•discretization = integrator/discrete model + boundary conditions etc.
+•accuracy = time step or statistical accuracy (depends on length/nr of sims)
+problem 
+formulation
+discretisation
+& accuracyexecutionanalysis report
+A clear 
+problem 
+formul.
+comparison of 
+relevant 
+methods/
+parameters
+no mistakes 
+that affect 
+conclusions
+(or noted 
+relevant 
+mistakes)
+discuss all 
+important 
+aspects
+very clear
+B well 
+organized,
+clear plotsC motivated 
+choices clear
+D
+unclear
+mostly 
+correct
+OK, but 
+unclear 
+plotsE proper
+unclear
+F improperincorrect lacking

@@ -1,0 +1,1013 @@
+# REFERENCE/Lecture1.pdf
+# pages=37
+
+
+
+===== PAGE 1 =====
+
+1. Oscillations & 
+Chaos
+
+===== PAGE 2 =====
+
+Outline
+•Linear and nonlinear problems
+•The pendulum and the harmonic oscillator
+•Symmetries and conservation laws
+•Finite difference methods
+•Explanation of why some methods conserve 
+energy and others don’t: symplectic methods
+•Chaotic motion
+•Projects
+
+===== PAGE 3 =====
+
+Linear and nonlinear problems
+•General analytical methods to solve differential equations 
+rely on the superposition principle, which applies only for 
+linear equations
+•There are no general analytic methods for solving 
+nonlinear problems
+•Computer simulation works both for linear and nonlinear 
+problems
+•In simulation of a given problem issues of numerical 
+accuracy and stability need to be controlled
+•Symmetries are important: is the motion time reversal 
+symmetric?
+•Conservation laws are important: is energy conserved? 
+
+===== PAGE 4 =====
+
+Simplest nonlinear problem: pendulum
+•This equation is obtained as the tangential 
+component of Newtons law of motion:
+•Has no analytic solution
+•Time reversal symmetry: if         is a 
+solution then           is also a solution
+•Conservation of energy: E(t)=E(0)
+θ(t)θ(−t)
+
+
+===== PAGE 5 =====
+
+Harmonic oscillator
+•For small oscillations the nonlinearity can be linearized: 
+•Equation of the motion becomes linear:
+• Angular frequency
+•Energy 
+ 
+ 
+conserved as for the pendulum  
+•Prototype model for any system doing bound motion around a stable 
+equilibrium position since
+
+
+===== PAGE 6 =====
+
+Euler works poorly
+•Apply Euler to the harmonic oscillator:
+•T est if the Euler method conserves energy:
+•Energy conservation is violated!
+•Euler fails a basic requirement of a good integrator: it should conserve energy 
+
+
+===== PAGE 7 =====
+
+Euler-Cromer is much better
+•Energy conservation test:
+•The          and          terms average to zero over a whole period  
+•Thus the method is conserves energy to order 
+•Thus Euler-Cromer is much better than Euler
+
+
+===== PAGE 8 =====
+
+Verlet method
+•Forward and backward differences
+•Add and subtract
+•Rearranging gives the Leapfrog 
+method
+•Disadvantage: not self starting
+•The last eq gives
+•Using this in Leapfrog gives
+•Next write Leapfrog one more 
+timestep forward
+•Putting it all together gives the Verlet 
+method:
+Both time reversal symmetric and 
+conserves energy
+
+===== PAGE 9 =====
+
+Runge-Kutta
+•A commonly used higher order method is obtained by averaging increments 
+over four points in the time interval:
+•Here a(x(t),v(t),t) is the acceleration at position x(t), velocity v(t), and time t
+•Note that for a 1D system all quantities are scalars
+•For multiple dimensions x, v, a?, b? are all vectors
+
+
+===== PAGE 10 =====
+
+Adaptive time steps
+•In problems where the acceleration is velocity 
+dependent the above methods become less efﬁcient
+•An example of this is the double pendulum where 
+energy exchanges between two arms to produce 
+intervals of high speed
+•In these cases adaptive time steps or predictor-
+corrector methods can improve performance
+•Adaptive time steps means that short time steps are 
+taken where the increments are big, and larger time 
+steps are used when the increments are small
+•The required time step can be determined on the ﬂy in 
+the simulation
+•But causes problems with energy conservation
+
+===== PAGE 11 =====
+
+Why do some methods conserve energy?
+•The Hamiltonian formulation of classical mechanics is based on the observation that  
+ 
+ 
+where                       is called the Hamilton function and gives the total energy  
+•Symplectic means ”area preserving”, so that the area element 
+                  is unchanged under the map                   which gives 
+ 
+ 
+ 
+•This prevents the coordinates and momenta from running away, and as a 
+consequence it is possible to show that a slightly perturbed energy is conserved 
+•Example: Euler-Cromer is symplectic since 
+•Verlet and leapfrog are also symplectic
+•Euler and Runge-Kutta are not symplectic
+•Higher order symplectic methods can be constructed systematically
+H=p22m+V(x)dA'=∂x'∂xˆx+∂p'∂xˆp⎛⎝⎜⎞⎠⎟dx×∂x'∂pˆx+∂p'∂pˆp⎛⎝⎜⎞⎠⎟dp=JdA ⇒ dA'=dA  if the Jacobian J=∂x'∂x∂x'∂p∂p'∂x∂p'∂p⎛⎝⎜⎜⎜⎜⎞⎠⎟⎟⎟⎟=1dA=dxdp(x,p)→(x',p')J=10∂F∂xΔt1⎛⎝⎜⎜⎜⎞⎠⎟⎟⎟=1
+F = ma , p = mv ) ˙p= 
+@H
+@x
+, ˙x =
+@H
+@p
+
+===== PAGE 12 =====
+
+Symplectic integrators: area preserving
+integration of pendulum motion
+position (angle)
+velocity
+
+===== PAGE 13 =====
+
+Chaotic motion
+
+===== PAGE 14 =====
+
+What is chaos?
+•In these lectures we study (simple) nonlinear 
+deterministic models that can exhibit chaotic behavior 
+ 
+•The difference between chaos and noise (later)? 
+
+===== PAGE 15 =====
+
+When do we encounter chaotic motion? 
+•“T op-down”: 
+•Y ou observe chaotic behavior. 
+What rules govern this?
+•“Bottom-up”: 
+•Y ou have a set of non-linear differential equations. 
+Are the solutions chaotic or not?
+•Example: butterﬂy effect 
+in weather forecasting 
+Thunderbird Leadership Consulting
+
+===== PAGE 16 =====
+
+Rayleigh-Bénard convection
+hot liquid is lighter 
+and wants to go up
+
+===== PAGE 17 =====
+
+Chaos theory
+•For a dynamic system to be chaotic:
+1.it must be sensitive to initial conditions
+2.it must be topologically mixing
+3.it must have dense periodic orbits 
+
+===== PAGE 18 =====
+
+Example: speed wobble / shimmy
+•The steering wheel(s) on a vehicle, e.g. plane, shopping 
+cart, ... 
+
+
+===== PAGE 19 =====
+
+Also problems at low speeds
+spectively, and Mris the external moment around ObZb. The
+forces and moment are given by
+FFf f ff
+D CP
+Ff fff
+D CP
+Mf f af f a
+b
+ff Y x P l N R
+= sin cos
+cos (+ ) s i n ,
+=c o s + + + s i n
+sin + ( + )cos ,
+=( + ) (s i n cos )
++
+2
+( )+ +,
+(2)
+xT y n l x n l x m l x m r
+r
+yy n l y m ly m r x n l
+r
+zy m l y m r m x n l y nl n
+w
+xmr xml a r r
+where FTis the engine thrust on the aircraft, fxn and fyn are the
+resultant frictional and lateral forces on the two nose wheels,
+fxml and fyml are the frictional and lateral forces on the left
+main wheel, respectively, fxmr and fymr are the frictional and
+lateral forces on the right main wheel, respectively, θlis the
+steering angle of the nose wheel, βis the aircraft sideslip
+angle, D,C,NR, and Pr are the aerodynamic drag, aero-
+dynamic lateral force, aerodynamic yawing moment, and
+rudder force, respectively, and an,am,bw,lr, and xa are the
+distances defined in Figure 1 .
+The ground reaction forces Pn,Pml and Pmr on the nose and
+two main wheels, respectively, which mainly affect the tire
+frictional forces, have a remarkable influence on the aircraft
+rollout and turning motion states. According to assumption
+(2) in this section, the moment Mraround ObYbis balanced
+by the nose and main tire reaction forces, the aircraft gravity
+G, and the aerodynamic lift L:
+P
+Ga L x a
+aa
+PP
+Ga L x a
+aa
+=
++( )
+(+ )
+,
+==
+(+)
+2( + )
+.
+(3)
+n
+ma m
+nm
+ml mr
+na n
+nm
+The frictional forces of the nose and main tires are pro-
+portional to the tire ground reaction forces:
+fµ P i n m l m r=( = , , ) , (4)xi i
+where μis the tire frictional coefficient.
+As a nonlinear factor determined by the tire sideslip angle,
+the tire side force fyiis affected by the tire maximum sideslip
+angle and the maximum side force, which has been discussed
+previously [37] .
+The aircraft rollout dynamic model can clearly describe the
+steering process and the lateral motion on the ground. Thus,
+it is regarded as the basis to design the nose wheel steering
+control system based on the control continuation method and
+bifurcation control theory in this study. The aircraft status
+parameters and the corresponding values are shown in Ta-
+ble 1 .
+2.2 Control continuation method based on bifurcation
+control theory
+For a nonlinear autonomous dynamic system, the numerical
+continuation method is an effective way to explore the stable
+regions and boundaries on the basis of bifurcation theory
+[38] :
+xx µ f=( ,) , (5)
+where x Rn
+is the n-dimensional state variable vector of
+the nonlinear system, and µ R
+n
+is the system bifurcation
+parameter vector. When the system reaches a critical state at
+µµ= 0 with the continuous variation of μand the system
+performance (topological structure and stability properties)
+changes suddenly, it indicates that the bifurcation phenom-
+enon has occurred at this point ( x,μ0), which is called the
+Figure 1 (Color online) Aircraft taxiing nonlinear dynamic system. (a) Aircraft main load-bearing components; (b) force analysis.
+Table 1 Aircraft status parameters and values
+Aircraft status
+parameters
+V alues Unit
+m 3700 kg
+Iz 18220 kg·m 2
+lb 4.5 m
+bw 1.75 m
+FT 5400 N
+μ 0.02 /
+lr 1 m
+am 0.4 m
+an 3.92 m
+xa 0.3 m
+Yin Q Z, et al. Sci China Tech Sci March 2025, V ol. 68, Iss. 3, 1320602:4
+3 Design of aircraft ground steering control
+system based on control continuation method
+To change the unstable dynamic behavior in the nonlinear
+aircraft rollout and steering system to a stable state, three
+nose wheel steering angle feedback control systems are de-
+signed based on the control continuation method. In addition,
+the influences of the linear and nonlinear feedback con-
+trollers on the system bifurcation characteristics are in-
+vestigated.
+3.1 Linear feedback controller
+The aircraft nose wheel steering linear feedback control
+system is designed as illustrated in Figure 5 . In Figure 5 ,kis
+the gain coefficient of the feedback controller, δlis the nose
+wheel steering control signal, r0is the expected yawing an-
+gular acceleration, and δris the error of the expected and the
+actual yawing angular acceleration after amplification. The
+expected control signal δ0is set as the bifurcation parameter,
+and the one-parameter bifurcation curves for various values
+of the linear control parameter kare shown in Figure 6 .
+As can be seen in Figure 6 , when the linear feedback
+control parameter is k= 2, an unstable periodic turning
+phenomenon will take place as the expected steering control
+signal is located both in δ0∈[0.1,0.27] when the aircraft
+cornering speed is lower than 60 m/s and in δ0∈[0.39,0.96]
+over the whole speed domain. With the decrease in the
+control parameter k, the Hopf bifurcation phenomenon is
+delayed along the positive direction of the steering control
+signal δ0. When k≤ 1, the number of the Hopf bifurcation
+points decreases to one when δ0 is within the range of
+δ0∈[0,1.5]. Additionally, the stable solution curves become
+longer so that the stable region area increases. As the control
+parameter kdrops to 0.1, the Hopf bifurcation phenomenon
+disappears. Thus the aircraft could always roll out along a
+circle at a constant velocity stably over the whole parameter
+domain, indicating that the linear feedback controller can
+efficiently improve the aircraft rollout directional stability of
+the nonlinear turning dynamic system.
+To further explore the impact of the linear feedback con-
+troller on the system steering stability, the point M ( δ0= 0.3,
+u= 40 m/s) is selected as the initial working condition and
+the time domain simulation is conducted with the above five
+control parameter values to analyze the aircraft motion re-
+sponse in the time domain. The variation trends of the
+yawing angular acceleration, yawing angular velocity,
+Figure 4 (Color online) Aircraft ground steering motion status diagram.
+Figure 3 (Color online) One-parameter bifurcation analysis of expected
+control signal.
+Figure 5 Schematic diagram of linear feedback controller.
+Figure 6 (Color online) One-parameter bifurcation curves for various
+linear control parameter values.
+Yin Q Z, et al. Sci China Tech Sci March 2025, V ol. 68, Iss. 3, 1320602:6
+3 Design of aircraft ground steering control
+system based on control continuation method
+To change the unstable dynamic behavior in the nonlinear
+aircraft rollout and steering system to a stable state, three
+nose wheel steering angle feedback control systems are de-
+signed based on the control continuation method. In addition,
+the influences of the linear and nonlinear feedback con-
+trollers on the system bifurcation characteristics are in-
+vestigated.
+3.1 Linear feedback controller
+The aircraft nose wheel steering linear feedback control
+system is designed as illustrated in Figure 5 . In Figure 5 ,kis
+the gain coefficient of the feedback controller, δlis the nose
+wheel steering control signal, r0 is the expected yawing an-
+gular acceleration, and δris the error of the expected and the
+actual yawing angular acceleration after amplification. The
+expected control signal δ0is set as the bifurcation parameter,
+and the one-parameter bifurcation curves for various values
+of the linear control parameter kare shown in Figure 6 .
+As can be seen in Figure 6 , when the linear feedback
+control parameter is k = 2, an unstable periodic turning
+phenomenon will take place as the expected steering control
+signal is located both in δ0∈[0.1,0.27] when the aircraft
+cornering speed is lower than 60 m/s and in δ0∈[0.39,0.96]
+over the whole speed domain. With the decrease in the
+control parameter k, the Hopf bifurcation phenomenon is
+delayed along the positive direction of the steering control
+signal δ0. When k≤ 1, the number of the Hopf bifurcation
+points decreases to one when δ0 is within the range of
+δ0∈[0,1.5]. Additionally, the stable solution curves become
+longer so that the stable region area increases. As the control
+parameter kdrops to 0.1, the Hopf bifurcation phenomenon
+disappears. Thus the aircraft could always roll out along a
+circle at a constant velocity stably over the whole parameter
+domain, indicating that the linear feedback controller can
+efficiently improve the aircraft rollout directional stability of
+the nonlinear turning dynamic system.
+To further explore the impact of the linear feedback con-
+troller on the system steering stability, the point M ( δ0= 0.3,
+u= 40 m/s) is selected as the initial working condition and
+the time domain simulation is conducted with the above five
+control parameter values to analyze the aircraft motion re-
+sponse in the time domain. The variation trends of the
+yawing angular acceleration, yawing angular velocity,
+Figure 4 (Color online) Aircraft ground steering motion status diagram.
+Figure 3 (Color online) One-parameter bifurcation analysis of expected
+control signal.
+Figure 5 Schematic diagram of linear feedback controller.
+Figure 6 (Color online) One-parameter bifurcation curves for various
+linear control parameter values.
+Yin Q Z, et al. Sci China Tech Sci March 2025, V ol. 68, Iss. 3, 1320602:6
+SCIENCE CHINA
+Technological Sciences
+• RESEARCH PAPER • March 2025, V ol. 68, Iss. 3, 1320602:1–1320602:20
+https://doi.org/10.1007/s11431-024-2846-1
+Improving aircraft nose wheel steering stability based on control
+continuation method
+Qiaozhi YIN1,3, Dexu KONG4, Jiawei W ANG3, Hong NIE1,3*& Xiaohui WEI2,3
+1National Key Laboratory of Helicopter Aeromechanics, Nanjing 210016, China
+2State Key Laboratory of Mechanics and Control for Aerospace Structures, Nanjing 210016, China
+3Key Laboratory of Fundamental Science for National Defense-Advanced Design Technology of Flight V ehicle, Nanjing 210016, China
+4AVIC Nanjing Engineering Institute of Aircraft Systems, Nanjing 211106, China
+Received July 10, 2024; accepted November 12, 2024; published online February 17, 2025
+AbstractAircraft steering instability during the taxiing process sometimes occurs resulting from the unstable bifurcation
+phenomena of the nonlinear steering dynamic system, which may lead to severe accidents. In this study, the control parameter
+design of an aircraft nose wheel steering control system based on the control continuation method is proposed to reduce the
+number of unstable bifurcation points and enlarge the system stable region area in a certain parameter domain. Thus, the aircraft
+turning performance can be improved greatly. First, a nonlinear aircraft rollout dynamic model is constructed, and the aircraft
+ground steering bifurcation characteristics are obtained under the open-loop steering control system. Then, the bifurcation
+performances under three closed-loop nose wheel steering controllers based on the feedback control method are compared, and
+the control parameter of the quadratic nonlinear controller with a better bifurcation control effect is selected as a second
+bifurcation parameter to analyze the directional system stability via two-parameter bifurcation analysis. Further, the influence
+of a crosswind on the aircraft ground steering bifurcation performance is studied for various control parameter values. Then, the
+control effects of a traditional proportional-integral-derivative (PID) nose wheel steering control law and the designed feedback
+controller are compared and analyzed. Finally, a semi-physical experiment of the aircraft nose wheel steering system is carried
+out, and different control parameter values are selected for test verification, which can further verify the control effect of the
+designed nonlinear feedback controller. The results indicate that the feedback control method is unable to vary the system
+bifurcation types, but appropriate control parameter design can effectively shrink the system instability region and even
+eliminate the unstable Hopf bifurcation points under some specific working conditions, improving the aircraft ground turning
+stability remarkably from the perspective of the global parameter region.
+Keywordsaircraft taxiing dynamics and stability, nose wheel steering control system, control continuation, steering bi-
+furcation characteristics, quadratic feedback control
+Citation:Yin Q Z, Kong D X, Wang J W, et al. Improving aircraft nose wheel steering stability based on control continuation method. Sci China Tech Sci,
+2025, 68(3): 1320602,https://doi.org/10.1007/s11431-024-2846-1
+1 Introduction
+The aircraft ground maneuver stage is one of the most im-
+portant stages during the whole flight process [1], where
+flight accidents take place frequently due to complicated
+runway conditions, faulty operation, and failure of landing
+gear control systems[2]. An aircraft taxiing dynamic system
+is complex and nonlinear[3]. The aircraft turning instability
+during the running phase sometimes results from the bi-
+furcation phenomena of the nonlinear system, which may
+cause the aircraft to spin on the runway or veer off course,
+causing severe accidents to occur [4]. The strong non-
+linearity and the coupling effects between the structure and
+the control systems of the aircraft rollout dynamic system
+aggravate the problems of aircraft taxiing maneuvering in-
+stability[5]. As an important part of the aircraft ground
+© Science China Press 2025 tech.scichina.com link.springer.com
+* Corresponding author (hnie@nuaa.edu.cn)
+https://doi.org/10.1007/s11071-023-09267-z
+Sci. China Technol. Sci. 68, 1320602 (2025)
+Hopf bifurcation
+
+===== PAGE 20 =====
+
+Simple model: population dynamics 
+ 
+ 
+       : population in year 
+       : coefﬁcient for natural growth 
+       : coefﬁcient for reduction by overcrowding or spread of disease
+ 
+Rescaling:  
+Deﬁne: 
+We impose
+Pn+1=Pn(a−bPn)
+Pn
+Pn=(a/b)xn
+xn+1=f(x)=4rxn(1−xn)
+r=a/4
+0≤x≤1,0<r≤1
+a
+b
+
+===== PAGE 21 =====
+
+Logistic map 
+•        is a logistic map 
+•it maps any point in [0, 1] to another point in [0, 1] 
+•it is a deterministic prescription to ﬁnd the future state 
+given the present state of the system
+xn+1=f(x)=4rxn(1−xn)
+f(x)
+
+===== PAGE 22 =====
+
+r = 0.7, x0 = 0.1
+
+===== PAGE 23 =====
+
+r = 0.91, x0 = 0.5
+
+===== PAGE 24 =====
+
+r = 0.95 and two x0 with 0.001 diff.
+x0=0.5
+x0=
+0.5001
+
+===== PAGE 25 =====
+
+Bifurcation diagramCHAPTER 6. THE CHAOTIC MOTION OF DYNAMICAL SYSTEMS 151
+0.0
+0.5
+1.0
+iterated values of x
+0.7 0.8 0.91 .0
+r
+Figure 6.2: Bifurcation diagram of the logistic map. For each value of r, the iterated values of
+xn are plotted after the ﬁrst 1000 iterations are discarded. Note the transition from periodic to
+chaotic behavior and the narrow windows of periodic behavior within the region of chaos.
+Such a plot is generated by BifurcateApp . For each value of r, the ﬁrst ntransient values of x
+are computed but not plotted. Then the next nplot values of x are plotted, with the ﬁrst half in
+one color and the second half in another. This process is repeated for a new value of r until the
+desired range of r values is reached. The magnitude of nplot should be at least as large as the
+longest period that you wish to observe. BifurcateApp extends AbstractSimulation rather than
+AbstractCalculation because the calculations can be time consuming, and you might want to
+stop them before they are ﬁnished and reset some of the parameters.
+Listing 6.2: The BifurcateApp program generates a bifurcation plot of the logistic map.
+package org . opensourcephysics . sip . ch06 ;
+import org . opensourcephysics . controls .
+ ;
+import org . opensourcephysics . frames .
+ ;
+public class BifurcateApp extends AbstractSimulation {
+double r; // control parameter
+double dr ; // incremental change of r , suggest dr <=0 . 0 1
+int ntransient ; // number of i t e r a t i o n s not p l o t t e d
+int nplot ; // number of i t e r a t i o n s p l o t t e d
+PlotFrame plotFrame = new PlotFrame ( "r" , "x" , "Bifurcation diagram" );
+
+===== PAGE 26 =====
+
+Difference evolution
+CHAPTER 6. THE CHAOTIC MOTION OF DYNAMICAL SYSTEMS 165
+tories will increase as a function of n. In Figure 6.8 we show a plot of the di ﬀerence |∆xn|versus
+nfor the same conditions as in Problem 6.3 a. We see that roughly speaking, ln |∆xn|is a linearly
+increasing function of n. This result indicates that the separation between the trajectories grows
+exponentially if the system is chaotic. This divergence of the trajectories can be described by the
+Lyapunov exponent λ, which is deﬁned by the relation:
+|∆xn|= |∆x0|e
+λn
+, (6.14)
+where ∆xn is the di ﬀerence between the trajectories at time n. If the Lyapunov exponent λ is
+positive, then nearby trajectories diverge exponentially. Chaotic behavior is characterized by the
+exponential divergence of nearby trajectories .
+10-8
+10-6
+10-4
+10-2
+|Δxn|
+0 10 20 30 40 50
+n
+Figure 6.8: The evolution of the di ﬀerence ∆xn between the trajectories of the logistic map at
+r=0 .91 for x0 =0 .5 and x0 =0 .5001. The separation between the two trajectories increases with
+n, the number of iterations, if n is not too large. (Note that |∆x1|∼ 10−8
+and that the trend is
+not monotonic.)
+A naive way of measuring the Lyapunov exponent λ is to run the same dynamical system
+twice with slightly di ﬀerent initial conditions and measure the di ﬀerence of the trajectories as a
+function of n. We used this method to generate Figure 6.8 . Because the rate of separation of the
+trajectories might depend on the choice of x0, a better method would be to compute the rate of
+separation for many values of x0. This method would be tedious, because we would have to ﬁt the
+separation to ( 6.14 ) for each value of x0 and then determine an average value of λ.
+A more important limitation of the naive method is that because the trajectory is restricted
+to the unit interval, the separation |∆xn|ceases to increase when n becomes su ﬃciently large.
+Fortunately, there is a better way of determining λ. We take the natural logarithm of both sides
+
+===== PAGE 27 =====
+
+Lyapunov exponent 
+Lyapunov exponent    : 
+ 
+ 
+After taking the logarithm: 
+ 
+Rewriting:
+λ |Δxn|=|Δx0|eλn
+λ=1
+nlogΔxn
+Δx0
+λ=1
+n
+i=n−1
+∑i=0
+logΔxi+1
+Δxi
+λ=limn→∞
+1
+n
+i=n−1
+∑i=0
+log|f′ (xi)|
+(5)
+(6)
+(7)
+(8)
+
+===== PAGE 28 =====
+
+Lyapunov exponent
+CHAPTER 6. THE CHAOTIC MOTION OF DYNAMICAL SYSTEMS 166
+of ( 6.14 ), and write λ as
+λ=
+1
+n
+ln
+⏐
+⏐
+⏐
+⏐
+∆xn
+∆x0
+⏐
+⏐
+⏐
+⏐. (6.15)
+Because we want to use the data from the entire trajectory after the transient behavior has ended,
+we use the fact that
+∆xn
+∆x0
+=
+∆x1
+∆x0
+∆x2
+∆x1
+···
+∆xn
+∆xn−1
+. (6.16)
+Hence, we can express λ as
+λ=
+1
+n
+n−1
+∑
+i=0
+ln
+⏐
+⏐
+⏐
+⏐
+∆xi+1
+∆xi
+⏐
+⏐
+⏐
+⏐. (6.17)
+The form ( 6.17 ) implies that we can interpret xi for any ias the initial condition.
+We see from ( 6.17 ) that the problem of computing λ has been reduced to ﬁnding the ratio
+∆xi+1 /∆xi. Because we want to make the initial di ﬀerence between the two trajectories as small
+as possible, we are interested in the limit ∆xi → 0.
+-2.0
+-1.0
+0.0
+1.0
+λ
+0.7 0.8 0.9 1.0
+r
+Figure 6.9: The Lyapunov exponent calculated using the method in ( 6.19 ) as a function of the
+control parameter r. Compare the behavior of λ to the bifurcation diagram in Figure 6.2 . Note
+that λ < 0 for r< 3/4 and approaches zero at a period doubling bifurcation. A negative spike
+corresponds to a superstable trajectory. The onset of chaos is visible near r =0 .892, where λ
+ﬁrst becomes positive. For r ≳ 0.892, λ generally increases except for dips below zero whenever
+a periodic window occurs, for example, the dip due to the period 3 window near r =0 .96. For
+each value of r, the ﬁrst 1000 iterations were discarded, and 10 5
+values of ln |f′
+(xn)|were used to
+determine λ.
+
+===== PAGE 29 =====
+
+Hamiltonian chaos 
+•Constants of motion
+•for time-independent systems: total energy, total 
+momentum … 
+•Integrability 
+ 
+•More degrees of freedom than constants of motion: 
+possibly chaotic 
+H=1
+2m(p2
+x+p2
+y+p2
+z)+V(x,y,z)
+
+===== PAGE 30 =====
+
+Double pendulum 
+CHAPTER 6. THE CHAOTIC MOTION OF DYNAMICAL SYSTEMS 186
+L
+L
+2L
+0
+m
+m
+θ1
+θ2
+Figure 6.12: The double pendulum.
+A more realistic dynamical system is the double pendulum, a system that can be demonstrated
+in the laboratory. This system consists of two equal point masses m, with one suspended from
+a ﬁxed support by a rigid weightless rod of length L, and the other suspended from the ﬁrst
+by a similar rod (see Figure 6.12 ). Because there is no friction, this system is an example of a
+Hamiltonian system. The four rectangular coordinates x1,y 1,x 2, and y2 of the two masses can be
+expressed in terms of two generalized coordinates θ1,θ2:
+x1 = Lsin θ1 (6.48a)
+y1 =2 L − Lcos θ1 (6.48b)
+x2 = Lsin θ1 + Lsin θ2 (6.48c)
+y2 =2 L − Lcos θ1 − Lcos θ2. (6.48d)
+The kinetic energy is given by
+K =
+1
+2
+m(˙x
+2
+1 +˙x
+2
+2 +˙y
+2
+1 +˙y
+2
+2)=
+1
+2
+mL
+2
+[2 ˙θ
+2
+1 + ˙θ
+2
+2 +2 ˙θ1
+˙θ2 cos( θ1 − θ2)], (6.49)
+and the potential energy is given by
+U = mgL
+[
+3− 2 cos θ1 − cos θ2
+]
+. (6.50)
+For convenience U has been deﬁned so that its minimum value is zero.
+To use Hamilton’s’s equations of motion ( 6.37 ), we need to express the sum of the kinetic
+energy and potential energy in terms of the generalized momenta and coordinates. In rectangu-
+lar coordinates the momenta are equal to pi = ∂K/∂˙qi, where for example, qi = x1 and pi is the
+x-component of mv1. This relation works for generalized momenta as well, and the generalized mo-
+mentum corresponding to θ1 is given by p1 = ∂K/∂˙θ1. If we calculate the appropriate derivatives,
+we can show that the generalized momenta can be written as
+p1 = mL
+2
+[
+2˙θ1 + ˙θ2 cos( θ1 − θ2)
+]
+(6.51a)
+p2 = mL
+2
+[
+˙θ2 + ˙θ1 cos( θ1 − θ2)
+]
+. (6.51b)
+
+===== PAGE 31 =====
+
+Double pendulum ﬁrst recurrence map 
+or Poincaré map
+CHAPTER 6. THE CHAOTIC MOTION OF DYNAMICAL SYSTEMS 187
+The Hamiltonian or total energy becomes
+H =
+1
+2mL2
+p1
+2
++2 p2
+2
+−2p1p2cos( q1−q2)
+1 + sin 2
+(q1−q2)
++mgL (3−2 cos q1−cos q2), (6.52)
+where q1 =θ1 and q2 =θ2. The equations of motion can be found by using ( 6.52 ) and ( 6.37 ).
+q1
+p1
+-6
+-4
+-2
+0
+2
+4
+6
+8
+-1.5 -1.0 -0.5 0.0 0.5 1.0 1.5
+Figure 6.13: Poincar´ e plot for the double pendulum with p1 plotted versus q1 for q2 = 0 and p2 >0.
+Two sets of initial conditions, ( q1,q2,p1)=( 0 ,0,0) and (1 .1,0,0) respectively, were used to create
+the plot. The initial value of the coordinate p2 is found from ( 6.52 ) by requiring that E= 15.
+Figure 6.13 shows a Poincar´ e map for the double pendulum. The coordinate p1 is plotted
+versus q1 for the same total energy E = 15, but for two di ﬀerent initial conditions. The map
+includes the points in the trajectory for which q2 = 0 and p2 >0. Note the resemblance between
+Figure 6.13 and plots for the standard map above the critical value of k, that is, there is a regular
+trajectory and a chaotic trajectory for the same parameters, but di ﬀerent initial conditions.
+Problem 6.21. Double pendulum
+a. Use either the fourth-order Runge-Kutta algorithm (with ∆t =0 .003) or the second-order
+Euler-Richardson algorithm (with ∆t =0 .001) to simulate the double pendulum. Choose
+m= 1, L= 1, and g=9 .8. The input parameter is the total energy E. The initial values of q1
+and q2 can be either chosen randomly within the interval |qi|<πor by the user. Then set the
+CHAPTER 6. THE CHAOTIC MOTION OF DYNAMICAL SYSTEMS 186
+L
+L
+2L
+0
+m
+m
+θ1
+θ2
+Figure 6.12: The double pendulum.
+A more realistic dynamical system is the double pendulum, a system that can be demonstrated
+in the laboratory. This system consists of two equal point masses m, with one suspended from
+a ﬁxed support by a rigid weightless rod of length L, and the other suspended from the ﬁrst
+by a similar rod (see Figure 6.12 ). Because there is no friction, this system is an example of a
+Hamiltonian system. The four rectangular coordinates x1,y1,x2, and y2 of the two masses can be
+expressed in terms of two generalized coordinates θ1,θ2:
+x1 =Lsin θ1 (6.48a)
+y1 =2 L−Lcos θ1 (6.48b)
+x2 =Lsin θ1+Lsin θ2 (6.48c)
+y2 =2 L−Lcos θ1−Lcos θ2. (6.48d)
+The kinetic energy is given by
+K =
+1
+2
+m(˙x2
+1+˙x2
+2+˙y2
+1 +˙y2
+2)=
+1
+2
+mL 2
+[2˙θ2
+1 + ˙θ2
+2 +2 ˙θ1
+˙θ2cos( θ1−θ2)], (6.49)
+and the potential energy is given by
+U =mgL
+[
+3−2 cos θ1−cos θ2
+]
+. (6.50)
+For convenience U has been deﬁned so that its minimum value is zero.
+To use Hamilton’s’s equations of motion ( 6.37 ), we need to express the sum of the kinetic
+energy and potential energy in terms of the generalized momenta and coordinates. In rectangu-
+lar coordinates the momenta are equal to pi =∂K/∂˙qi, where for example, qi =x1 and pi is the
+x-component of mv1. This relation works for generalized momenta as well, and the generalized mo-
+mentum corresponding to θ1 is given by p1 =∂K/∂˙θ1. If we calculate the appropriate derivatives,
+we can show that the generalized momenta can be written as
+p1 =mL 2
+[
+2˙θ1+ ˙θ2cos( θ1−θ2)
+]
+(6.51a)
+p2 =mL 2
+[
+˙θ2+ ˙θ1cos( θ1−θ2)
+]
+. (6.51b)
+q1 =
+q2 =
+map p2−p1>0
+
+===== PAGE 32 =====
+
+References
+•Symplectic integration is discussed, with references, in the course book, 
+link is on the course page 
+•Thorough numerical analysis book:  
+Geometric Numerical Integration  
+Structure-Preserving Algorithms for Ordinary Differential Equations  
+Authors: Ernst Hairer,  Gerhard Wanner, Christian Lubich ISBN: 978-3-540-30663-4 
+(Print) https://link-springer-com.focus.lib.kth.se/book/10.1007/3-540-30666-8 
+•Simple course on galactic dynamics with different integrators:  
+http://www.artcompsci.org/vol_1/v1_web/v1_web.html 
+•Chaos,  An Introduction to Dynamical System, Kathleen T. Alligood, Tim D. Sauer, James 
+A. Y orke, https://link-springer-com.focus.lib.kth.se/book/10.1007/978-3-642-59281-2 
+•Wikipedia has an informative page on chaos:  http://en.wikipedia.org/wiki/Chaos_theory
+
+===== PAGE 33 =====
+
+Project 1.1
+Study a pendulum and a harmonic oscillator using Euler-Cromer, velocity Verlet and
+Runge-Kutta. Assume
+p
+g/l =2s 1
+and m = 1 kg. Compare the di ↵erent methods
+with each other and with the exact solution of the harmonic oscillator. Choose a good
+integrator and plot ✓(t), ˙✓(t) and E. Study the dependence on the time step, try values
+between 0.01 and 0.2 s. Consider initial conditions ✓(0)/⇡= 0.1 and 0.5; ˙✓(0) = 0.
+Although Runge-Kutta has a higher order accuracy than Verlet, the former is not good
+for many physical simulations. Can you see why? (hint: check the integrators’ behavior
+at su ciently long times).
+Project 1.2
+Determine the period time T as a function of the initial position ✓(0). Which system
+(harmonic osc./pendulum) has a larger period? Explain! Compare the pendulum with
+the perturbation series:
+T=2 ⇡
+s
+l
+g
+✓
+1+
+1
+16
+✓2
+(0) +
+11
+3072
+✓4
+(0) +
+173
+737280
+✓6
+(0) + ...
+◆
+
+===== PAGE 34 =====
+
+Project 1.3
+Study the damped harmonic oscillator equation:
+F/m =¨x=!2
+0x˙x
+Take !0 = 2,  = 0.5, 3, x(0) = 1, ˙ x(0) = 0. Plot x(t), v(t), E(t). Discuss the
+features of these plots. Estimate the relaxation time ⌧, i.e. the time for the amplitude
+to be reduced to 1 /e ⇡ 0.37 of the initial amplitude (note that you should look at the
+“envelope”, rather than at the exact value of the solution). Study the dependence of ⌧
+on . Find the smallest such that the oscillator does not pass x= 0. This is called
+the critical damping, c and for >c the systems is called overdamped.
+Project 1.4
+Consider a damped pendulum with damping given by ˙✓. Take = 1,
+p
+g/l = 2, ✓(0)
+=⇡/2, ˙✓(0) = 0. Determine the phase space portrait, i.e. plot ˙✓vs ✓.D i s c u s s .
+
+===== PAGE 35 =====
+
+Tip: checking energy conservation is one good check for your code
+Project 1.5
+Similar to Problem 6.21 in the book. Double pendulum
+a. Use the fourth-order Runge-Kutta algorithm (with t= 0.003) to simulate the
+double pendulum. Choose m = 1, L= 1, and g= 9.8. The input parameter is
+the total energy E. The initial values of q1 and q2 can be either chosen randomly
+within the interval |qi|<⇡or by the user. Then set the initial p1 = 0, and solve
+for p2 using equation (6.52) from the book:
+H =
+1
+2mL2
+p2
+1+2 p2
+22p1p2cos( q1q2)
+1 + sin 2
+(q1q2)
++mgL (32 cos q1cos q2)
+with H =E. First explore the pendulum’s behavior by looking at the animation
+by plotting the generalized coordinates and momenta as afunction oftime infour
+windows. Consider the energies E= 1, 15, and 40. Try a few initial conditions for
+each value of E. Visually determine whether the steady state behavior is regular
+or appears to be chaotic. Are there some values of E for which all the trajectories
+appear regular? Are there values of E for which all trajectories appear chaotic?
+Are there values of E for which both types of trajectories occur?
+
+===== PAGE 36 =====
+
+b. Repeat part (a), but plot the phase space diagrams p1 versus q1 and p2 versus
+q2. Are these plots more useful for determining the nature of the trajectories than
+those drawn in part (a)?
+c. Draw the Poincar´ e plot with p1 plotted versus q1 only when q2 = 0 and p2 >
+0. Overlay trajectories from di ↵erent initial conditions, but with the same total
+energy on the same plot. Duplicate the plot shown in Figure 6.13. Then produce
+Poincar´ e plots for the values of E given in part (a), with at least ﬁve di ↵erent
+initial conditions for each energy. Describe the di ↵erent types of behavior.
+d. Is there a critical value of the total energy at which some chaotic trajectories ﬁrst
+occur?
+p2−p1>0
+
+===== PAGE 37 =====
+
+Before the next meeting•Choose a group, link for this will be sent out soon
+•Upload your report and presentation to canvas, deadline: 
+November 5th 15:00
+•Presentation meetings November 7th,
+•group 1/5: Nov 6, 8.15 - 9:00
+•group 2/6: Nov 6, 9:15 - 10:00
+•group 3/7: Nov 6, 16:15 - 17:00
+•group 4/8: Nov 6, 17:15 - 18:00
+•Start in time with the assignments, it might be take more time 
+than you initially think!
+•There is an, optional, räknestuga Thursday October 30th 10:00 - 
+12:00 to ask question about the assignments, python, etc.
+•Volunteer for kursnämnd, two free (optional) lunches!

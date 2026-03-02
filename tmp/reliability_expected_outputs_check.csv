@@ -1,0 +1,15 @@
+enabled_toggle,expected_output,exists
+randomized_multistart,randomized_multistart.csv,1
+grid_independence,grid_independence.csv,1
+collocation_defect_audit,collocation_defect_audit.csv,1
+theoretical_efficiency,theoretical_efficiency.csv,1
+integrator_tolerance,integrator_tolerance.csv,1
+event_time_convergence,event_time_convergence.csv,1
+monte_carlo_precision_target,monte_carlo_precision_target.csv,1
+global_sensitivity,global_sensitivity_ranking.csv,0
+q2_uncertainty_budget,q2_uncertainty_budget.csv,0
+finite_time_sensitivity,finite_time_divergence_summary.csv,0
+bifurcation,bifurcation_summary.csv,0
+bifurcation_2d_map,bifurcation_2d_summary.csv,0
+drift,drift_summary.csv,0
+model_limitations,model_limitations.csv,0

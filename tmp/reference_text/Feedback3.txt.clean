@@ -1,0 +1,58 @@
+# REFERENCE/Project 3/Feedback3.pdf
+# pages=3
+
+
+
+===== PAGE 1 =====
+
+MCMC exercise
+Calculation errors
+Statistical error: Staterr =
+⌦
+hfisampled h fitrue
+
+
+↵
+runs
+Standard error: Stderr =
+
+p
+N
+< Staterr
+102
+101
+100
+101
+102
+101
+
+Stat err x0=0
+Std err x0=0
+Figure: Average statistical error on 200 runs compared with average standard
+error as a function of  with 10000 samples, a warming time of 100 steps and
+x0 = 0
+Eliott Bourget Project 3 Review 3 December 2021 3 / 10
+too few steps
+at small δ
+
+===== PAGE 2 =====
+
+MD exercise
+•Conclusions:
+•A very narrow range of time steps with visible 
+energy drift before things explode
+•In the microcanonical ensemble to total energy 
+(Epot+Ekin) sets the accessible energy
+•The results depend very much on the initial 
+Epot , so on the initial coordinates
+•Sampled conﬁrmations, heat capacity and 
+pressure point to a phase transition
+
+===== PAGE 3 =====
+
+MD observables
+Low T: attraction dominates: P negative, P < Pideal
+High T: Ekin dominates: P positive, 
+repulsion/exclude volume makes P > Pideal
+Bug in pressure code: Ekin missing,
+corrected PV result:
