@@ -1,3 +1,6 @@
+# REFERENCE/Random_complex-1.pdf
+# pages=39
+
 
 
 ===== PAGE 1 =====
@@ -5,11 +8,9 @@
 2. Random processes & 
 complex systems
 
-
 ===== PAGE 2 =====
 
 Random processes
-
 
 ===== PAGE 3 =====
 
@@ -20,7 +21,6 @@ What is noise?
  
 •The use of noise in simulations in physics
 
-
 ===== PAGE 4 =====
 
 Random processes
@@ -29,14 +29,12 @@ Random processes
 •Sum of many deterministic processes: diffusion of 
 colloidal particles
 
-
 ===== PAGE 5 =====
 
 Ways to model random processes
 •Monte Carlo: equilibrium distributions or quasi-dynamics
 •Brownian dynamics: dynamic, no inertia
 •Langevin dynamics: dynamic, inertia 
-
 
 ===== PAGE 6 =====
 
@@ -47,7 +45,6 @@ Particles in a box
 produce precise and accurately measurable quantities 
 
 
-
 ===== PAGE 7 =====
 
 Polymers
@@ -56,7 +53,6 @@ Polymers
  
  
 •Polyelectrolytes, applications e.g. 
-
 
 
 ===== PAGE 8 =====
@@ -70,7 +66,6 @@ interaction in different conformations, this called:
 walk 
 
 
-
 ===== PAGE 9 =====
 
 Ideal polymer
@@ -80,7 +75,6 @@ Ideal polymer
 possible conformations with equal probability
 •This is what a random walk does
 •Each direction of a step is equally probable
-
 
 ===== PAGE 10 =====
 
@@ -101,7 +95,6 @@ N
 ∑k=1
 |rk−r|2
 
-
 ===== PAGE 11 =====
 
 Self-avoiding random walk
@@ -109,7 +102,6 @@ Self-avoiding random walk
 the same space 㱺use a self-avoiding random walk
 •Important: when a random walk revisits a point, you have 
 to reject the walk and generate a new one
-
 
 
 ===== PAGE 12 =====
@@ -141,7 +133,6 @@ attached are mutually perpendicular.
 2.If the selected bead is an end site, move it to one of two (maximum) possible unoccupied sites
 so that the bond to which it is connected changes its orientation by ±90◦(see Figure7.11).
 
-
 ===== PAGE 13 =====
 
 Pseudo random number generators 
@@ -153,14 +144,12 @@ never had real random number generators.
 •measure electric or temperature ﬂuctuations
 •present in most modern processors
 
-
 ===== PAGE 14 =====
 
 Statistical tests of randomness
 a. Period.  An Obvious requirement of a random number 
    generator is that its period be much greater than the number 
    of random numbers needed in a speciﬁc calculation. 
-
 
 ===== PAGE 15 =====
 
@@ -267,7 +256,6 @@ the generator ( 7.58 ) with a= 16807 ,c = 0, and m =2 31
 the plotted points for k=1t o k= 5? Test the random number generator that you have been
 using. Do you see any evidence of lattice structure, for example, equidistant parallel lines? Is
 the logistic map xn+1 =4 xn(1 − xn) a suitable random number generator?
-
 
 ===== PAGE 16 =====
 
@@ -379,7 +367,6 @@ repeating the calculation with another random number generator.
 Because all random number generators are based on a deterministic algorithm, it always is
 possible to construct a test generator for which a particular algorithm will fail. The success of a
 
-
 ===== PAGE 17 =====
 
 Required “randomness”
@@ -390,13 +377,11 @@ there are many good ones, but also many bad ones
 around. 
 •There can be a trade off between “accuracy” and speed. 
 
-
 ===== PAGE 18 =====
 
 Getting accuracy from “random” 
 simulations
 •…
-
 
 ===== PAGE 19 =====
 
@@ -413,7 +398,6 @@ M−1
 Var=⟨R2⟩−⟨R⟩2
 Var
 M−1
-
 
 ===== PAGE 20 =====
 
@@ -456,7 +440,6 @@ x
 on log-log scale xαbecomes a straight line with slope α
 Random processes – p.15/20
 
-
 ===== PAGE 21 =====
 
 References
@@ -467,11 +450,9 @@ polymers.pdf
 •Movie of a 100 million step 3D random walk:  
 http://www.youtube.com/watch?v=GHzfadEuk1U
 
-
 ===== PAGE 22 =====
 
 Complex systems
-
 
 ===== PAGE 23 =====
 
@@ -485,7 +466,6 @@ cellular automata introduced by Neumann and Ulam in 1948
 •growing networks
 •…
 
-
 ===== PAGE 24 =====
 
 Cellular automata
@@ -496,7 +476,6 @@ old values.
 simultaneously based on the values of the variables at the 
 previous time step. Hence, the state of the entire lattice 
 advances in discrete steps. 
-
 
 ===== PAGE 25 =====
 
@@ -515,11 +494,9 @@ t
 000
 t+10 1 0 1 1 0 1 0
 
-
 ===== PAGE 26 =====
 
 Rule 90
-
 
 ===== PAGE 27 =====
 
@@ -527,7 +504,6 @@ Elementary cellular automata
 •Wolfram: 
 http://mathworld.wolfram.com/
 ElementaryCellularAutomaton.html
-
 
 ===== PAGE 28 =====
 
@@ -544,7 +520,6 @@ generation
 3.Any live cell with more than three live neighbors dies, as if by overcrowding
 4.Any dead cell with exactly three live neighbours becomes a live cell, as if by 
 reproduction
-
 
 
 ===== PAGE 29 =====
@@ -564,7 +539,6 @@ Continuum trafﬁc models
 •acceleration exponent, δ. 
 
 
-
 ===== PAGE 30 =====
 
 Cellular automaton trafﬁc model
@@ -581,20 +555,17 @@ to vi = d − 1 to prevent crashes.
 •Probability p add some randomization 
 •Flow rate: sum of the cars vi’s divided by the length of the road
 
-
 ===== PAGE 31 =====
 
 Periodic boundary conditions
 In python use the modulo operator % for computing distances: 
 d(i, i+1) = (x[(i + 1) % numCars] - x[i]) % roadLength
 
-
 ===== PAGE 32 =====
 
 Trafﬁc modeling at KTH
 •https://www.kth.se/ctr/research/model-development/
 mezzo-mesoscopic-trafﬁc-simulator-1.726113
-
 
 ===== PAGE 33 =====
 
@@ -614,13 +585,11 @@ s−s0
 σ)
 2
 
-
 ===== PAGE 34 =====
 
 Sand piles & avalanches
 •Critical phenomena, example: 
 https://www.youtube.com/watch?v=Jb7bsEFcpNs
-
 
 ===== PAGE 35 =====
 
@@ -634,7 +603,6 @@ probability g from sites that are empty at time t − 1
 ignite their neighboring trees, etc. The spreading of the 
 ﬁre occurs instantaneously.
 4.Trees on ﬁre at time t die (become empty sites)
-
 
 ===== PAGE 36 =====
 
@@ -659,7 +627,6 @@ ifor each step count How does the end-to-end
 distance depend on N? Also plot the standard error estimate.
 int(4*r/m)
 
-
 ===== PAGE 37 =====
 
 Projects: Polymers (continued)
@@ -673,7 +640,6 @@ direction where you just came from. How does that improve the succes?
 2.1 e) Compute the mean squared end-to-end distances for the self-avoiding random
 walk for the range of N that you can cover. What is the di ↵erence with the normal
 random walk (suggestion: use log-log scale)?
-
 
 ===== PAGE 38 =====
 
@@ -693,7 +659,6 @@ rate averaged over 100 time steps. Compute the standard error esimate of the ﬂ
 rate. How many simulations do you need to get a standard error of 0.001? How long
 does the equilibration need to be to get accurate results? Does the equilibration
 time depend on how you choose the initial conditions?
-
 
 ===== PAGE 39 =====
 

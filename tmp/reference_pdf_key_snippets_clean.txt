@@ -1,0 +1,556 @@
+## REFERENCE/Electrostatics.pdf  pages=22
+
+[p3] We compute the electric ﬁelds due to static and moving charges, describe methods for comput-
+[p3] ing the electric potential in boundary value problems, and solve Maxwell’s equations numerically.
+[p3] We compute the electric ﬁelds due to static and moving charges, describe methods for comput-
+[p3] ing the electric potential in boundary value problems, and solve Maxwell’s equations numerically.
+[p5] 10.5 Numerical Solutions of Boundary Value Problems
+[p5] The direct method of solving for V (x, y, z ) is based on Laplace’s equation which can be ex-
+[p5] methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+[p5] methods.
+[p5] aﬁ n i t ed i ﬀerence method and divide space into a discrete grid of sites located at the coordinates
+[p5] In Problem 10.9 b, we show that in the absence of a charge at ( x, y ), the discrete form of
+[p6] 10.5 Numerical Solutions of Boundary Value Problems
+[p6] The direct method of solving for V (x, y, z ) is based on Laplace’s equation which can be ex-
+[p6] methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+[p6] methods.
+[p6] aﬁ n i t ed i ﬀerence method and divide space into a discrete grid of sites located at the coordinates
+[p6] In Problem 10.9 b, we show that in the absence of a charge at ( x, y ), the discrete form of
+[p6] 10.5 Numerical Solutions of Boundary Value Problems
+[p6] The direct method of solving for V (x, y, z ) is based on Laplace’s equation which can be ex-
+[p6] methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+[p6] methods.
+[p6] aﬁ n i t ed i ﬀerence method and divide space into a discrete grid of sites located at the coordinates
+[p6] In Problem 10.9 b, we show that in the absence of a charge at ( x, y ), the discrete form of
+[p6] In Problem 10.9 a we verify ( 10.12 ) by calculating the potential due to a point charge at a point
+[p6] The approach, known as the relaxation method , is based on the following algorithm:
+[p6] Divide the region of interest into a rectangular grid spanning the region.
+[p6] is continued until the potential at each interior site is computed to the desired accuracy.
+[p6] The program shown in Listing 10.5 implements this algorithm using a grid of voltages and a boolean
+[p6] grid to signal the presence of a conductor.
+[p7] Compare your numerical result to the
+[p9] Fast methods
+[p9] •Fast methods make use of this
+[p9] •On grid: Multi-grid method O(N)
+[p9] •Off grid: Fast multipole method O(N)
+[p10] The multigrid method
+[p10] •With the simple ﬁnite difference method relaxation on
+[p10] long length scales is very slow: iterations ∝ grid size
+[p10] the multigrid method
+[p11] Figure 10.4: A random walk on a 6 ×6 grid starting at the point ( x, y)=( 3 ,3) and ending at the
+[p11] method with the results of the relaxation method (see Problem 10.10 c).
+[p11] How quickly do your answers converge as a function of n?
+[p11] The disadvantage of the random walk method is that it requires many walkers to obtain a
+[p11] number of sites, then the random walk method might be more appropriate than the relaxation
+[p11] method which requires the potential to be computed at all points within the region.
+[p11] where the random walk method is appropriate is when the geometry of the boundary is ﬁxed, but
+[p11] A random walk on a 6 Å~ 6 grid
+[p11] the center of the grid.
+[p11] to one of its four neighbors (on a square grid) with equal probability p=1 /4.
+[p13] Figure 10.4: A random walk on a 6 ⇥6 grid starting at the point ( x,y ) = (3 ,3) and ending at the
+[p13] walk method with the results of the relaxation method (see Problem 10.10c).
+[p13] How quickly do your answers converge as a func-
+[p13] The disadvantage of the random walk method is that it requires many walkers to obtain a
+[p13] number of sites, then the random walk method might be more appropriate than the relaxation
+[p13] method, which requires the potential to be computed at all points within the region.
+[p13] case where the random walk method is appropriate is when the geometry of the boundary is
+[p14] Advanced methods for electrostatics
+[p14] •Particle + mesh methods using FFTs: O(N log N)
+[p14] •Fast multipole method: O(N)
+[p15] Fast multipole method
+[p17] Fast multipole method use
+[p18] Choose the grid size x=y=1 .
+-- total_chars=29164 keyword_hits_capped=60
+
+## REFERENCE/Final Rapport/Project Grading Examples/grade_A.pdf  pages=10
+
+[p2] 1.2 Monte Carlo simulation
+[p3] Using the model and Monte Carlo method described, we will investigate the behavior of neutron trans-
+[p3] 3 Method
+[p3] In this Monte Carlo, we will measure the probabilities of transmission (pt), reﬂection (pr) and absorption
+[p4] To obtain error estimates of obtained values, we make use of the Central Limit Theorem.
+[p4] The size of this interval is used as our error
+[p4] But other than just using these error measurements, we need to determine the number W required to
+[p4] obtain a small enough error, while also analyzing the sensitivity of the error as we vary our parameters.
+[p4] As such, for the ﬁrst basic test of the model, we vary the number of iterations and observe how the error
+[p4] The estimated error, calculated according to (10), is also displayed at the data points.
+[p5] 4 shows, the error estimates obtained are less than 0.005
+[p6] Error in pt
+[p6] Figure 4: Calculated error estimate as function
+[p6] We test for convergence of results for other parameter conﬁgurations of W and ps in order to make
+[p6] The convergence plots
+[p6] 5 show measured error estimate as a function of W for diﬀerent d and table 1 show the resulting
+[p6] transmission probability and error measured at the most exact measurement for each case of d.
+[p6] Monte Carlo samples, W
+[p6] Error in pt
+[p6] Figure 5: Error measured as function of number
+[p6] d pt at W = 107 pt error
+[p6] Table 1: Table of d values used for convergence
+[p6] 1 and ??, we saw that the error reaches a maximum for probabilities around pt≈ 0.5, and
+[p6] 6 and table 1, we draw the same conclusion, also noting that the error is smaller than 0 .01 for
+[p7] probability and error when using medium ps as in earlier studies, i.e.
+[p8] in any aspect measurable in the ﬁgure and is enclosed by the error bounds of the data points.
+[p8] negligible error of less than 0.01 for allλ tested.
+[p8] 3, we had errors just as small as the ones measured in the previous, and there too an exponential
+[p8] Considering the small errors
+[p8] Performing the convergence test in ﬁg.
+[p8] 5 and examining the measured error during the tests, such as
+[p8] 4, we see that the error varies with the measured result.
+[p8] The error seems maximum for results
+[p8] of averaging results of a discrete stochastic variable only taking values of 0 and 1.
+[p8] Further examining the behavior of the error estimate at low probability results, we see that while the
+[p8] error is reduced, the number of Monte Carlo samples W needed to converge toward the reduction trend
+[p8] Both this and the reduced error for these measurements could
+[p8] come from the fact that we have a certain uncertainty in our result not completely encapsulated by the
+[p8] error estimation done according to (10).
+[p9] Thus it is not odd that the estimated error ﬂuctuates more
+[p9] to keep this in mind when using this kind of Monte Carlo simulation, relying on evaluation of discrete
+[p9] But all in all, judging from the convergence plot in ﬁg.
+[p9] 5, the error seems to decrease asymptotically
+[p9] accordingO(W −1/2), and all measurements reach a satisfactory and probable error of less than 10 −2 for
+[p9] After taking this error analysis into consideration, the continued investigation of attenuation, now
+[p9] The accuracy of this result though, is debatable, since it is based on the
+[p9] to add certain details to the model such as deﬁning intervals for the nuclei positions if keeping a discrete
+[p9] accuracy, and is thus not attempted here.
+-- total_chars=24025 keyword_hits_capped=48
+
+## REFERENCE/Final Rapport/Project Grading Examples/grade_D.pdf  pages=7
+
+[p2] cooking hob by solving the equation applying three different iterative methods:
+[p2] To solve the Poisson equations, first of all, the equation has to be discretized:
+[p3] of the coordinates, h is the grid spacing, as smaller value, as better precision.
+[p3] As it has already been said, to solve the Poisson equation, three iterative methods will be
+[p3] Jacobi method
+[p3] This method is very similar to Gauss-Seidel, but a new parameter is included, 1 < 𝜔 < 2.
+[p3] Comparison of three iterative methods
+[p3] method to reach the final value is the Successive Over-Relaxation, followed by Jacobi and
+[p4] Figure 1: Temperature vs iterations, where it can be seen that SOR is the fastest method to reach the final
+[p5] SOR method: Dependence with 𝛚
+[p5] Over-Relaxation method.
+[p5] the SOR method.
+[p5] Figure 5: Temperature vs iterations, studying the SOR method, and comparing different values of 𝛚.
+[p6] Going back to the section where the three methods were compared, it can be emphasised
+[p6] that the best more efficient method studied is the SOR with ω = 1.7, it uses less iterations
+[p7] methods.
+[p7] According to our results, one can conclude that the most efficient method been
+[p7] methods reached the same result.
+-- total_chars=7065 keyword_hits_capped=18
+
+## REFERENCE/Final Rapport/grading criteria.pdf  pages=1
+
+[p1] •discretization = integrator/discrete model + boundary conditions etc.
+[p1] •accuracy = time step or statistical accuracy (depends on length/nr of sims)
+[p1] discretisation
+[p1] & accuracyexecutionanalysis report
+[p1] methods/
+-- total_chars=589 keyword_hits_capped=5
+
+## REFERENCE/Lecture1.pdf  pages=37
+
+[p2] •Finite difference methods
+[p2] •Explanation of why some methods conserve
+[p2] energy and others don’t: symplectic methods
+[p3] •General analytical methods to solve differential equations
+[p3] •There are no general analytic methods for solving
+[p3] •In simulation of a given problem issues of numerical
+[p3] accuracy and stability need to be controlled
+[p6] •T est if the Euler method conserves energy:
+[p7] •Thus the method is conserves energy to order
+[p8] Verlet method
+[p8] method
+[p8] method:
+[p9] •A commonly used higher order method is obtained by averaging increments
+[p10] Adaptive time steps
+[p10] dependent the above methods become less efﬁcient
+[p10] •In these cases adaptive time steps or predictor-
+[p10] corrector methods can improve performance
+[p10] •Adaptive time steps means that short time steps are
+[p10] •The required time step can be determined on the ﬂy in
+[p11] Why do some methods conserve energy?
+[p11] •Higher order symplectic methods can be constructed systematically
+[p19] According to assumption
+[p19] control system based on the control continuation method and
+[p19] 2.2 Control continuation method based on bifurcation
+[p19] For a nonlinear autonomous dynamic system, the numerical
+[p19] continuation method is an effective way to explore the stable
+[p19] performance (topological structure and stability properties)
+[p19] system based on control continuation method
+[p19] signed based on the control continuation method.
+[p19] gular acceleration, and δris the error of the expected and the
+[p19] efficiently improve the aircraft rollout directional stability of
+[p19] troller on the system steering stability, the point M ( δ0= 0.3,
+[p19] system based on control continuation method
+[p19] signed based on the control continuation method.
+[p19] gular acceleration, and δris the error of the expected and the
+[p19] efficiently improve the aircraft rollout directional stability of
+[p19] troller on the system steering stability, the point M ( δ0= 0.3,
+[p19] Improving aircraft nose wheel steering stability based on control
+[p19] continuation method
+[p19] AbstractAircraft steering instability during the taxiing process sometimes occurs resulting from the unstable bifurcation
+[p19] design of an aircraft nose wheel steering control system based on the control continuation method is proposed to reduce the
+[p19] performances under three closed-loop nose wheel steering controllers based on the feedback control method are compared, and
+[p19] bifurcation parameter to analyze the directional system stability via two-parameter bifurcation analysis.
+[p19] out, and different control parameter values are selected for test verification, which can further verify the control effect of the
+[p19] The results indicate that the feedback control method is unable to vary the system
+[p19] bifurcation types, but appropriate control parameter design can effectively shrink the system instability region and even
+[p19] stability remarkably from the perspective of the global parameter region.
+[p19] Keywordsaircraft taxiing dynamics and stability, nose wheel steering control system, control continuation, steering bi-
+[p19] Improving aircraft nose wheel steering stability based on control continuation method.
+[p19] The aircraft turning instability
+[p19] stability[5].
+[p26] We used this method to generate Figure 6.8 .
+[p26] trajectories might depend on the choice of x0, a better method would be to compute the rate of
+[p26] This method would be tedious, because we would have to ﬁt the
+[p26] A more important limitation of the naive method is that because the trajectory is restricted
+[p28] Figure 6.9: The Lyapunov exponent calculated using the method in ( 6.19 ) as a function of the
+[p32] •Thorough numerical analysis book:
+[p32] Geometric Numerical Integration
+[p33] Compare the di ↵erent methods
+[p33] Study the dependence on the time step, try values
+-- total_chars=30874 keyword_hits_capped=60
+
+## REFERENCE/MC_MD-1.pdf  pages=37
+
+[p1] Monte Carlo and
+[p2] •What is Monte Carlo simulation and what can it do
+[p2] •Error sources and how to reduce them
+[p2] •When is MC better than other methods?
+[p3] What is Monte Carlo simulation?
+[p3] •MC can be exact in the sense systematic-error-free
+[p3] •Results are exact up to statistical errors
+[p3] •Better than deterministic methods
+[p4] Hit-and-miss method•T o calculate an integral as the area under the graph of
+[p4] •T o make this into a practical method we need to
+[p4] 6.how to calculate the statistical error
+[p4] 7.what to do if the error is large
+[p5] π=4circle areasquare area∼4hits in circlenumber of points+statistical error
+[p6] •Convergence is ok if the variance is small
+[p6] Otherwise convergence can be poor
+[p6] •Not clear when the slow convergence is useful even with
+[p7] The hit-and-miss method can
+[p7] •Big variance main source of bad convergence
+[p8] Standard error of the mean
+[p8] •Note the crucial assumption of independent random samples:
+[p9] When is MC better than deterministic methods?
+[p9] •In deterministic methods the
+[p9] convergence goes as N-k
+[p9] •Rectangular, midpoint methods: k=1
+[p9] •Trapetz, Simpson methods: k=2
+[p9] •d-dimensional integral: error~N-k/d
+[p9] •MC converges faster when
+[p9] method for integrals with a large
+[p10] Derivation of integration errors
+[p10] • The rectangular and midpoint methods integrate a constant function exactly
+[p10] • The error for one subinterval is therefore ~dx2~1/N2
+[p10] • The error summed up over N intervals is ~N/N2=1/N
+[p10] • The Trapetz method integrates linear functions exactly
+[p10] • The error for one subinterval is therefore ~dx3~1/N3
+[p10] • The error summed up over N intervals is ~N/N3=1/N2
+[p10] • The error it therefore ~1/N2 as for Trapetz
+[p11] points that converges towards the
+[p11] statistical error is
+[p17] Taking some time steps
+[p20] •Phase diagrams (Monte Carlo is often better suited)
+[p29] Metropolis method: system in contact with a heat bath
+[p35] Projects: Monte Carlo
+[p35] 3.1) Use the Metropolis method to calculate:
+[p35] Plot the standard error assuming independent samples: the standard
+[p36] temperature of 1 and increase the time step until things go very wrong.
+[p36] di↵erent time steps just before things go wrong.
+[p36] M a k es u r et h er e s u l t sa r es u ciently converged
+-- total_chars=15756 keyword_hits_capped=47
+
+## REFERENCE/Project 1/Assignments1.pdf  pages=4
+
+[p1] Compare the di ↵erent methods
+[p1] Study the dependence on the time step, try values
+[p1] Although Runge-Kutta has a higher order accuracy than Verlet, the former is not good
+-- total_chars=3433 keyword_hits_capped=3
+
+## REFERENCE/Project 1/Feedback1.pdf  pages=5
+
+[p2] like the time step
+[p3] •Accuracy of integrators: Euler O(Δt), Velocity Verlet
+[p3] worse accuracy)
+[p4] •Main criterion: sensitivity to initial conditions
+[p4] •No check for sensitivity in this particular
+-- total_chars=1703 keyword_hits_capped=5
+
+## REFERENCE/Project 1/Lecture1.pdf  pages=37
+
+[p2] •Finite difference methods
+[p2] •Explanation of why some methods conserve
+[p2] energy and others don’t: symplectic methods
+[p3] •General analytical methods to solve differential equations
+[p3] •There are no general analytic methods for solving
+[p3] •In simulation of a given problem issues of numerical
+[p3] accuracy and stability need to be controlled
+[p6] •T est if the Euler method conserves energy:
+[p7] •Thus the method is conserves energy to order
+[p8] Verlet method
+[p8] method
+[p8] method:
+[p9] •A commonly used higher order method is obtained by averaging increments
+[p10] Adaptive time steps
+[p10] dependent the above methods become less efﬁcient
+[p10] •In these cases adaptive time steps or predictor-
+[p10] corrector methods can improve performance
+[p10] •Adaptive time steps means that short time steps are
+[p10] •The required time step can be determined on the ﬂy in
+[p11] Why do some methods conserve energy?
+[p11] •Higher order symplectic methods can be constructed systematically
+[p19] According to assumption
+[p19] control system based on the control continuation method and
+[p19] 2.2 Control continuation method based on bifurcation
+[p19] For a nonlinear autonomous dynamic system, the numerical
+[p19] continuation method is an effective way to explore the stable
+[p19] performance (topological structure and stability properties)
+[p19] system based on control continuation method
+[p19] signed based on the control continuation method.
+[p19] gular acceleration, and δris the error of the expected and the
+[p19] efficiently improve the aircraft rollout directional stability of
+[p19] troller on the system steering stability, the point M ( δ0= 0.3,
+[p19] system based on control continuation method
+[p19] signed based on the control continuation method.
+[p19] gular acceleration, and δris the error of the expected and the
+[p19] efficiently improve the aircraft rollout directional stability of
+[p19] troller on the system steering stability, the point M ( δ0= 0.3,
+[p19] Improving aircraft nose wheel steering stability based on control
+[p19] continuation method
+[p19] AbstractAircraft steering instability during the taxiing process sometimes occurs resulting from the unstable bifurcation
+[p19] design of an aircraft nose wheel steering control system based on the control continuation method is proposed to reduce the
+[p19] performances under three closed-loop nose wheel steering controllers based on the feedback control method are compared, and
+[p19] bifurcation parameter to analyze the directional system stability via two-parameter bifurcation analysis.
+[p19] out, and different control parameter values are selected for test verification, which can further verify the control effect of the
+[p19] The results indicate that the feedback control method is unable to vary the system
+[p19] bifurcation types, but appropriate control parameter design can effectively shrink the system instability region and even
+[p19] stability remarkably from the perspective of the global parameter region.
+[p19] Keywordsaircraft taxiing dynamics and stability, nose wheel steering control system, control continuation, steering bi-
+[p19] Improving aircraft nose wheel steering stability based on control continuation method.
+[p19] The aircraft turning instability
+[p19] stability[5].
+[p26] We used this method to generate Figure 6.8 .
+[p26] trajectories might depend on the choice of x0, a better method would be to compute the rate of
+[p26] This method would be tedious, because we would have to ﬁt the
+[p26] A more important limitation of the naive method is that because the trajectory is restricted
+[p28] Figure 6.9: The Lyapunov exponent calculated using the method in ( 6.19 ) as a function of the
+[p32] •Thorough numerical analysis book:
+[p32] Geometric Numerical Integration
+[p33] Compare the di ↵erent methods
+[p33] Study the dependence on the time step, try values
+-- total_chars=30874 keyword_hits_capped=60
+
+## REFERENCE/Project 2/Assignments2-1.pdf  pages=4
+
+[p1] Also plot the standard error estimate.
+[p3] 2.2 b) Now we will estimate the statistical accuracy.
+[p3] rate averaged over 100 time steps.
+[p3] Compute the standard error esimate of the ﬂow
+[p3] How many simulations do you need to get a standard error of 0.001?
+-- total_chars=4017 keyword_hits_capped=5
+
+## REFERENCE/Project 2/Feedback2.pdf  pages=5
+
+[p3] both accuracy and equilibration
+[p3] •But these are coupled: need accuracy to see
+[p4] •2.2 b) “how many simulations to get 0.001 accuracy”
+[p4] about 4 time steps
+-- total_chars=1664 keyword_hits_capped=4
+
+## REFERENCE/Project 2/Projekt 2 Kod/simulation.pdf  pages=1
+
+-- total_chars=90 keyword_hits_capped=0
+
+## REFERENCE/Project 2/Random_complex-1.pdf  pages=39
+
+[p5] •Monte Carlo: equilibrium distributions or quasi-dynamics
+[p8] •Y ou can approximate a polymer by a discrete random
+[p12] be obtained by the reptation method.
+[p15] where tis the number of Monte Carlo steps per site.
+[p16] where tis the number of Monte Carlo steps per site.
+[p16] might lead to systematic errors, and two generators, which appear equally good as determined
+[p17] •There can be a trade off between “accuracy” and speed.
+[p18] Getting accuracy from “random”
+[p19] Estimating ﬂuctuations & errors
+[p19] •Standard error estimate:
+[p21] •Project report on several methods to generate self
+[p24] 1.Space is discrete and consists or a regular array of sites.
+[p24] 3.Time is discrete.
+[p24] previous time step.
+[p24] advances in discrete steps.
+[p28] •inﬁnite two-dimensional grid of square cells
+[p35] •Simple forest ﬁre model on a L × L grid
+[p36] Also plot the standard error estimate.
+[p38] 2.2 b) Now we will estimate the statistical accuracy.
+[p38] rate averaged over 100 time steps.
+[p38] Compute the standard error esimate of the ﬂow
+[p38] How many simulations do you need to get a standard error of 0.001?
+-- total_chars=26468 keyword_hits_capped=22
+
+## REFERENCE/Project 3/Feedback3.pdf  pages=3
+
+[p1] Calculation errors
+[p1] Statistical error: Staterr =
+[p1] Standard error: Stderr =
+[p1] Figure: Average statistical error on 200 runs compared with average standard
+[p1] error as a function of  with 10000 samples, a warming time of 100 steps and
+[p2] •A very narrow range of time steps with visible
+-- total_chars=997 keyword_hits_capped=6
+
+## REFERENCE/Project 3/MC_MD-1.pdf  pages=37
+
+[p1] Monte Carlo and
+[p2] •What is Monte Carlo simulation and what can it do
+[p2] •Error sources and how to reduce them
+[p2] •When is MC better than other methods?
+[p3] What is Monte Carlo simulation?
+[p3] •MC can be exact in the sense systematic-error-free
+[p3] •Results are exact up to statistical errors
+[p3] •Better than deterministic methods
+[p4] Hit-and-miss method•T o calculate an integral as the area under the graph of
+[p4] •T o make this into a practical method we need to
+[p4] 6.how to calculate the statistical error
+[p4] 7.what to do if the error is large
+[p5] π=4circle areasquare area∼4hits in circlenumber of points+statistical error
+[p6] •Convergence is ok if the variance is small
+[p6] Otherwise convergence can be poor
+[p6] •Not clear when the slow convergence is useful even with
+[p7] The hit-and-miss method can
+[p7] •Big variance main source of bad convergence
+[p8] Standard error of the mean
+[p8] •Note the crucial assumption of independent random samples:
+[p9] When is MC better than deterministic methods?
+[p9] •In deterministic methods the
+[p9] convergence goes as N-k
+[p9] •Rectangular, midpoint methods: k=1
+[p9] •Trapetz, Simpson methods: k=2
+[p9] •d-dimensional integral: error~N-k/d
+[p9] •MC converges faster when
+[p9] method for integrals with a large
+[p10] Derivation of integration errors
+[p10] • The rectangular and midpoint methods integrate a constant function exactly
+[p10] • The error for one subinterval is therefore ~dx2~1/N2
+[p10] • The error summed up over N intervals is ~N/N2=1/N
+[p10] • The Trapetz method integrates linear functions exactly
+[p10] • The error for one subinterval is therefore ~dx3~1/N3
+[p10] • The error summed up over N intervals is ~N/N3=1/N2
+[p10] • The error it therefore ~1/N2 as for Trapetz
+[p11] points that converges towards the
+[p11] statistical error is
+[p17] Taking some time steps
+[p20] •Phase diagrams (Monte Carlo is often better suited)
+[p29] Metropolis method: system in contact with a heat bath
+[p35] Projects: Monte Carlo
+[p35] 3.1) Use the Metropolis method to calculate:
+[p35] Plot the standard error assuming independent samples: the standard
+[p36] temperature of 1 and increase the time step until things go very wrong.
+[p36] di↵erent time steps just before things go wrong.
+[p36] M a k es u r et h er e s u l t sa r es u ciently converged
+-- total_chars=15756 keyword_hits_capped=47
+
+## REFERENCE/Project 3/Projekt 3 Kod/Assignments3.pdf  pages=3
+
+[p1] Projects: Monte Carlo
+[p1] 3.1) Use the Metropolis method to calculate:
+[p1] Plot the standard error assuming independent samples: the standard
+[p2] temperature of 1 and increase the time step until things go very wrong.
+[p2] di↵erent time steps just before things go wrong.
+[p2] M a k es u r et h er e s u l t sa r es u ciently converged
+-- total_chars=2077 keyword_hits_capped=6
+
+## REFERENCE/Project 3/Projekt 3 Kod/Instructions 2025.pdf  pages=3
+
+[p1] 5.Solve the model analytically or numerically (or with a combination of methods).
+[p1] The accuracy of
+[p1] numerical solutions shall be investigated by varying the resolution.
+-- total_chars=4566 keyword_hits_capped=3
+
+## REFERENCE/Project 4/Electrostatics.pdf  pages=22
+
+[p3] We compute the electric ﬁelds due to static and moving charges, describe methods for comput-
+[p3] ing the electric potential in boundary value problems, and solve Maxwell’s equations numerically.
+[p3] We compute the electric ﬁelds due to static and moving charges, describe methods for comput-
+[p3] ing the electric potential in boundary value problems, and solve Maxwell’s equations numerically.
+[p5] 10.5 Numerical Solutions of Boundary Value Problems
+[p5] The direct method of solving for V (x, y, z ) is based on Laplace’s equation which can be ex-
+[p5] methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+[p5] methods.
+[p5] aﬁ n i t ed i ﬀerence method and divide space into a discrete grid of sites located at the coordinates
+[p5] In Problem 10.9 b, we show that in the absence of a charge at ( x, y ), the discrete form of
+[p6] 10.5 Numerical Solutions of Boundary Value Problems
+[p6] The direct method of solving for V (x, y, z ) is based on Laplace’s equation which can be ex-
+[p6] methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+[p6] methods.
+[p6] aﬁ n i t ed i ﬀerence method and divide space into a discrete grid of sites located at the coordinates
+[p6] In Problem 10.9 b, we show that in the absence of a charge at ( x, y ), the discrete form of
+[p6] 10.5 Numerical Solutions of Boundary Value Problems
+[p6] The direct method of solving for V (x, y, z ) is based on Laplace’s equation which can be ex-
+[p6] methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+[p6] methods.
+[p6] aﬁ n i t ed i ﬀerence method and divide space into a discrete grid of sites located at the coordinates
+[p6] In Problem 10.9 b, we show that in the absence of a charge at ( x, y ), the discrete form of
+[p6] In Problem 10.9 a we verify ( 10.12 ) by calculating the potential due to a point charge at a point
+[p6] The approach, known as the relaxation method , is based on the following algorithm:
+[p6] Divide the region of interest into a rectangular grid spanning the region.
+[p6] is continued until the potential at each interior site is computed to the desired accuracy.
+[p6] The program shown in Listing 10.5 implements this algorithm using a grid of voltages and a boolean
+[p6] grid to signal the presence of a conductor.
+[p7] Compare your numerical result to the
+[p9] Fast methods
+[p9] •Fast methods make use of this
+[p9] •On grid: Multi-grid method O(N)
+[p9] •Off grid: Fast multipole method O(N)
+[p10] The multigrid method
+[p10] •With the simple ﬁnite difference method relaxation on
+[p10] long length scales is very slow: iterations ∝ grid size
+[p10] the multigrid method
+[p11] Figure 10.4: A random walk on a 6 ×6 grid starting at the point ( x, y)=( 3 ,3) and ending at the
+[p11] method with the results of the relaxation method (see Problem 10.10 c).
+[p11] How quickly do your answers converge as a function of n?
+[p11] The disadvantage of the random walk method is that it requires many walkers to obtain a
+[p11] number of sites, then the random walk method might be more appropriate than the relaxation
+[p11] method which requires the potential to be computed at all points within the region.
+[p11] where the random walk method is appropriate is when the geometry of the boundary is ﬁxed, but
+[p11] A random walk on a 6 Å~ 6 grid
+[p11] the center of the grid.
+[p11] to one of its four neighbors (on a square grid) with equal probability p=1 /4.
+[p13] Figure 10.4: A random walk on a 6 ⇥6 grid starting at the point ( x,y ) = (3 ,3) and ending at the
+[p13] walk method with the results of the relaxation method (see Problem 10.10c).
+[p13] How quickly do your answers converge as a func-
+[p13] The disadvantage of the random walk method is that it requires many walkers to obtain a
+[p13] number of sites, then the random walk method might be more appropriate than the relaxation
+[p13] method, which requires the potential to be computed at all points within the region.
+[p13] case where the random walk method is appropriate is when the geometry of the boundary is
+[p14] Advanced methods for electrostatics
+[p14] •Particle + mesh methods using FFTs: O(N log N)
+[p14] •Fast multipole method: O(N)
+[p15] Fast multipole method
+[p17] Fast multipole method use
+[p18] Choose the grid size x=y=1 .
+-- total_chars=29164 keyword_hits_capped=60
+
+## REFERENCE/Random_complex-1.pdf  pages=39
+
+[p5] •Monte Carlo: equilibrium distributions or quasi-dynamics
+[p8] •Y ou can approximate a polymer by a discrete random
+[p12] be obtained by the reptation method.
+[p15] where tis the number of Monte Carlo steps per site.
+[p16] where tis the number of Monte Carlo steps per site.
+[p16] might lead to systematic errors, and two generators, which appear equally good as determined
+[p17] •There can be a trade off between “accuracy” and speed.
+[p18] Getting accuracy from “random”
+[p19] Estimating ﬂuctuations & errors
+[p19] •Standard error estimate:
+[p21] •Project report on several methods to generate self
+[p24] 1.Space is discrete and consists or a regular array of sites.
+[p24] 3.Time is discrete.
+[p24] previous time step.
+[p24] advances in discrete steps.
+[p28] •inﬁnite two-dimensional grid of square cells
+[p35] •Simple forest ﬁre model on a L × L grid
+[p36] Also plot the standard error estimate.
+[p38] 2.2 b) Now we will estimate the statistical accuracy.
+[p38] rate averaged over 100 time steps.
+[p38] Compute the standard error esimate of the ﬂow
+[p38] How many simulations do you need to get a standard error of 0.001?
+-- total_chars=26468 keyword_hits_capped=22

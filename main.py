@@ -67,7 +67,7 @@ def solve_optimal_trajectory(
     X1 = opti.variable(7, N + 1) # [rx, ry, rz, vx, vy, vz, m]
     U1 = opti.variable(4, N)     # [throttle, ux, uy, uz]
     
-    # Phase 2: Coast (Optional)
+    # Phase 2: Coast
     use_coast = config.sequence.separation_delay > 1e-4
     if use_coast:
         T2_scaled = opti.variable()

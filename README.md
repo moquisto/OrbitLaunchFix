@@ -19,7 +19,7 @@ The project follows an explicit workflow:
 
 - **Environment model**
   - WGS84 Earth geometry
-  - Optional J2 perturbation
+  - J2 perturbation toggle
   - US Standard Atmosphere 1976 up to 1000 km
   - Atmosphere co-rotation wind model (`Omega x r`)
 
@@ -32,17 +32,17 @@ The project follows an explicit workflow:
 
 - **Optimization model**
   - Direct collocation using RK4 defect constraints
-  - Decision variables across booster + optional coast + upper-stage phases
+  - Decision variables across booster + coast + upper-stage phases
   - Path constraints for dynamic pressure and sensed G-load
   - Terminal constraints for target circular orbit and inclination
   - Objective: maximize final mass (equivalently minimize fuel used)
 
 - **Reliability/validation model**
   - Grid independence, defect audits, randomized multistart
-  - Integrator/event-time convergence checks
-  - Monte Carlo uncertainty and sensitivity ranking
-  - Drift and invariant checks
-  - Bifurcation and finite-time sensitivity evidence
+  - Integrator convergence checks
+  - Monte Carlo uncertainty and precision targeting
+  - Drift and integrator-order checks
+  - Bifurcation 2D feasibility evidence
 
 ## Repository Structure
 
@@ -151,7 +151,7 @@ Edit `StarshipBlock2`, `EARTH_CONFIG`, and `RELIABILITY_ANALYSIS_TOGGLES` direct
 - `max_q_limit`
 - `max_g_load`
 - `sequence.min_throttle`
-- `sequence.separation_delay` (enables optional coast phase)
+- `sequence.separation_delay` (enables coast phase)
 
 ### Environment switches
 
@@ -180,11 +180,11 @@ Treat conclusions as valid within this modeling envelope, not as flight-certifie
 The reliability suite is structured to support question-driven reporting:
 
 - **Q1** credible optimum: grid independence, collocation defect audit, multistart robustness, theoretical efficiency.
-- **Q2** uncertainty/accuracy: integrator sensitivity, event-time convergence, Monte Carlo precision, global sensitivity, uncertainty budget.
+- **Q2** uncertainty/accuracy: integrator sensitivity, Monte Carlo precision, uncertainty budget.
 - **Q3** code reliability: optimizer-vs-simulator drift and benchmark checks.
-- **Q5** cliff-edge behavior: bifurcation sweeps and 2D feasibility mapping.
+- **Q5** cliff-edge behavior: 2D feasibility mapping.
 - **Q6** model limitations: explicit validity/limitation documentation.
-- **Q7** engineering conclusion support: finite-time sensitivity + cross-test evidence synthesis.
+- **Q7** engineering conclusion support: cross-test evidence synthesis.
 
 ## Expected Outputs
 
