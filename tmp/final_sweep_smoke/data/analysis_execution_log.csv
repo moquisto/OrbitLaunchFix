@@ -1,0 +1,13 @@
+toggle,label,enabled,status,runtime_s,error_message
+model_limitations,Model limitations,1,completed,0.00186085700989,
+smooth_integrator_benchmark,Smooth ODE integrator benchmark,1,completed,3.73872828484,
+drift,Drift analysis,0,skipped,2.14576721191e-06,
+theoretical_efficiency,Theoretical efficiency,0,skipped,1.19209289551e-06,
+integrator_tolerance,Integrator tolerance,0,skipped,0,
+collocation_defect_audit,Collocation defect audit,0,skipped,9.53674316406e-07,
+grid_independence,Grid independence,0,skipped,0,
+bifurcation_2d_map,Bifurcation 2D map,0,skipped,9.53674316406e-07,
+randomized_multistart,Randomized multi-start robustness,0,skipped,9.53674316406e-07,
+monte_carlo_precision_target,Monte Carlo precision target,0,skipped,9.53674316406e-07,
+q2_uncertainty_budget,Q2 uncertainty budget,0,skipped,0,
+q7_conclusion_support,Q7 conclusion support,1,completed,0.00126481056213,

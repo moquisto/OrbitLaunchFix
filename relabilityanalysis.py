@@ -1059,6 +1059,13 @@ class ReliabilitySuite:
         return False
 
     @staticmethod
+    def _print_parallel_progress(label, done, total, prefix="  "):
+        total_i = max(1, int(total))
+        done_i = max(0, min(int(done), total_i))
+        pct = 100.0 * done_i / total_i
+        print(f"{prefix}[Progress] {label}: {done_i}/{total_i} ({pct:5.1f}%)", flush=True)
+
+    @staticmethod
     def _refine_peak_time(t_series, y_series, idx_peak):
         """
         Refine a sampled peak time/value with a local quadratic fit.
@@ -1580,7 +1587,11 @@ class ReliabilitySuite:
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     fut_to_n = {executor.submit(_run_grid_independence_worker, payload): int(payload["num_nodes"]) for payload in jobs}
                     parallel_ok = True
+                    total_jobs = len(fut_to_n)
+                    done_jobs = 0
                     for fut in as_completed(fut_to_n):
+                        done_jobs += 1
+                        self._print_parallel_progress("Grid jobs", done_jobs, total_jobs)
                         n_key = fut_to_n[fut]
                         try:
                             job_results[n_key] = fut.result()
@@ -1962,7 +1973,11 @@ class ReliabilitySuite:
                         executor.submit(_run_multistart_trial_worker, payload): int(payload["trial_index"])
                         for payload in trial_jobs
                     }
+                    total_trials = len(fut_to_idx)
+                    done_trials = 0
                     for fut in as_completed(fut_to_idx):
+                        done_trials += 1
+                        self._print_parallel_progress("Multistart trials", done_trials, total_trials)
                         idx = fut_to_idx[fut]
                         payload = idx_to_payload[idx]
                         try:
@@ -1971,7 +1986,8 @@ class ReliabilitySuite:
                             failed_trial_payloads.append(payload)
                 if len(failed_trial_payloads) > 0:
                     print(f"  Retrying {len(failed_trial_payloads)} failed worker trial(s) in serial mode.")
-                    for payload in failed_trial_payloads:
+                    retry_total = len(failed_trial_payloads)
+                    for retry_i, payload in enumerate(failed_trial_payloads, start=1):
                         idx = int(payload["trial_index"])
                         try:
                             trial_results[idx] = _run_multistart_trial_worker(payload)
@@ -1990,6 +2006,7 @@ class ReliabilitySuite:
                                 "final_mass_kg": np.nan,
                                 "runtime_s": np.nan,
                             }
+                        self._print_parallel_progress("Multistart retry trials", retry_i, retry_total)
             except Exception:
                 print("  Parallel execution unavailable; falling back to serial trial evaluation.")
                 parallel_active = False
@@ -2253,7 +2270,11 @@ class ReliabilitySuite:
                         for payload in phase_jobs
                     }
                     parallel_ok = True
+                    total_phases = len(fut_to_name)
+                    done_phases = 0
                     for fut in as_completed(fut_to_name):
+                        done_phases += 1
+                        self._print_parallel_progress("Collocation phases", done_phases, total_phases)
                         key = fut_to_name[fut]
                         try:
                             phase_results[key] = fut.result()
@@ -2841,7 +2862,7 @@ class ReliabilitySuite:
                 if parallel_active and executor is not None:
                     n_chunks = min(max_workers, n_batch)
                     chunk_size = int(np.ceil(n_batch / max(n_chunks, 1)))
-                    futures = []
+                    fut_to_chunk_size = {}
                     for i0 in range(0, n_batch, chunk_size):
                         chunk = draws[i0:i0 + chunk_size]
                         payload = {
@@ -2852,14 +2873,22 @@ class ReliabilitySuite:
                             "g_slack": float(self.path_g_slack),
                             "samples": chunk,
                         }
-                        futures.append(executor.submit(_run_monte_carlo_batch_worker, payload))
+                        fut = executor.submit(_run_monte_carlo_batch_worker, payload)
+                        fut_to_chunk_size[fut] = len(chunk)
 
                     parallel_ok = True
                     parallel_successes = 0
                     parallel_path_failures = 0
                     parallel_orbit_errors = []
                     parallel_mission_flags = []
-                    for fut in as_completed(futures):
+                    completed_batch_samples = 0
+                    for fut in as_completed(fut_to_chunk_size):
+                        completed_batch_samples += int(fut_to_chunk_size[fut])
+                        self._print_parallel_progress(
+                            "Monte Carlo samples (toward max)",
+                            n + completed_batch_samples,
+                            max_samples,
+                        )
                         try:
                             res = fut.result()
                             parallel_successes += int(res.get("successes", 0))
@@ -3106,7 +3135,11 @@ class ReliabilitySuite:
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     fut_to_n = {executor.submit(_run_q2_grid_point_worker, payload): int(payload["num_nodes"]) for payload in grid_jobs}
                     parallel_ok = True
+                    total_grid_jobs = len(fut_to_n)
+                    done_grid_jobs = 0
                     for fut in as_completed(fut_to_n):
+                        done_grid_jobs += 1
+                        self._print_parallel_progress("[A] Grid jobs", done_grid_jobs, total_grid_jobs)
                         n_key = fut_to_n[fut]
                         try:
                             grid_results[n_key] = fut.result()
@@ -3184,7 +3217,11 @@ class ReliabilitySuite:
                         for payload in integ_jobs
                     }
                     parallel_ok = True
+                    total_integ_jobs = len(fut_to_key)
+                    done_integ_jobs = 0
                     for fut in as_completed(fut_to_key):
+                        done_integ_jobs += 1
+                        self._print_parallel_progress("[B] Integrator jobs", done_integ_jobs, total_integ_jobs)
                         key = fut_to_key[fut]
                         try:
                             integ_results[key] = fut.result()
@@ -3283,7 +3320,11 @@ class ReliabilitySuite:
                         for payload in param_jobs
                     }
                     parallel_ok = True
+                    total_param_jobs = len(fut_to_i)
+                    done_param_jobs = 0
                     for fut in as_completed(fut_to_i):
+                        done_param_jobs += 1
+                        self._print_parallel_progress("[C] Parameter samples", done_param_jobs, total_param_jobs)
                         idx = fut_to_i[fut]
                         try:
                             param_results[idx] = fut.result()
@@ -3653,7 +3694,7 @@ class ReliabilitySuite:
                 n_chunks = min(max_workers, len(samples))
                 chunk_size = int(np.ceil(len(samples) / max(n_chunks, 1)))
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    futures = []
+                    fut_to_chunk_size = {}
                     for i0 in range(0, len(samples), chunk_size):
                         chunk = samples[i0:i0 + chunk_size]
                         payload = {
@@ -3664,10 +3705,14 @@ class ReliabilitySuite:
                             "g_slack": float(self.path_g_slack),
                             "samples": chunk,
                         }
-                        futures.append(executor.submit(_run_bifurcation_batch_worker, payload))
+                        fut = executor.submit(_run_bifurcation_batch_worker, payload)
+                        fut_to_chunk_size[fut] = len(chunk)
 
                     parallel_ok = True
-                    for fut in as_completed(futures):
+                    completed_samples = 0
+                    for fut in as_completed(fut_to_chunk_size):
+                        completed_samples += int(fut_to_chunk_size[fut])
+                        self._print_parallel_progress("Bifurcation samples", completed_samples, len(samples))
                         try:
                             r = fut.result()
                             sample_rows.extend(r.get("rows", []))

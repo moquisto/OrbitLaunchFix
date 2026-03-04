@@ -1,0 +1,12 @@
+metric,value
+q2_ci95_half_width_kg,nan
+q2_parameter_variance_share_percent,nan
+q2_numerical_variance_share_percent,nan
+q5_nominal_row_min_thrust_margin_percent,nan
+q5_strict_success_fraction,nan
+q5_orbit_feasible_fraction,nan
+cliff_supported,0
+uncertainty_supported,0
+map_coverage_supported,0
+support_score,0
+conclusion_supported,0
