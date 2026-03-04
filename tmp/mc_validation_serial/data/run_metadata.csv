@@ -1,6 +1,6 @@
 key,value
-timestamp_utc,2026-03-04T20:02:39
-analysis_output_dir,reliability_outputs/20260304_210235
+timestamp_utc,2026-03-04T20:18:17
+analysis_output_dir,tmp/mc_validation_serial
 vehicle_name,SpaceX Starship IFT-6 (Booster 13 / Ship 31)
 target_altitude_m,420000
 target_inclination_deg,nan
