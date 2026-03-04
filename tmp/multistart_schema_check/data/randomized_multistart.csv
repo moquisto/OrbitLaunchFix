@@ -1,0 +1,5 @@
+trial,label,time_scale,position_noise_sigma,velocity_noise_sigma,mass_noise_sigma,throttle_noise_sigma,direction_noise_sigma_deg,solver_success,mission_success,terminal_strict_success,path_ok,q_ok,g_ok,status,final_mass_kg,final_mass_scored_kg,final_mass_gap_to_best_kg,runtime_s
+1,nominal,1,0,0,0,0,0,1,1,1,1,1,1,MISSION_OK,319900,319900,0,0.00107502937317
+2,rand_01,0.990647247147,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,0.00206303596497
+3,rand_02,0.998458494012,0.01,0.01,0.01,0.01,0.572967344857,1,0,1,1,1,1,PASS,319700,nan,nan,0.00109696388245
+4,rand_03,0.997416581027,0.01,0.01,0.01,0.01,0.572967344857,1,1,1,1,1,1,MISSION_OK,319600,319600,300,0.00133395195007

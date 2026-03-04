@@ -1,0 +1,114 @@
+[
+  {
+    "hash": "9ad0e39c79cd11210986aac92fb77e14",
+    "source": "REFERENCE/Electrostatics.pdf",
+    "pages": 22,
+    "text_file": "tmp/reference_text/Electrostatics_9ad0e39c.txt",
+    "chars": 33312
+  },
+  {
+    "hash": "0818845659f29ccc29262bf36f5110fa",
+    "source": "REFERENCE/Final Rapport/Project Grading Examples/grade_A.pdf",
+    "pages": 10,
+    "text_file": "tmp/reference_text/grade_A_08188456.txt",
+    "chars": 22719
+  },
+  {
+    "hash": "8dfd7625ff093a795420d35eafeb2cdd",
+    "source": "REFERENCE/Final Rapport/Project Grading Examples/grade_D.pdf",
+    "pages": 7,
+    "text_file": "tmp/reference_text/grade_D_8dfd7625.txt",
+    "chars": 6878
+  },
+  {
+    "hash": "9ce8556192301ad829d0c5316e72155b",
+    "source": "REFERENCE/Final Rapport/grading criteria.pdf",
+    "pages": 1,
+    "text_file": "tmp/reference_text/grading_criteria_9ce85561.txt",
+    "chars": 601
+  },
+  {
+    "hash": "86dd32c6cb457ff395d2e99391eaa52f",
+    "source": "REFERENCE/Lecture1.pdf",
+    "pages": 37,
+    "text_file": "tmp/reference_text/Lecture1_86dd32c6.txt",
+    "chars": 35455
+  },
+  {
+    "hash": "101c7ae3f03a322cfbb82555e1b0d53c",
+    "source": "REFERENCE/MC_MD-1.pdf",
+    "pages": 37,
+    "text_file": "tmp/reference_text/MC_MD-1_101c7ae3.txt",
+    "chars": 16938
+  },
+  {
+    "hash": "5009486bc3d2648726b228e29137c078",
+    "source": "REFERENCE/Project 1/Assignments1.pdf",
+    "pages": 4,
+    "text_file": "tmp/reference_text/Assignments1_5009486b.txt",
+    "chars": 3644
+  },
+  {
+    "hash": "18989be4241861491a76f64c66e127b7",
+    "source": "REFERENCE/Project 1/Feedback1.pdf",
+    "pages": 5,
+    "text_file": "tmp/reference_text/Feedback1_18989be4.txt",
+    "chars": 1834
+  },
+  {
+    "hash": "c4f687bca19b53c83bfd6c0dd2724bba",
+    "source": "REFERENCE/Project 2/Assignments2-1.pdf",
+    "pages": 4,
+    "text_file": "tmp/reference_text/Assignments2-1_c4f687bc.txt",
+    "chars": 4119
+  },
+  {
+    "hash": "40698ae25d639dbb0359dce3728e4c45",
+    "source": "REFERENCE/Project 2/Feedback2.pdf",
+    "pages": 5,
+    "text_file": "tmp/reference_text/Feedback2_40698ae2.txt",
+    "chars": 1809
+  },
+  {
+    "hash": "f96431dcad242a63d41ac6878689092c",
+    "source": "REFERENCE/Project 2/Projekt 2 Kod/simulation.pdf",
+    "pages": 1,
+    "text_file": "tmp/reference_text/simulation_f96431dc.txt",
+    "chars": 112
+  },
+  {
+    "hash": "a026fcab03d9840beec24204f1757ed7",
+    "source": "REFERENCE/Project 2/Random_complex-1.pdf",
+    "pages": 39,
+    "text_file": "tmp/reference_text/Random_complex-1_a026fcab.txt",
+    "chars": 27485
+  },
+  {
+    "hash": "a5aa9025a2049984729f1b6e6803cafc",
+    "source": "REFERENCE/Project 3/Feedback3.pdf",
+    "pages": 3,
+    "text_file": "tmp/reference_text/Feedback3_a5aa9025.txt",
+    "chars": 1092
+  },
+  {
+    "hash": "f692c647b85631de0d24e36752fb4d89",
+    "source": "REFERENCE/Project 3/Projekt 3 Kod/Assignments3.pdf",
+    "pages": 3,
+    "text_file": "tmp/reference_text/Assignments3_f692c647.txt",
+    "chars": 2135
+  },
+  {
+    "hash": "f7c85d066253e88cb211bcf630228b80",
+    "source": "REFERENCE/Project 3/Projekt 3 Kod/Instructions 2025.pdf",
+    "pages": 3,
+    "text_file": "tmp/reference_text/Instructions_2025_f7c85d06.txt",
+    "chars": 4584
+  },
+  {
+    "hash": "bff8b94e84f3096421ecde986b058397",
+    "source": "REFERENCE/Random_complex-1.pdf",
+    "pages": 39,
+    "text_file": "tmp/reference_text/Random_complex-1_bff8b94e.txt",
+    "chars": 27485
+  }
+]
