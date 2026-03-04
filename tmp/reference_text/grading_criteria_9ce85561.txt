@@ -1,0 +1,34 @@
+
+
+===== PAGE 1 =====
+Grading criteria, the minimum counts
+problem discretisation
+execution analysis report
+formulation & accuracy
+comparison of no mistakes
+A discuss all very clear
+relevant that affect
+clear
+important
+methods/ conclusions
+B problem aspects well
+parameters (or noted
+formul. organized,
+relevant
+C
+clear plots
+motivated
+mistakes)
+clear
+choices
+D OK, but
+mostly
+unclear
+correct
+E unclear proper plots
+unclear
+F improper incorrect lacking
+•
+discretization = integrator/discrete model + boundary conditions etc.
+•
+accuracy = time step or statistical accuracy (depends on length/nr of sims)

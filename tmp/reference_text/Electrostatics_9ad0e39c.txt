@@ -1,0 +1,744 @@
+
+
+===== PAGE 1 =====
+Electrostatics &
+the Laplace equation
+
+
+===== PAGE 2 =====
+Outline
+•
+Topic motivation:
+•
+I would like to bring in more elements from other courses
+in the Engineering Physics program
+•
+Bring in elements of course EI1320 on electromagnetism
+•
+Contents and assignments from chapter 10 in the book
+•
+Short introduction on electrostatics and the Laplace equation
+•
+Some generalizations (not for assignments)
+•
+Assignments
+
+
+===== PAGE 3 =====
+Chapter 10
+Chapter 10
+Electrodynamics
+Electrodynamics
+2005 by Harvey Gould, Jan Tobochnik, and Wolfgang Christian
+2005 by Harvey Gould, Jan Toboch9niJku,nean20d05Wolfgang Christian
+9 June 2005
+We compute the electric fields due to static and moving charges, describe methods for comput-
+ing the electric potential in boundary value problems, and solve Maxwell’s equations numerically.
+We compute the electric fields due to static and moving charges, describe methods for comput-
+ing the electric potential in boundary value problems, and solve Maxwell’s equations numerically.
+10.1 Static Charges
+Static charges
+Suppose we want to know the electric field E(r) at the point r due to N point charges q , q , . . . , q
+10.1 Static Charges
+1 2 N
+at fixed positions r , r , . . . , r . We know that E(r) satisfies a superposition principle and is given
+1 2 N
+by
+N
+Suppose we want to know the electric field E(r) at the point r due to N point charges q , q , . . . , q
+q
+1 2 N
+i
+E(r) = K (r r ), (10.1)
+i
+at fixed positions r , r , . . . , r . We know that E(r) satisfiers ar s3upe
+−
+rposition principle and is given
+1 2 N i
+•
+i | − |
+The electric Field E at point r due to charges q ,q ,...,q
+!
+by 1 2 N
+where r is the fixed location of the ith charge and K is a constant that depends on our choice of
+i
+N
+units. One of the difficulties associatedqwith electrodynamics is the competing systems of units.
+i
+E(r) = K (r r ), (10.1)
+In the SI (or rationalized MKS) system of units, theicharge is measured in coulombs (C) and the
+r r 3 −
+i
+constant K is given by
+i | − |
+!
+where r is the fixed location of the ith charge and K is a constant that depends on our choice of
+1
+i
+9 2 2
+K = 9.0 10 N m /C . (SI units) (10.2)
+units. One of the difficulties associated w4πit"h ≈electr×odyna·mics is the competing systems of units.
+0
+In the SI (or rationalized MKS) system of units, the charge is measured in coulombs (C) and the
+The constant " is the electrical permittivity of free space. This choice of units is not convenient
+0
+•
+constant K is given by K is inconvenient, often absorbed into the charges
+for computer programs because K 1. Another popular system of units is the Gaussian (cgs)
+$
+system fo(rGwahuiscshiatnh eucnointsst)ant K is absorbed into the unit of charge so that K = 1. Charge is in
+1
+electrostatic units or esu. One feature of Gaussian units is that the electric and magnetic fields
+9 2 2
+K = 9.0 10 N m /C . (SI units) (10.2)
+have the same units. For example, the (Lorentz) force on a particle of charge q and velocity v in
+4π" ≈ × ·
+0
+an electric field E and a magnetic field B has the form
+The constant " is the electrical permittivity of free space. This choice of units is not convenient
+0 v
+F = q(E + B). (Gaussian units) (10.3)
+for computer programs because K 1. Another popular system of units is the Gaussian (cgs)
+c ×
+$
+system for which the constant K is absorbed into the unit of charge so that K = 1. Charge is in
+379
+electrostatic units or esu. One feature of Gaussian units is that the electric and magnetic fields
+have the same units. For example, the (Lorentz) force on a particle of charge q and velocity v in
+an electric field E and a magnetic field B has the form
+v
+F = q(E + B). (Gaussian units) (10.3)
+c ×
+379
+
+
+===== PAGE 4 =====
+CHAPTER 10. ELECTRODYNAMICS 389
+e. Repeat part (c) with two rows of equally spaced positive charges on the lines y = 0 and y = 1,
+respectively. Then consider one row of positive charges and one row of negative charges.
+Problem 10.4. Field lines due to infinite line of charge
+a. The FieldLineApp program plots field lines in two dimensions. Sometimes this restriction can
+lead to spurious results (see Freeman). Consider four identical charges placed at the corners of
+a square. Use the program to plot the field lines. What, if anything, is wrong with the results?
+What should happen to the field lines near the center of the square?
+b. The two-dimensional analog of a point charge is an infinite line (thin cylinder) of charge per-
+pendicular to the plane. The electric field due to an infinite line of charge is proportional to the
+linear charge density and inversely proportional to the distance (instead of the distance squared)
+from the line of charge to a point in the plane. Modify the FieldLine class to compute the field
+lines from line charges with E(r) = 1/r. Use your modified class to draw the field lines due to
+four identical line charges located at the corners of a square, and compare the field lines with
+your results in part (a).
+c. Use your modified program from part (b) to draw the field lines for the two-dimensional analogs
+of the distributions considered in Problem 10.3. Compare the results for two and three dimen-
+sions, and discuss any qualitative differences.
+d. Can your program be used to demonstrate Gauss’s law using point charges? What about line
+charges?
+Electric potential
+10.4 Electric Potential
+It often is easier to analyze the behavior of a system using energy rather than force concepts. We
+define the electric potential V (r) by the relation
+r
+2
+V (r ) V (r ) = E dr, (10.6)
+2 1
+− − ·
+r
+! 1
+or
+E(r) = V (r). (10.7)
+−∇
+Only differences in the potential between two points have physical significance. The gradient
+operator is given in Cartesian coordinates by
+∇
+∂ ∂ ∂
+= xˆ + yˆ + zˆ, (10.8)
+∇ ∂x ∂y ∂z
+where the vectors xˆ, yˆ, and zˆ are unit vectors along the x, y, and z axes respectively. If V depends
+only on the magnitude of r, then (10.7) becomes E(r) = dV (r)/dr. Recall that V (r) for a point
+−
+charge q relative to a zero potential at infinity is given by
+q
+V (r) = . (Gaussian units) (10.9)
+r
+
+
+===== PAGE 5 =====
+CHAPTER 10. ELECTRODYNAMICS 392
+distributed in the (approximately) minimum energy distribution? Which parts of the ellipse
+have a higher charge density?
+b. Repeat part (a) for a two-dimensional conductor, but assume that the potential energy U 1/r.
+∼
+Do the charges move to the surface?
+c. Is it sufficient that the interaction be repulsive for the results of parts (a) and (b) to hold?
+d. Repeat part (a) with the added condition that there is a fixed positive charge of magnitude N/2
+located outside the ellipse. How does this fixed charge effect the charge distribution? Are the
+excess free charges still at the surface? Try different positions for the fixed charge.
+e. Repeat parts (a) and (b) for N = 50 charges located within an ellipsoid in three dimensions.
+10.5 Numerical Solutions of Boundary Value Problems
+In Section 10.1 we found the electric fields and potentials due to a fixed distribution of charges.
+Suppose that we do not know the positions of the charges and instead know only the potential on
+Boundary value problems
+a set of boundaries surrounding a charge-free region. This information is sufficient to determine
+the potential V (r) at any point within the charge-free region.
+The direct method of solving for V (x, y, z) is based on Laplace’s equation which can be ex-
+pressed in Cartesia•n coordinates as
+The Laplace equation:
+2 2 2
+∂ V ∂ V ∂ V
+2
+V (x, y, z) + + = 0. (10.11)
+∇ ≡ ∂x2 ∂y2 ∂z2
+•
+Simplest example of elliptic partial differential equation
+The problem is to find the function V (x, y, z) that satisfies (10.11) and the specified boundary
+•
+conditions. This type of problem is an example of a boundary value problem. Because analytical
+Used in:
+methods for regions of arbitrary shape do not exist, the only general approach is to use numerical
+•
+Electromagnetism
+methods. Laplace’s equation is not a new law of physics, but can be derived directly from (10.7)
+•
+and the relation E =A0stroornoinmdyirectly from Coulomb’s law in regions of space where there is no
+∇ ·
+charge.
+•
+Fluid Dynamics
+For simplicity, we consider only two-dimensional boundary value problems for V (x, y). We use
+•
+Relaxation of this potential is closely related to diffusion (see e.g. chapter
+a finite difference method and divide space into a discrete grid of sites located at the coordinates
+7 of the course book)
+(x, y). In Problem 10.9b, we show that in the absence of a charge at (x, y), the discrete form of
+Laplace’s equation satisfies the relation
+1
+V (x, y) [V (x + ∆x, y) + V (x ∆x, y)
+≈ 4 −
++ V (x, y + ∆y) + V (x, y ∆y)], (two dimensions) (10.12)
+−
+where V (x, y) is the value of the potential at the site (x, y). Equation (10.12) says that V (x, y)
+is the average of the potential of its four nearest neighbor sites. This remarkable property of
+V (x, y) can be derived by approximating the partial derivatives in (10.11) by finite differences (see
+Problem 10.9b).
+
+
+===== PAGE 6 =====
+CHAPTER 10. ELECTRODYNAMICS 392
+distributed in the (approximately) minimum energy distribution? Which parts of the ellipse
+have a higher charge density?
+b. Repeat part (a) for a two-dimensional conductor, but assume that the potential energy U 1/r.
+∼
+Do the charges move to the surface?
+c. Is it sufficient that the interaction be repulsive for the results of parts (a) and (b) to hold?
+CHAPTER 10. ELECTRODYNAMICS 392
+d. Repeat part (a) with the added condition that there is a fixed positive charge of magnitude N/2
+distributed inlotchaete(dapopurtosixdiemtahteeleyl)lipmsei.niHmouwmdoenesertghyis dfiixsterdibcuhtairogne?effWecht itchhe pcharatrsgeodf itshtreibeultliiponse? Are the
+excess free charges still at the surface? Try different positions for the fixed charge.
+have a higher charge density?
+e. Repeat parts (a) and (b) for N = 50 charges located within an ellipsoid in three dimensions.
+b. Repeat part (a) for a two-dimensional conductor, but assume that the potential energy U 1/r.
+∼
+Do the charges move to the surface?
+c. Is it sufficient that the interaction be repulsive for the results of parts (a) and (b) to hold?
+10.5 Numerical Solutions of Boundary Value Problems
+d. Repeat part (a) with the added condition that there is a fixed positive charge of magnitude N/2
+located outIsnidSeetchtieonel1li0p.s1e.weHfoowunddoethsetheliescfitrxicedfieclhdasragnedeffpeocttentthiaelschdauregetodaistfirxiebdutdioisntr?ibAutrieonthoef charges.
+Suppose that we do not know the positions of the charges and instead know only the potential on
+excess free charges still at the surface? Try different positions for the fixed charge.
+a set of boundaries surrounding a charge-free region. This information is sufficient to determine
+e. Repeat parts (a) and (b) for N = 50 charges located within an ellipsoid in three dimensions.
+the potential V (r) at any point within the charge-free region.
+The direct method of solving for V (x, y, z) is based on Laplace’s equation which can be ex-
+pressed in Cartesian coordinates as
+10.5 Numerical Solutions of Boundary Value Problems
+2 2 2
+∂ V ∂ V ∂ V
+2
+V (x, y, z) + + = 0. (10.11)
+∇ ≡ ∂x2 ∂y2 ∂z2
+CHAPTER 10. ELECTRODYNAMICS 393
+In Section 10.1 we found the electric fields and potentials due to a fixed distribution of charges.
+The problem is to find the function V (x, y, z) that satisfies (10.11) and the specified boundary
+Suppose that we do not know the positions of the charges and instead know only the potential on
+In Prcoobnledmiti1o0n.s9.a Twehivsertyifpye(1o0f.1p2r)obbylecmalcisulaantinegxatmheppleotoefntaiabloduunedtaorya vpaoliunet cphraorbgleemat.aBpeocinatuse analytical
+Solving the Laplace equation
+a set of boundaries surrounding a charge-free region. This information is sufficient to determine
+in space smeleetchteoddsbyforthreeguisoenrsaonfdarabtitthraeryfoushranpeeardeostnnoetigehxbisotr,st.hAe sontlhye gfeonrmeraolfa(p1p0.r1o2a)chimispltioesu, se numerical
+the potential V (r) at any point within the charge-free region.
+the averagmeeotfhothdes.poLtaepnltaiacle’astetqhueaftoiounr niseingohtboarinnegwsiltaews sohfouplhdyseiqcusa, lbtuhtecpaontebnetiadleraitvetdhedcierencttelry from (10.7)
+Tsihtee. dWireeca ats n smu d metth ehe toh rde el f aoo tfr i m osno(lv10in.9gE ) ff = oorr0 tVh o e(rxp i,o nyt d e,i nzr t e)i c a tilsly Vbf (ar r os)em ddu Coe ont u oLlo aam ppb ola’ i s nctela’csw haei rqn gue ra, eta giiof o onn r s mwoht f hics a pht a scc aae tni w sfibh e ees reext-here is no
+∇ ·
+Laplace’s equation for r = 0.
+pressed in Carctheasriagne. coordinates as
+• !
+The Laplace equation:
+For simplicity, we consider only two-dimensional boundary value problems for V (x, y). We use
+Problem 10.9. Verification of the difference2 equatio2n for th2e potential
+∂ V ∂ V ∂ V
+a finite difference 2method and divide space into a discrete grid of sites located at the coordinates
+V (x, y, z) + + = 0. (10.11)
+∇ ≡ ∂x2 ∂y2 ∂z2
+(x, y). In Problem 10.9b, we show that in the absence of a charge at (x, y), the discrete form of
+a. Modify PotentialFieldApp to compare the computed potential at a point to the average of the
+La•place’s equation satisfies the relation
+Finite difference, remarkably simple:
+potential at its four nearest neighbor sites. Choose reasonable values for the spacings ∆x and
+The problem is to find the function V (x, y, z) that satisfies (10.11) and the specified boundary
+∆y and consider a point that is not too close to the source charge. Do similar measurements
+conditions. This type of problem is a1n example of a boundary value problem. Because analytical
+V (x, y) [V (x + ∆x, y) + V (x ∆x, y)
+for other poin ts. Does the relative agreement with (10.12) depend on the distance of the point
+methods for regions of arbitrary sh≈ap4e do not exist, the on−ly general approach is to use numerical
+to the source charge? Choose smaller values of ∆x and ∆y and determine if your results are in
++ V (x, y + ∆y) + V (x, y ∆y)], (two dimensions) (10.12)
+methods. Laplace’s equation is not a new law of physics, but can be derived directly from (10.7)
+better agreement with (10.12). Does it matter whether ∆x−and ∆y have the same value?
+•
+and the relation E = 0 or indirectly from Coulomb’s law in regions of space where there is no
+From Taylor expansion:
+whe∇re· V (x, y) is the value of the potential at the site (x, y). Equation (10.12) says that V (x, y)
+chargbe.. Derive the finite difference equation (10.12) for V (x, y) using the second-order Taylor expansion:
+is the average of the potential of its four nearest neighbor sites. This remarkable property of
+For simplicity, we consider only two-dimensional boundary value problems for V (x, y). We use
+V (x, y) can be derived by approximating the partial deriv2atives in (10.11) by finite differences (see
+∂V (x, y) 1 ∂ V (x, y)
+V (x + ∆x, y) = V (x, y) + ∆x + (∆x)
+2
++ . . . (10.13)
+a finite difference method and divide space into a discrete grid of sites located at the coordinates
+Problem 10.9b).
+∂x 2 ∂x2
+(x, y). In Problem 10.9b, we show that in the absence of a charge at (x, y), the discrete form of
+2
+∂V (x, y) 1 ∂ V (x, y)
+Laplace’s equation satisfies the relation
+2
+V (x, y + ∆y) = V (x, y) + ∆y + (∆y) + . . . (10.14)
+∂y 2 ∂y2
+1
+The effect of including higher derivatives is discussed by MacDonald (see references).
+V (x, y) [V (x + ∆x, y) + V (x ∆x, y)
+≈ 4 −
++ V (x, y + ∆y) + V (x, y ∆y)], (two dimensions) (10.12)
+Now that we have found that (10.12), a finite difference form of Laplace’s equation, is consistent
+−
+with Coulomb’s law, we adopt (10.12) as the basis for computing the potential for systems for
+where V (x, y) is the value of the potential at the site (x, y). Equation (10.12) says that V (x, y)
+which we cannot calculate the potential directly. In particular, we consider problems where the
+is the average of the potential of its four nearest neighbor sites. This remarkable property of
+potential is specified on a closed surface that divides space into interior and exterior regions in
+V (x, yw)hcicahntbhee pdoetreinvteidalbisyinadpeppreonxdimenatltyindgettehrempinaerdt.iaFlodresrimivpaltiicviteys, iwne(c1o0n.s1i1d)erboynlfiyntiwteo-ddiiffmeernesniocnesal(see
+Problgeemom1e0t.r9iebs).. The approach, known as the relaxation method, is based on the following algorithm:
+1. Divide the region of interest into a rectangular grid spanning the region. The region is
+enclosed by a surface (curve in two dimensions) with specified values of the potential along
+the curve.
+2. Assign to a boundary site the potential of the boundary nearest the site.
+3. Assign all interior sites an arbitrary potential (preferably a reasonable guess).
+4. Compute new values for the potential V for each interior site. Each new value is obtained by
+finding the average of the previous values of the potential at the four nearest neighbor sites.
+5. Repeat step (4) using the values of V obtained in the previous iteration. This iterative process
+is continued until the potential at each interior site is computed to the desired accuracy.
+The program shown in Listing 10.5 implements this algorithm using a grid of voltages and a boolean
+grid to signal the presence of a conductor.
+
+
+===== PAGE 7 =====
+CHAPTER 10. ELECTRODYNAMICS 398
+L
+out
+V
+out
+V
+in
+L
+in
+Figure 10.2: The geometry of the two concentric squares considered in Problem 10.12.
+field normal to the surface. E can be approximated by the relation δV/δr, where δV is the
+n
+−
+potential difference between a boundary site and an adjacent interior site a distance δr away.
+Use the result of part (a) to compute δV for each site adjacent to the two square surfaces. Use
+this information to determine E for the two surfaces and the charge per unit length on each
+n
+conductor. Are the charges equal and opposite in sign? Compare your numerical result to the
+capacitance per unit length, 1/2 ln r /r , of a system of two concentric circular cylinders of
+out in
+radii r and r . Assume that the circumference of each cylinder equals the perimeter of the
+out in
+corresponding square, that Tis,h2πer Po=i4sLsonan de2qπur a=ti4oLn.
+out out in in
+c. Move the inner square 1 cm off center and repeat the calculations of parts (a) and (b). How do
+the potential surfaces change? Is there any qualitative difference if we set the inner conductor
+potential equal to 5?
+•
+−Laplace’s equation holds only in charge free regions
+Laplace’s equation holds only in charge-free regions. If there is a charge density ρ(x, y, z) in
+•
+With a charge density ρ(x,y,z) use the Poisson equation:
+the region, we need to use Poisson’s equation which can be written as
+2 2 2
+∂ V ∂ V ∂ V
+2
+V (r) = + + = 4πρ(r), (10.16)
+∇ ∂x2 ∂y2 ∂z2 −
+where ρ(r) is the charge density. The difference form of Poisson’s equation is given in two dimen-
+sions by
+1
+V (x, y) V (x + ∆x, y) + V (x ∆x, y) + V (x, y + ∆y) + V (x, y ∆y)
+≈ 4 − −
+1
+! "
++ ∆x∆y 4πρ(x, y). (10.17)
+4
+Note that the product ρ(x, y)∆x∆y is the total charge in a ∆x ∆y region centered at (x, y).
+×
+Problem 10.13. Surface charge
+
+
+===== PAGE 8 =====
+Poisson equation
+in Molecular
+Dynamics
+Need to get the
+electrostatic forces
+between (partial) charges
+on atoms
+We use Fast Fourier
+Transforms (FFT),
+solving Poisson’s equation
+is a multiplication in
+Fourier space
+
+
+===== PAGE 9 =====
+Fast methods
+for large Poisson problems
+•
+The interaction kernel 1/r has decreasing
+gradient:
+•
+details at small length scales matter less
+over large distance
+•
+Fast methods make use of this
+•
+On grid: Multi-grid method O(N)
+•
+Off grid: Fast multipole method O(N)
+
+
+===== PAGE 10 =====
+The multigrid method
+•
+With the simple finite difference method relaxation on
+∝
+long length scales is very slow: iterations grid size
+•
+This can be improved significantly by using what is called
+the multigrid method
+prolongation
+/restriction
+
+
+===== PAGE 11 =====
+CHAPTER 10. ELECTRODYNAMICS 401
+b. Test your algorithm by creating a capacitor consisting of +10 and 10 potential plates near
+−
+the center of the grid. Initialize the dielectric susceptibility to two in half the capacitor and
+run the program. Use a Scalar2DFrame to display the electric potential, but note that some
+representations of the scalar field are more appropriate than others. Compare the spacing
+between the contour lines inside and outside the dielectric. Why does the spacing change?
+c. The bound charge on the surface of a dielectric can be computed by subtracting V (x, y) from
+the average of the potential at the four nearest neighbor sites. You are, in effect, using (10.17)
+to solve for the charge. Implement this calculation and describe the bound charge on the surface
+of the dielectric.
+10.6 Random Walk Solution of Laplace’s Equation
+In Section 10.5 we found that the solution to Laplace’s equation in two dimensions at the point
+(x, y) is given by
+4
+1
+V (x, y) = V (i), (10.24)
+4
+i=1
+!
+where V (i) is the value of the potential at the ith neighbor. A generalization of this result is
+that the potential at any point equals the average of the potential on a circle (or sphere in three
+dimensions) centered about that point.
+The relation (10.24) can be given a probabilistic interpretation in terms of random walks (see
+Problem 10.10d). Suppose that many random walkers are at the site (x, y) and each walker “jumps”
+to one of its four neighbors (on a square grid) with equal probability p = 1/4. From (10.24) we see
+that the average potential found by the walkers after jumping one step is the potential at (x, y).
+Random Walk Solution of Laplace’s Equation
+This relation generalizes to walkers that visit a site on a closed surface with fixed potential. The
+random walk algorithm for computing the solution to Laplace’s equation can be stated as:
+1. Begin at a point (x, y) where the value of the potential is desired, and take a step in a random
+direction.
+2. Continue taking steps until the walker reaches the surface. Record V (i), the potential at the
+b
+boundary site i. A typical walk is shown in Figure 10.4.
+3. Repeat steps (1) and (2) n times and sum the potential found at the surface each time.
+4. The value of the potential at the point (x, y) is estimated by
+n
+CHAPTER1 10. ELECTRODYNAMICS 402
+V (x, y) = V (i) (10.25)
+b
+n
+i=1 V (1)
+! b
+where n is the total number of random walkers.
+Problem 10.17. Random walk solution of Laplace’s equation
+A random walk on a 6 Å~ 6 grid (x,y)
+starting at the point (x, y) = (3, 3),
+ending at the boundary site V (3, 6)
+b
+where the potential is recorded.
+Figure 10.4: A random walk on a 6 6 grid starting at the point (x,y) = (3,3) and ending at the
+×
+boundary site V (3,6) where the potential is recorded.
+b
+a. Consider the square region shown in Figure 10.1 and compare the results of the random walk
+method with the results of the relaxation method (see Problem 10.10c). Try n = 100 and
+n = 1000 walkers, and choose a point near the center of the square.
+b. Repeat part (a) for other points within the square. Do you need more or less walkers when the
+potential near the surface is desired? How quickly do your answers converge as a function of n?
+The disadvantage of the random walk method is that it requires many walkers to obtain a
+good estimate of the potential at each site. However, if the potential is needed at only a small
+number of sites, then the random walk method might be more appropriate than the relaxation
+method which requires the potential to be computed at all points within the region. Another case
+where the random walk method is appropriate is when the geometry of the boundary is fixed, but
+the potential in the interior for a variety of different boundary potentials is needed. In this case
+the quantity of interest is G(x,y,x ,y ), the number of times that a walker from the point (x,y)
+b b
+lands at the boundary (x ,y ). The random walk algorithm is equivalent to the relation
+b b
+1
+V (x,y) = G(x,y,x ,y )V (x ,y ), (10.26)
+b b b b
+n
+x ,y
+!b b
+where the sum is over all sites on the boundary. We can use the same function G for different
+distributions of the potential on a given boundary. G is an example of a Green’s function, a func-
+tion that you will encounter in advanced treatments of electrodynamics and quantum mechanics
+(cf. Section 17.9). Of course, if we change the geometry of the boundary, we have to recompute
+the function G.
+Problem 10.18. Green’s function solution of Laplace’s equation
+
+
+===== PAGE 12 =====
+Green’s function
+Given a linear differential operator acting on the collection of distributions over
+a subset of some Euclidean space , a Green's function at the point
+corresponding to is any solution of
+where denotes the delta function. By multiplying the above identity by a function
+and integrating with respect to yields
+The right-hand side reduces merely to . Because is a linear operator acting only on
+and not on , the left-hand side can be rewritten as
+Particularly useful when solving for in differential equations of the form
+where the above arithmetic confirms that
+and whereby it follows that has the specific integral form
+
+
+===== PAGE 13 =====
+CHAPTER 10. ELECTRODYNAMICS 383
+V (1)
+b
+(x,y)
+Figure 10.4: A random walk on a 6 6 grid starting at the point (x,y) = (3,3) and ending at the
+⇥
+boundary site V (3,6) where the potential is recorded.
+b
+Problem 10.17. Random walk solution of Laplace’s equation
+(a) Consider the square region shown in Figure 10.1 and compare the results of the random
+walk method with the results of the relaxation method (see Problem 10.10c). Try n = 100
+Green’s function from random walks
+and n = 1000 walkers and choose a point near the center of the square.
+(b) Repeat part (a) for other points within the square. Do you need more or less walkers when
+the potential near the surface is desired? How quickly do your answers converge as a func-
+tion of n?
+The disadvantage of the random walk method is that it requires many walkers to obtain a
+good estimate of the potential at each site. However, if the potential is needed at only a small
+number of sites, then the random walk method might be more appropriate than the relaxation
+method, which requires the potential to be computed at all points within the region. Another
+case where the random walk method is appropriate is when the geometry of the boundary is
+fixed, but the potential in the interior for a variety of di↵erent boundary potentials is needed.
+In this case the quantity of interest is G(x,y,x ,y ), the number of times that a walker from
+b b
+the point (x,y) lands at the boundary (x ,y ). The random walk algorithm is equivalent to the
+b b
+relation
+1
+V (x,y) = G(x,y,x ,y )V (x ,y ) (10.26)
+b b b b
+n
+x ,y
+b b
+X
+where the sum is over all sites on the boundary. We can use the same function G for di↵erent
+distributions of the potential on a given boundary. G is an example of a Green’s function,
+a function that you will encounter in advanced treatments of electrodynamics and quantum
+mechanics (cf. Section 16.9). Of course, if we change the geometry of the boundary, we have to
+recompute the function G.
+
+
+===== PAGE 14 =====
+Advanced methods for electrostatics
+•
+Computing electrostatic pair interactions between N
+charges is a common problem
+•
+Computing gravitational forces between N point masses
+is a nearly equivalent problem
+•
+N is often a 100 000 - 1 000 000 000
+•
+Direct computation: O(N2)
+•
+Particle + mesh methods using FFTs: O(N log N)
+•
+Fast multipole method: O(N)
+
+
+===== PAGE 15 =====
+Fast multipole method
+•
+Compute short-distance interactions directly
+•
+Compute distant interaction as multipole-multipole using
+multipole expansions centered in the middle of cells
+•
+Use a hierarchical decomposition scheme
+
+
+===== PAGE 16 =====
+FMM: O(N) calculation & communication
+
+
+===== PAGE 17 =====
+Fast multipole method use
+•
+Example use cases:
+•
+Galatic dynamics:
+•
+billions of stars
+•
+Molecular dynamics
+•
+~ a million atoms
+•
+…
+•
+Different kernels for different problems
+•
+Different requirements: memory versus latency optimization
+•
+Different codes
+
+
+===== PAGE 18 =====
+Projects: Laplace equation
+4.1 a) Determine the potential V (x, y) in a square region with linear dimension
+L=10 (9x9 interior points). The boundary of the square is at a potential V = 10.
+Choose the grid size  x =  y = 1. Before you run your program, guess the exact
+from of V (x, y) and set the initial values of the interior potential 10% lower than
+the exact answer. How many iterations are necessary to achieve 1% accuracy (max
+error)? Decrease the grid size ( x,  y) by factor 2, and determine the number of
+iterations are now necessary to achieve 1% accuracy? i.e. double the number
+of cells along each dimension
+4.1 b) Consider the same geometry as in part a), but set the initial potential at the
+interior sites equal to zero except for the center site whose potential is set equal
+to four. Does the potential distribution evolve to the same values as in part a)?
+What is the e↵ect of a poor initial guess? Are the final results independent of your
+initial guess?
+4.1 c) Modify the boundary conditions so that the value of the potential at the four
+sides is 5, 10, 5, and 10, respectively (see Figure 10.1). Sketch the equipotential
+surfaces. What happens if the potential is 10 on three sides and 0 on the fourth?
+Start with a reasonable guess for the initial values of the potential at the interior
+
+
+===== PAGE 19 =====
+sites and iterate until 1% accuracy is obtained.
+CHAPTER 10. ELECTRODYNAMICS 397
+10 10 10 10 10 10 10 10 10
+5 5
+5 5
+5 5
+5 5
+5 5
+5 5
+5 5
+5 5
+5 5
+10 10 10 10 10 10 10 10 10
+Figure 10.1: Potential distribution considered in Problem 10.10c. The number of interior sites in
+each direction is nine.
+c. The slow convergence of the relaxation methods we have explored is due to the fact that it
+∗
+takes a long time for a change in the potential at one site to effect changes further away. We
+can improve the Gauss-Seidel method by using an overrelaxation method that updates the new
+potential as follows:
+V (x, y) = wV (x, y) + (1 w)V (x, y), (10.15)
+new ave
+−
+where V (x, y) is the average of the potential of the four neighbors of (x, y). The overrelax-
+ave
+ation parameter w is in the range 1 < w < 2. The effect of w is to cause the potential to
+change by a greater amount than in the simple relaxation procedure. Explore the dependence
+of the rate of convergence on w. A relaxation method that increases the rate of convergence is
+explored in Project 10.26.
+Problem 10.12. The capacitance of concentric squares
+a. Use a relaxation method to compute the potential distribution between the two concentric
+square cylinders shown in Figure 10.2. The potential of the outer square conductor is V = 10
+out
+and the potential of the inner square conductor is V = 5. The linear dimensions of the exterior
+in
+and interior squares are L = 25 and L = 5, respectively. Modify your program so that the
+out in
+potential of the interior square is fixed. Sketch the equipotential surfaces.
+b. A system of two conductors with charge Q and Q respectively has a capacitance C that is
+−
+defined as the ratio of Q to the potential difference ∆V between the two conductors. Determine
+the capacitance per unit length of the concentric cylinders considered in part (a). In this case
+∆V = 5. The charge Q can be determined from the fact that near a conducting surface, the
+surface charge density σ is given by σ = E /4π, where E is the magnitude of the electric
+n n
+
+
+===== PAGE 20 =====
+Projects: Gauss-Seidel relaxation
+4.2 a) Modify the program so that the potential at each site is updated sequen-
+tially. That is, after the average potential of the nearest neighbor sites of site i is
+computed, update the potential at i immediately. In this way the new potential of
+the next site is computed using the most recently computed values of its nearest
+neighbor potentials. Are your results better, worse, or about the same as for the
+simple relaxation method?
+4.2 b) Imagine coloring the alternate sites of a grid red and black, so that the
+grid resembles a checker- board. Modify the program so that all the red sites are
+updated first, and then all the black sites are updated. This ordering is repeated
+for each iteration. Do your results converge any more quickly than in part a)?
+
+
+===== PAGE 21 =====
+Projects: Random-walk solution of Laplace’s eq.
+4.3 a) With the same square region and 5/10/5/10 boundary conditions, compare
+the results of the random walk method with the results of the relaxation method.
+Try n = 100 and n = 1000 walkers, and choose a point near the center of the
+square.
+4.3 b) Repeat part a) for other points within the square. Do you need more or
+less walkers when the potential near the surface is desired? How quickly do your
+answers converge as a function of n?
+4.4 a) Compute the Green’s function G(x, y, x , y ) for the same geometry. Use at
+b b
+least 200 walkers at each interior site to estimate G. Because of the symmetry of
+the geometry, you can determine some of the values of G from other values without
+doing an additional calculation. Store your results for G.
+4.4 b) Use your results for G found in part a) to determine the potential at each
+interior site when the 5/10/5/10 boundary potential, except for five boundary
+sites which are held at V = 20. Find the locations of the five boundary sites that
+maximize the potential at the interior site located at (3,5). Repeat the calculation
+
+
+===== PAGE 22 =====
+to maximize the potential at (5,3). Use trial and error guided by your physical
+intuition.

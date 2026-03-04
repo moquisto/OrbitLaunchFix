@@ -9,6 +9,7 @@ import time
 import contextlib
 import os
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from scipy.interpolate import interp1d
 from scipy.integrate import solve_ivp
 import csv
@@ -47,16 +48,24 @@ def wilson_interval(successes, n, z=1.96):
     return max(0.0, center - half), min(1.0, center + half)
 
 
+# Centralized strict terminal tolerances used by all reliability analyses.
+# Chosen to be tighter than before while still allowing realistic numerical/model scatter.
+TERMINAL_ALT_TOL_M = 5_000.0
+TERMINAL_VEL_TOL_M_S = 10.0
+TERMINAL_RADIAL_VEL_TOL_M_S = 5.0
+TERMINAL_INC_TOL_DEG = 0.25
+
+
 
 
 def evaluate_terminal_state(
     sim_res,
     cfg,
     env_cfg,
-    alt_tol_m=10000.0,
-    vel_tol_m_s=20.0,
-    radial_vel_tol_m_s=25.0,
-    inc_tol_deg=0.75
+    alt_tol_m=TERMINAL_ALT_TOL_M,
+    vel_tol_m_s=TERMINAL_VEL_TOL_M_S,
+    radial_vel_tol_m_s=TERMINAL_RADIAL_VEL_TOL_M_S,
+    inc_tol_deg=TERMINAL_INC_TOL_DEG
 ):
     """
     Centralized terminal-state checker used across reliability analyses.
@@ -193,10 +202,10 @@ def evaluate_terminal_state(
 
 def normalized_orbit_error(
     metrics,
-    alt_tol_m=10000.0,
-    vel_tol_m_s=20.0,
-    radial_vel_tol_m_s=25.0,
-    inc_tol_deg=0.75,
+    alt_tol_m=TERMINAL_ALT_TOL_M,
+    vel_tol_m_s=TERMINAL_VEL_TOL_M_S,
+    radial_vel_tol_m_s=TERMINAL_RADIAL_VEL_TOL_M_S,
+    inc_tol_deg=TERMINAL_INC_TOL_DEG,
 ):
     """
     Return a unitless terminal-orbit error norm.
@@ -213,6 +222,670 @@ def normalized_orbit_error(
     if not np.all(np.isfinite(terms)):
         return np.nan
     return float(np.sqrt(np.sum(np.square(terms))))
+
+
+def _ms_refine_peak_time(t_series, y_series, idx_peak):
+    """
+    Worker-safe peak refinement used by parallel multi-start diagnostics.
+    """
+    t = np.asarray(t_series, dtype=float)
+    y = np.asarray(y_series, dtype=float)
+    i = int(idx_peak)
+    if len(t) < 3 or i <= 0 or i >= len(t) - 1:
+        return float(t[i]), float(y[i])
+
+    t_w = t[i - 1:i + 2]
+    y_w = y[i - 1:i + 2]
+    if not (np.all(np.isfinite(t_w)) and np.all(np.isfinite(y_w))):
+        return float(t[i]), float(y[i])
+
+    x = t_w - t[i]
+    A = np.column_stack([x * x, x, np.ones_like(x)])
+    try:
+        a, b, c = np.linalg.lstsq(A, y_w, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return float(t[i]), float(y[i])
+    if not np.isfinite(a) or not np.isfinite(b) or not np.isfinite(c):
+        return float(t[i]), float(y[i])
+    if a >= 0.0 or abs(a) < 1e-18:
+        return float(t[i]), float(y[i])
+
+    x_peak = -b / (2.0 * a)
+    if x_peak < x[0] or x_peak > x[-1]:
+        return float(t[i]), float(y[i])
+
+    y_peak = a * x_peak * x_peak + b * x_peak + c
+    if not np.isfinite(y_peak):
+        return float(t[i]), float(y[i])
+    return float(t[i] + x_peak), float(y_peak)
+
+
+def _ms_trajectory_diagnostics(sim_res, veh, cfg):
+    """
+    Standalone trajectory diagnostics for process workers.
+    Mirrors ReliabilitySuite._trajectory_diagnostics.
+    """
+    out = {
+        "valid": False,
+        "max_q_pa": np.nan,
+        "max_q_time_s": np.nan,
+        "max_g": np.nan,
+        "max_g_time_s": np.nan,
+        "staging_time_s": np.nan,
+        "depletion_time_s": np.nan,
+        "q_violation": False,
+        "g_violation": False
+    }
+
+    if not isinstance(sim_res, dict):
+        return out
+    t = sim_res.get("t", None)
+    y = sim_res.get("y", None)
+    u = sim_res.get("u", None)
+    if not isinstance(t, np.ndarray) or not isinstance(y, np.ndarray) or not isinstance(u, np.ndarray):
+        return out
+    if y.ndim != 2 or u.ndim != 2 or len(t) < 1 or y.shape[0] < 7 or u.shape[0] < 4:
+        return out
+    if y.shape[1] != len(t) or u.shape[1] != len(t):
+        return out
+    if not np.all(np.isfinite(t)) or not np.all(np.isfinite(y)) or not np.all(np.isfinite(u)):
+        return out
+    if np.any(y[6, :] <= 0.0):
+        return out
+
+    termination = sim_res.get("termination", {})
+    if isinstance(termination, dict) and termination.get("reason") == "ground_impact":
+        return out
+
+    R_eq = veh.env.config.earth_radius_equator
+    R_pol = R_eq * (1.0 - veh.env.config.earth_flattening)
+    ellipsoid_metric = (y[0, :] / R_eq) ** 2 + (y[1, :] / R_eq) ** 2 + (y[2, :] / R_pol) ** 2
+    if np.min(ellipsoid_metric) <= 1.0 + 1e-8:
+        return out
+
+    m_stage2_wet = cfg.stage_2.dry_mass + cfg.stage_2.propellant_mass + cfg.payload_mass
+    g0 = veh.env.config.g0
+    q_hist = np.full(len(t), np.nan, dtype=float)
+    g_hist = np.full(len(t), np.nan, dtype=float)
+
+    for i in range(len(t)):
+        r_i = y[0:3, i]
+        v_i = y[3:6, i]
+        m_i = y[6, i]
+        th_i = u[0, i]
+        dir_i = u[1:, i]
+        ti = t[i]
+
+        env_state = veh.env.get_state_sim(r_i, ti)
+        v_rel = v_i - env_state["wind_velocity"]
+        q = 0.5 * env_state["density"] * np.dot(v_rel, v_rel)
+        q_hist[i] = float(q)
+
+        if th_i < 0.01:
+            stage_mode = "coast" if m_i > m_stage2_wet + 1000.0 else "coast_2"
+        else:
+            stage_mode = "boost" if m_i > m_stage2_wet + 1000.0 else "ship"
+        dyn = veh.get_dynamics(y[:, i], th_i, dir_i, ti, stage_mode=stage_mode, scaling=None)
+        sensed_acc = dyn[3:6] - env_state["gravity"]
+        g_load = np.linalg.norm(sensed_acc) / g0
+        g_hist[i] = float(g_load)
+
+    if np.all(~np.isfinite(q_hist)) or np.all(~np.isfinite(g_hist)):
+        return out
+    idx_q = int(np.nanargmax(q_hist))
+    idx_g = int(np.nanargmax(g_hist))
+    max_q_time, max_q = _ms_refine_peak_time(t, q_hist, idx_q)
+    max_g_time, max_g = _ms_refine_peak_time(t, g_hist, idx_g)
+
+    dm = np.diff(y[6, :])
+    if len(dm) > 0:
+        idx_stage = int(np.argmin(dm))
+        if dm[idx_stage] < -1000.0:
+            out["staging_time_s"] = float(t[idx_stage])
+    m_dry = cfg.stage_2.dry_mass + cfg.payload_mass
+    dep_idx = np.where(y[6, :] <= m_dry + 1e-6)[0]
+    if len(dep_idx) > 0:
+        out["depletion_time_s"] = float(t[int(dep_idx[0])])
+
+    out["valid"] = True
+    out["max_q_pa"] = max_q if np.isfinite(max_q) else np.nan
+    out["max_q_time_s"] = max_q_time
+    out["max_g"] = max_g if np.isfinite(max_g) else np.nan
+    out["max_g_time_s"] = max_g_time
+    out["q_violation"] = bool(np.isfinite(out["max_q_pa"]) and out["max_q_pa"] > cfg.max_q_limit)
+    out["g_violation"] = bool(np.isfinite(out["max_g"]) and out["max_g"] > cfg.max_g_load)
+    return out
+
+
+def _ms_evaluate_path_compliance(traj_diag, cfg, q_slack_pa, g_slack):
+    out = {
+        "path_ok": False,
+        "q_ok": False,
+        "g_ok": False,
+        "max_q_pa": np.nan,
+        "max_g": np.nan,
+        "q_limit_pa": float(cfg.max_q_limit),
+        "g_limit": float(cfg.max_g_load),
+        "q_slack_pa": float(q_slack_pa),
+        "g_slack": float(g_slack),
+    }
+    if not isinstance(traj_diag, dict) or not bool(traj_diag.get("valid", False)):
+        return out
+    max_q = float(traj_diag.get("max_q_pa", np.nan))
+    max_g = float(traj_diag.get("max_g", np.nan))
+    q_ok = bool(np.isfinite(max_q) and max_q <= cfg.max_q_limit + q_slack_pa)
+    g_ok = bool(np.isfinite(max_g) and max_g <= cfg.max_g_load + g_slack)
+    out.update({
+        "path_ok": bool(q_ok and g_ok),
+        "q_ok": q_ok,
+        "g_ok": g_ok,
+        "max_q_pa": max_q,
+        "max_g": max_g,
+    })
+    return out
+
+
+def _run_multistart_trial_worker(payload):
+    """
+    One randomized multi-start trial executed in its own process.
+    """
+    idx = int(payload["trial_index"])
+    label = str(payload["label"])
+    params = payload["params"]
+    cfg = payload["cfg"]
+    env_cfg = payload["env_cfg"]
+    guess_i = payload["guess"]
+    q_slack_pa = float(payload["q_slack_pa"])
+    g_slack = float(payload["g_slack"])
+
+    t0 = time.time()
+    solver_ok = False
+    mission_ok = False
+    terminal_strict_ok = False
+    path_ok = False
+    q_ok = False
+    g_ok = False
+    m_final = np.nan
+    status = "FAILED"
+
+    try:
+        env_i = Environment(env_cfg)
+        veh_i = Vehicle(cfg, env_i)
+    except Exception:
+        return {
+            "trial_index": idx,
+            "label": label,
+            "params": params,
+            "solver_success": 0,
+            "mission_success": 0,
+            "terminal_strict_success": 0,
+            "path_ok": 0,
+            "q_ok": 0,
+            "g_ok": 0,
+            "status": "SETUP_ERR",
+            "final_mass_kg": np.nan,
+            "runtime_s": float(time.time() - t0),
+        }
+
+    try:
+        with suppress_stdout():
+            res = solve_optimal_trajectory(
+                cfg,
+                veh_i,
+                env_i,
+                print_level=0,
+                initial_guess_override=guess_i
+            )
+        solver_ok = bool(res.get("success", False))
+        X3 = res.get("X3", None)
+        if solver_ok and isinstance(X3, np.ndarray) and X3.ndim == 2 and X3.shape[0] >= 7 and X3.shape[1] >= 1:
+            m_try = float(X3[6, -1])
+            m_final = m_try if np.isfinite(m_try) and m_try > 0.0 else np.nan
+
+        if solver_ok and np.isfinite(m_final):
+            try:
+                with suppress_stdout():
+                    sim_res = run_simulation(res, veh_i, cfg, rtol=1e-9, atol=1e-12)
+                terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
+                traj = _ms_trajectory_diagnostics(sim_res, veh_i, cfg)
+                path = _ms_evaluate_path_compliance(traj, cfg, q_slack_pa, g_slack)
+                terminal_strict_ok = bool(terminal.get("strict_ok", False))
+                path_ok = bool(path.get("path_ok", False))
+                q_ok = bool(path.get("q_ok", False))
+                g_ok = bool(path.get("g_ok", False))
+                mission_ok = bool(terminal_strict_ok and path_ok)
+                if mission_ok:
+                    status = "MISSION_OK"
+                else:
+                    if terminal_strict_ok and not path_ok:
+                        status = "PATH"
+                    elif not terminal_strict_ok:
+                        status = terminal.get("status", "MISS")
+                    else:
+                        status = "MISSION_FAIL"
+            except Exception:
+                status = "SIM_ERROR"
+        elif solver_ok:
+            solver_ok = False
+            status = "BAD_SOL"
+        else:
+            status = "SOLVE_FAIL"
+    except Exception:
+        status = "SOLVE_ERR"
+
+    return {
+        "trial_index": idx,
+        "label": label,
+        "params": params,
+        "solver_success": int(solver_ok),
+        "mission_success": int(mission_ok),
+        "terminal_strict_success": int(terminal_strict_ok),
+        "path_ok": int(path_ok),
+        "q_ok": int(q_ok),
+        "g_ok": int(g_ok),
+        "status": status,
+        "final_mass_kg": float(m_final) if np.isfinite(m_final) else np.nan,
+        "runtime_s": float(time.time() - t0),
+    }
+
+
+def _run_monte_carlo_batch_worker(payload):
+    """
+    Evaluate a batch of Monte Carlo uncertainty samples in one worker process.
+    Returns aggregate counts needed by Wilson-CI stopping.
+    """
+    opt_res = payload["opt_res"]
+    base_cfg = payload["base_cfg"]
+    base_env_cfg = payload["base_env_cfg"]
+    q_slack_pa = float(payload["q_slack_pa"])
+    g_slack = float(payload["g_slack"])
+    samples = payload["samples"]
+
+    successes = 0
+    path_failures = 0
+    orbit_errors = []
+    mission_flags = []
+
+    for thrust_mult, isp_mult, dens_mult in samples:
+        cfg = copy.deepcopy(base_cfg)
+        env_cfg = copy.deepcopy(base_env_cfg)
+        cfg.stage_1.thrust_vac *= float(thrust_mult)
+        cfg.stage_2.thrust_vac *= float(thrust_mult)
+        cfg.stage_1.isp_vac *= float(isp_mult)
+        cfg.stage_2.isp_vac *= float(isp_mult)
+        env_cfg.density_multiplier = float(dens_mult)
+
+        try:
+            with suppress_stdout():
+                env_mc = Environment(env_cfg)
+                veh_mc = Vehicle(cfg, env_mc)
+                sim_res = run_simulation(opt_res, veh_mc, cfg)
+            terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
+            traj = _ms_trajectory_diagnostics(sim_res, veh_mc, cfg)
+            path = _ms_evaluate_path_compliance(traj, cfg, q_slack_pa, g_slack)
+            strict_path_ok = bool(terminal.get("strict_ok", False) and path.get("path_ok", False))
+            orbit_err = normalized_orbit_error(terminal)
+            if strict_path_ok:
+                successes += 1
+            if bool(terminal.get("strict_ok", False)) and (not strict_path_ok):
+                path_failures += 1
+            orbit_errors.append(float(orbit_err) if np.isfinite(orbit_err) else np.nan)
+            mission_flags.append(int(strict_path_ok))
+        except Exception:
+            # Treat simulation failures as non-success samples.
+            orbit_errors.append(np.nan)
+            mission_flags.append(0)
+            continue
+
+    return {
+        "successes": int(successes),
+        "path_failures": int(path_failures),
+        "orbit_errors": orbit_errors,
+        "mission_flags": mission_flags,
+    }
+
+
+def _run_grid_independence_worker(payload):
+    """
+    Solve one grid-independence point (single node count).
+    """
+    node_count = int(payload["num_nodes"])
+    base_cfg = payload["base_cfg"]
+    base_env_cfg = payload["base_env_cfg"]
+
+    cfg = copy.deepcopy(base_cfg)
+    cfg.num_nodes = node_count
+
+    t0 = time.time()
+    m_final = np.nan
+    status = "Failed"
+    solver_ok = False
+    try:
+        with suppress_stdout():
+            env_i = Environment(copy.deepcopy(base_env_cfg))
+            veh_i = Vehicle(cfg, env_i)
+            res = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
+        if res.get("success", False):
+            m_final = float(res["X3"][6, -1])
+            status = "Converged"
+            solver_ok = True
+    except Exception:
+        m_final = np.nan
+        status = "Failed"
+        solver_ok = False
+
+    return {
+        "nodes": node_count,
+        "solver_success": int(solver_ok),
+        "status": status,
+        "final_mass_kg": float(m_final) if np.isfinite(m_final) else np.nan,
+        "runtime_s": float(time.time() - t0),
+    }
+
+
+def _run_collocation_phase_defects_worker(payload):
+    """
+    Compute collocation defects for one phase.
+    """
+    phase_name = str(payload["phase_name"])
+    X = np.asarray(payload["X"], dtype=float)
+    U = payload.get("U", None)
+    if U is not None:
+        U = np.asarray(U, dtype=float)
+    T = float(payload["T"])
+    t_start = float(payload["t_start"])
+    stage_mode = str(payload["stage_mode"])
+    cfg = payload["cfg"]
+    env_cfg = payload["env_cfg"]
+
+    env_i = Environment(copy.deepcopy(env_cfg))
+    veh_i = Vehicle(copy.deepcopy(cfg), env_i)
+
+    if U is None:
+        N_loc = X.shape[1] - 1
+    else:
+        N_loc = U.shape[1]
+    dt = T / max(N_loc, 1)
+
+    pos_def = np.zeros(N_loc)
+    vel_def = np.zeros(N_loc)
+    mass_def = np.zeros(N_loc)
+    rel_state_max = np.zeros(N_loc)
+
+    for k in range(N_loc):
+        xk = X[:, k]
+        if U is None:
+            throttle = 0.0
+            u_dir = np.array([1.0, 0.0, 0.0], dtype=float)
+        else:
+            uk = U[:, k]
+            throttle = float(uk[0])
+            u_dir = np.array(uk[1:], dtype=float)
+        tk = float(t_start + k * dt)
+
+        def dyn(x, t):
+            return veh_i.get_dynamics(x, throttle, u_dir, t, stage_mode=stage_mode, scaling=None)
+
+        k1 = dyn(xk, tk)
+        k2 = dyn(xk + 0.5 * dt * k1, tk + 0.5 * dt)
+        k3 = dyn(xk + 0.5 * dt * k2, tk + 0.5 * dt)
+        k4 = dyn(xk + dt * k3, tk + dt)
+        x_pred = xk + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        defect = X[:, k + 1] - x_pred
+        denom = np.maximum(np.abs(X[:, k + 1]), 1.0)
+        pos_def[k] = float(np.linalg.norm(defect[0:3]))
+        vel_def[k] = float(np.linalg.norm(defect[3:6]))
+        mass_def[k] = float(abs(defect[6]))
+        rel_state_max[k] = float(np.max(np.abs(defect) / denom))
+
+    return {
+        "phase_name": phase_name,
+        "position_defect": pos_def,
+        "velocity_defect": vel_def,
+        "mass_defect": mass_def,
+        "relative_defect": rel_state_max,
+    }
+
+
+def _run_bifurcation_batch_worker(payload):
+    """
+    Evaluate a chunk of (thrust, density) bifurcation points.
+    """
+    opt_res = payload["opt_res"]
+    base_cfg = payload["base_cfg"]
+    base_env_cfg = payload["base_env_cfg"]
+    q_slack_pa = float(payload["q_slack_pa"])
+    g_slack = float(payload["g_slack"])
+    samples = payload["samples"]
+
+    rows = []
+    for iy, ix, thrust, dens in samples:
+        cfg = copy.deepcopy(base_cfg)
+        env_cfg = copy.deepcopy(base_env_cfg)
+        cfg.stage_1.thrust_vac *= float(thrust)
+        cfg.stage_2.thrust_vac *= float(thrust)
+        env_cfg.density_multiplier = float(dens)
+
+        try:
+            with suppress_stdout():
+                env_i = Environment(env_cfg)
+                veh_i = Vehicle(cfg, env_i)
+                sim_res = run_simulation(opt_res, veh_i, cfg)
+            terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
+            traj = _ms_trajectory_diagnostics(sim_res, veh_i, cfg)
+            path = _ms_evaluate_path_compliance(traj, cfg, q_slack_pa, g_slack)
+            strict_path_ok = bool(terminal.get("strict_ok", False) and path.get("path_ok", False))
+            margin = terminal["fuel_margin_kg"] if terminal["terminal_valid"] else np.nan
+            orbit_err = normalized_orbit_error(terminal)
+            status = terminal.get("status", "SIM_ERROR")
+            if bool(terminal.get("strict_ok", False)) and not strict_path_ok:
+                status = "PATH"
+            rows.append(
+                {
+                    "iy": int(iy),
+                    "ix": int(ix),
+                    "thrust": float(thrust),
+                    "density": float(dens),
+                    "strict_success": int(strict_path_ok),
+                    "fuel_margin_kg": float(margin) if np.isfinite(margin) else np.nan,
+                    "normalized_orbit_error": float(orbit_err) if np.isfinite(orbit_err) else np.nan,
+                    "altitude_error_m": float(terminal.get("alt_err_m", np.nan)),
+                    "velocity_error_m_s": float(terminal.get("vel_err_m_s", np.nan)),
+                    "q_ok": int(path.get("q_ok", False)),
+                    "g_ok": int(path.get("g_ok", False)),
+                    "status": str(status),
+                }
+            )
+        except Exception:
+            rows.append(
+                {
+                    "iy": int(iy),
+                    "ix": int(ix),
+                    "thrust": float(thrust),
+                    "density": float(dens),
+                    "strict_success": 0,
+                    "fuel_margin_kg": np.nan,
+                    "normalized_orbit_error": np.nan,
+                    "altitude_error_m": np.nan,
+                    "velocity_error_m_s": np.nan,
+                    "q_ok": 0,
+                    "g_ok": 0,
+                    "status": "SIM_ERROR",
+                }
+            )
+    return {"rows": rows}
+
+
+def _run_q2_grid_point_worker(payload):
+    """
+    Q2 uncertainty budget: solve one node-count case.
+    """
+    node_count = int(payload["num_nodes"])
+    base_cfg = payload["base_cfg"]
+    base_env_cfg = payload["base_env_cfg"]
+
+    cfg = copy.deepcopy(base_cfg)
+    cfg.num_nodes = node_count
+
+    t0 = time.time()
+    ok = False
+    fuel_i = np.nan
+    status = "Failed"
+    try:
+        with suppress_stdout():
+            env_i = Environment(copy.deepcopy(base_env_cfg))
+            veh_i = Vehicle(cfg, env_i)
+            opt_i = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
+        ok = bool(opt_i.get("success", False))
+        if ok:
+            X3 = opt_i.get("X3", None)
+            if isinstance(X3, np.ndarray) and X3.ndim == 2 and X3.shape[0] >= 7 and X3.shape[1] >= 1:
+                m_final_i = float(X3[6, -1])
+            else:
+                m_final_i = np.nan
+            if np.isfinite(m_final_i) and m_final_i > 0.0:
+                fuel_i = float(cfg.launch_mass - m_final_i)
+            else:
+                fuel_i = np.nan
+            status = "Converged" if np.isfinite(fuel_i) else "Failed"
+    except Exception:
+        ok = False
+        fuel_i = np.nan
+        status = "Error"
+
+    return {
+        "nodes": node_count,
+        "solver_success": int(ok),
+        "status": status,
+        "minimum_fuel_kg": float(fuel_i) if np.isfinite(fuel_i) else np.nan,
+        "runtime_s": float(time.time() - t0),
+    }
+
+
+def _run_q2_integrator_point_worker(payload):
+    """
+    Q2 uncertainty budget: evaluate one integrator-tolerance verification run.
+    """
+    opt_nom = payload["opt_nom"]
+    base_cfg = payload["base_cfg"]
+    base_env_cfg = payload["base_env_cfg"]
+    rtol = float(payload["rtol"])
+    atol = float(payload["atol"])
+    q_slack_pa = float(payload["q_slack_pa"])
+    g_slack = float(payload["g_slack"])
+
+    cfg = copy.deepcopy(base_cfg)
+    env_cfg = copy.deepcopy(base_env_cfg)
+
+    term_i = {"terminal_valid": False, "strict_ok": False, "status": "SIM_ERROR"}
+    path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+    strict_path_i = 0
+    fuel_sim = np.nan
+    status = "SIM_ERROR"
+    try:
+        with suppress_stdout():
+            env_i = Environment(env_cfg)
+            veh_i = Vehicle(cfg, env_i)
+            sim_i = run_simulation(opt_nom, veh_i, cfg, rtol=rtol, atol=atol)
+        term_i = evaluate_terminal_state(sim_i, cfg, env_cfg)
+        traj_i = _ms_trajectory_diagnostics(sim_i, veh_i, cfg)
+        path_i = _ms_evaluate_path_compliance(traj_i, cfg, q_slack_pa, g_slack)
+        strict_path_i = int(bool(term_i.get("strict_ok", False)) and bool(path_i.get("path_ok", False)))
+        y = sim_i.get("y", None)
+        if isinstance(y, np.ndarray) and y.ndim == 2 and y.shape[0] >= 7 and y.shape[1] >= 1:
+            m_final_sim = float(y[6, -1])
+            if np.isfinite(m_final_sim) and m_final_sim > 0.0:
+                fuel_sim = float(cfg.launch_mass - m_final_sim)
+        status = term_i.get("status", "SIM_ERROR")
+        if bool(term_i.get("strict_ok", False)) and not bool(strict_path_i):
+            status = "PATH"
+    except Exception:
+        status = "SIM_ERROR"
+
+    return {
+        "rtol": rtol,
+        "atol": atol,
+        "terminal_valid": int(term_i.get("terminal_valid", False)),
+        "strict_ok": int(term_i.get("strict_ok", False)),
+        "strict_path_ok": int(strict_path_i),
+        "q_ok": int(path_i.get("q_ok", False)),
+        "g_ok": int(path_i.get("g_ok", False)),
+        "status": status,
+        "fuel_used_kg": float(fuel_sim) if np.isfinite(fuel_sim) else np.nan,
+    }
+
+
+def _run_q2_parameter_sample_worker(payload):
+    """
+    Q2 uncertainty budget: one parameter-perturbed re-optimization sample.
+    """
+    run_index = int(payload["run_index"])
+    thrust_mult = float(payload["thrust_multiplier"])
+    isp_mult = float(payload["isp_multiplier"])
+    dens_mult = float(payload["density_multiplier"])
+    base_cfg = payload["base_cfg"]
+    base_env_cfg = payload["base_env_cfg"]
+    q_slack_pa = float(payload["q_slack_pa"])
+    g_slack = float(payload["g_slack"])
+
+    cfg_i = copy.deepcopy(base_cfg)
+    env_cfg_i = copy.deepcopy(base_env_cfg)
+    cfg_i.stage_1.thrust_vac *= thrust_mult
+    cfg_i.stage_2.thrust_vac *= thrust_mult
+    cfg_i.stage_1.isp_vac *= isp_mult
+    cfg_i.stage_2.isp_vac *= isp_mult
+    env_cfg_i.density_multiplier = dens_mult
+
+    t0 = time.time()
+    opt_success = False
+    strict_ok = False
+    strict_path_ok = False
+    fuel_i = np.nan
+    status = "OPT_FAIL"
+    path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+
+    try:
+        with suppress_stdout():
+            env_i = Environment(env_cfg_i)
+            veh_i = Vehicle(cfg_i, env_i)
+            opt_i = solve_optimal_trajectory(cfg_i, veh_i, env_i, print_level=0)
+        opt_success = bool(opt_i.get("success", False))
+        if opt_success:
+            X3 = opt_i.get("X3", None)
+            m_final_i = float(X3[6, -1]) if isinstance(X3, np.ndarray) and X3.ndim == 2 and X3.shape[0] >= 7 and X3.shape[1] >= 1 else np.nan
+            if np.isfinite(m_final_i) and m_final_i > 0.0:
+                fuel_i = float(cfg_i.launch_mass - m_final_i)
+            try:
+                with suppress_stdout():
+                    sim_i = run_simulation(opt_i, veh_i, cfg_i, rtol=1e-9, atol=1e-12)
+                term_i = evaluate_terminal_state(sim_i, cfg_i, env_cfg_i)
+                traj_i = _ms_trajectory_diagnostics(sim_i, veh_i, cfg_i)
+                path_i = _ms_evaluate_path_compliance(traj_i, cfg_i, q_slack_pa, g_slack)
+                strict_ok = bool(term_i.get("strict_ok", False))
+                strict_path_ok = bool(strict_ok and path_i.get("path_ok", False))
+                status = term_i.get("status", "SIM_ERROR")
+                if strict_ok and not strict_path_ok:
+                    status = "PATH"
+            except Exception:
+                status = "ERROR"
+    except Exception:
+        status = "ERROR"
+        path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+
+    return {
+        "run": run_index + 1,
+        "thrust_multiplier": thrust_mult,
+        "isp_multiplier": isp_mult,
+        "density_multiplier": dens_mult,
+        "optimizer_success": int(opt_success),
+        "strict_ok": int(strict_ok),
+        "strict_path_ok": int(strict_path_ok),
+        "q_ok": int(path_i["q_ok"]),
+        "g_ok": int(path_i["g_ok"]),
+        "status": status,
+        "minimum_fuel_kg": float(fuel_i) if np.isfinite(fuel_i) else np.nan,
+        "runtime_s": float(time.time() - t0),
+    }
 
 
 def _export_csv(path, headers, rows):
@@ -312,6 +985,10 @@ class ReliabilitySuite:
                 ("max_iter", self.base_config.max_iter),
                 ("max_q_limit_pa", self.base_config.max_q_limit),
                 ("max_g_limit", self.base_config.max_g_load),
+                ("terminal_alt_tol_m", TERMINAL_ALT_TOL_M),
+                ("terminal_vel_tol_m_s", TERMINAL_VEL_TOL_M_S),
+                ("terminal_radial_vel_tol_m_s", TERMINAL_RADIAL_VEL_TOL_M_S),
+                ("terminal_inc_tol_deg", TERMINAL_INC_TOL_DEG),
                 ("seed", self.random_seed),
                 ("python_version", platform.python_version()),
                 ("numpy_version", np.__version__),
@@ -356,10 +1033,12 @@ class ReliabilitySuite:
         else:
             plt.close(fig)
 
-    def _run_if_enabled(self, flag_name, label, fn, *args, **kwargs):
+    def _run_if_enabled(self, flag_name, label, fn, *args, progress=None, **kwargs):
         enabled = bool(getattr(self.test_toggles, flag_name, True))
         t0 = time.time()
+        prog = f"[{progress}] " if progress is not None else ""
         if enabled:
+            print(f"\n{prog}Starting: {label}")
             try:
                 fn(*args, **kwargs)
                 status = "completed"
@@ -367,11 +1046,15 @@ class ReliabilitySuite:
             except Exception as exc:
                 status = "error"
                 err = str(exc)
-                self._analysis_execution.append((flag_name, label, int(enabled), status, time.time() - t0, err[:240]))
+                dt = time.time() - t0
+                print(f"{prog}Failed: {label} ({dt:.2f}s)")
+                self._analysis_execution.append((flag_name, label, int(enabled), status, dt, err[:240]))
                 raise
-            self._analysis_execution.append((flag_name, label, int(enabled), status, time.time() - t0, err))
+            dt = time.time() - t0
+            print(f"{prog}Completed: {label} ({dt:.2f}s)")
+            self._analysis_execution.append((flag_name, label, int(enabled), status, dt, err))
             return True
-        print(f"\n[Skip] {label} disabled in RELIABILITY_ANALYSIS_TOGGLES.{flag_name}")
+        print(f"\n{prog}[Skip] {label} disabled in RELIABILITY_ANALYSIS_TOGGLES.{flag_name}")
         self._analysis_execution.append((flag_name, label, int(enabled), "skipped", time.time() - t0, ""))
         return False
 
@@ -701,10 +1384,26 @@ class ReliabilitySuite:
         if arr.ndim != 2 or arr.shape[0] < 7 or arr.shape[1] < 1:
             return arr
 
-        # Bounded relative perturbation (approximately +/- sigma).
-        arr[0:3, :] *= 1.0 + rng.uniform(-pos_sigma, pos_sigma, size=arr[0:3, :].shape)
-        arr[3:6, :] *= 1.0 + rng.uniform(-vel_sigma, vel_sigma, size=arr[3:6, :].shape)
-        arr[6, :] *= 1.0 + rng.uniform(-mass_sigma, mass_sigma, size=arr[6, :].shape)
+        def _apply_rowwise_relative_jitter(row_slice, sigma):
+            # Relative jitter for non-zero entries + additive fallback for near-zero entries.
+            # This avoids "zero stays zero" degeneracy while keeping perturbations scale-aware.
+            for j in range(row_slice.start, row_slice.stop):
+                row = np.array(arr[j, :], dtype=float, copy=True)
+                noise = rng.uniform(-sigma, sigma, size=row.shape)
+                pert = row * (1.0 + noise)
+                near_zero = np.abs(row) <= 1e-12
+                if np.any(near_zero):
+                    ref_scale = float(np.nanmedian(np.abs(row)))
+                    if not np.isfinite(ref_scale) or ref_scale <= 0.0:
+                        ref_scale = float(np.nanmax(np.abs(row)))
+                    if not np.isfinite(ref_scale) or ref_scale <= 0.0:
+                        ref_scale = 1.0
+                    pert[near_zero] = row[near_zero] + noise[near_zero] * ref_scale
+                arr[j, :] = pert
+
+        _apply_rowwise_relative_jitter(slice(0, 3), pos_sigma)
+        _apply_rowwise_relative_jitter(slice(3, 6), vel_sigma)
+        _apply_rowwise_relative_jitter(slice(6, 7), mass_sigma)
 
         # Preserve phase start node to stay near boundary/linkage constraints.
         arr[:, 0] = X[:, 0]
@@ -759,7 +1458,7 @@ class ReliabilitySuite:
             if val is None:
                 continue
             td = np.array(val, dtype=float, copy=True)
-            td *= 1.0 + rng.uniform(-direction_sigma, direction_sigma, size=td.shape)
+            td += rng.normal(0.0, direction_sigma, size=td.shape)
             guess[key] = self._normalize_direction_history(td)
 
         params = {
@@ -772,89 +1471,76 @@ class ReliabilitySuite:
         }
         return guess, params
 
-    def run_all(self, monte_carlo_samples=200):
-        """Runs all analysis modules sequentially."""
+    def run_all(self, monte_carlo_samples=200, max_workers=None):
+        """Runs enabled analyses from shortest expected runtime to longest."""
         self._analysis_execution = []
         ran_any = False
         mc_n = max(1, int(monte_carlo_samples))
-        mc_max_precision = max(mc_n, int(np.ceil(1.30 * mc_n)))
+        mc_max_precision = max(400, mc_n, int(np.ceil(1.30 * mc_n)))
         # Keep a conservative minimum before CI-based stopping to avoid over-optimistic early stops.
         mc_min_precision = min(mc_max_precision, max(80, mc_n // 4))
         mc_batch = max(5, min(50, max(1, mc_n // 10)))
-
-        # Q1: Credible minimum-fuel solution (local optimum robustness).
-        ran_any |= self._run_if_enabled(
-            "randomized_multistart",
-            "Randomized multi-start robustness",
-            self.analyze_randomized_multistart
-        )
-        ran_any |= self._run_if_enabled("grid_independence", "Grid independence", self.analyze_grid_independence)
-        ran_any |= self._run_if_enabled(
-            "collocation_defect_audit",
-            "Collocation defect audit",
-            self.analyze_collocation_defect_audit
-        )
-        ran_any |= self._run_if_enabled(
-            "theoretical_efficiency",
-            "Theoretical efficiency",
-            self.analyze_theoretical_efficiency
-        )
-
-        # Q2: Numerical/statistical accuracy and uncertainty.
-        ran_any |= self._run_if_enabled("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance)
-        ran_any |= self._run_if_enabled(
-            "monte_carlo_precision_target",
-            "Monte Carlo precision target",
-            self.analyze_monte_carlo_precision_target,
-            min_samples=mc_min_precision,
-            max_samples=mc_max_precision,
-            batch_size=mc_batch
-        )
-        ran_any |= self._run_if_enabled(
-            "q2_uncertainty_budget",
-            "Q2 uncertainty budget",
-            self.analyze_q2_uncertainty_budget,
-            parameter_samples=max(30, min(60, mc_n // 6))
-        )
-
-        # Q3: Code correctness/reliability sanity checks.
-        ran_any |= self._run_if_enabled(
-            "smooth_integrator_benchmark",
-            "Smooth ODE integrator benchmark",
-            self.analyze_smooth_integrator_benchmark
-        )
-
-        # Q5/Q7: Cliff-edge behavior and conclusion evidence.
-        ran_any |= self._run_if_enabled(
-            "bifurcation_2d_map",
-            "Bifurcation 2D map",
-            self.analyze_bifurcation_2d_map
-        )
-
-        # Q3: End-to-end optimizer vs simulator consistency.
-        deep_dive_flags = [
-            "drift",
-        ]
-        if any(bool(getattr(self.test_toggles, name, True)) for name in deep_dive_flags):
-            print(f"\n{debug.Style.BOLD}--- Generating Baseline Solution for Deep Dive ---{debug.Style.RESET}")
-            opt_res = self._get_baseline_opt_res()
-            sim_res = None
-            if bool(getattr(self.test_toggles, "drift", True)):
-                sim_res = run_simulation(opt_res, self.veh, self.base_config)
-            ran_any |= self._run_if_enabled("drift", "Drift analysis", self.analyze_drift, opt_res, sim_res)
+        if max_workers is None:
+            worker_cap = min(4, max(1, os.cpu_count() or 1))
         else:
-            print("\n[Skip] All deep-dive tests are disabled in RELIABILITY_ANALYSIS_TOGGLES.")
+            worker_cap = max(1, int(max_workers))
 
-        # Q6/Q7: Limitations and conclusion synthesis.
-        ran_any |= self._run_if_enabled(
-            "model_limitations",
-            "Model limitations",
-            self.analyze_model_limitations
+        def _run_drift_with_cached_baseline():
+            opt_res = self._get_baseline_opt_res()
+            sim_res = run_simulation(opt_res, self.veh, self.base_config)
+            self.analyze_drift(opt_res, sim_res)
+
+        # Baseline-dependent analyses share one cached optimization result.
+        baseline_flags = (
+            "drift",
+            "theoretical_efficiency",
+            "integrator_tolerance",
+            "collocation_defect_audit",
+            "bifurcation_2d_map",
+            "monte_carlo_precision_target",
+            "q2_uncertainty_budget",
         )
+        if any(bool(getattr(self.test_toggles, name, True)) for name in baseline_flags):
+            print(f"\n{debug.Style.BOLD}--- Precomputing Shared Baseline Solution ---{debug.Style.RESET}")
+            self._get_baseline_opt_res()
+
+        # Runtime order based on observed execution cost (short -> long).
+        ordered_tests = [
+            ("model_limitations", "Model limitations", self.analyze_model_limitations, (), {}),
+            ("smooth_integrator_benchmark", "Smooth ODE integrator benchmark", self.analyze_smooth_integrator_benchmark, (), {}),
+            ("drift", "Drift analysis", _run_drift_with_cached_baseline, (), {}),
+            ("theoretical_efficiency", "Theoretical efficiency", self.analyze_theoretical_efficiency, (), {}),
+            ("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance, (), {}),
+            ("collocation_defect_audit", "Collocation defect audit", self.analyze_collocation_defect_audit, (), {"max_workers": worker_cap}),
+            ("grid_independence", "Grid independence", self.analyze_grid_independence, (), {"max_workers": worker_cap}),
+            ("bifurcation_2d_map", "Bifurcation 2D map", self.analyze_bifurcation_2d_map, (), {"max_workers": worker_cap}),
+            ("randomized_multistart", "Randomized multi-start robustness", self.analyze_randomized_multistart, (), {"max_workers": worker_cap}),
+            (
+                "monte_carlo_precision_target",
+                "Monte Carlo precision target",
+                self.analyze_monte_carlo_precision_target,
+                (),
+                {"min_samples": mc_min_precision, "max_samples": mc_max_precision, "batch_size": mc_batch, "max_workers": worker_cap},
+            ),
+            (
+                "q2_uncertainty_budget",
+                "Q2 uncertainty budget",
+                self.analyze_q2_uncertainty_budget,
+                (),
+                {"parameter_samples": max(30, min(60, mc_n // 6)), "max_workers": worker_cap},
+            ),
+        ]
+        total_steps = len(ordered_tests) + 1  # + synthesis step
+        for i, (flag, label, fn, args, kwargs) in enumerate(ordered_tests, start=1):
+            progress = f"{i}/{total_steps}"
+            ran_any |= self._run_if_enabled(flag, label, fn, *args, progress=progress, **kwargs)
+
+        # Keep synthesis last because it consumes outputs from earlier analyses.
         ran_any |= self._run_if_enabled(
             "q7_conclusion_support",
             "Q7 conclusion support",
-            self.analyze_q7_conclusion_support
+            self.analyze_q7_conclusion_support,
+            progress=f"{total_steps}/{total_steps}",
         )
 
         if not ran_any:
@@ -867,7 +1553,7 @@ class ReliabilitySuite:
         )
 
     # 1. GRID INDEPENDENCE STUDY
-    def analyze_grid_independence(self):
+    def analyze_grid_independence(self, max_workers=None):
         debug._print_sub_header("1. Grid Independence Study")
         # User limit: Max 140 nodes
         # Increased resolution for smoother convergence graph
@@ -875,36 +1561,74 @@ class ReliabilitySuite:
         masses = []
         runtimes = []
         success_flags = []
-        
+        if max_workers is None:
+            max_workers = min(4, max(1, os.cpu_count() or 1))
+        max_workers = max(1, int(max_workers))
+        jobs = [
+            {"num_nodes": int(N), "base_cfg": self.base_config, "base_env_cfg": self.base_env_config}
+            for N in node_counts
+        ]
+        job_results = {}
+
         print(f"{'Nodes':<6} | {'Final Mass (kg)':<15} | {'Runtime (s)':<10} | {'Status':<10}")
         print("-" * 50)
-        
-        for N in node_counts:
-            cfg = copy.deepcopy(self.base_config)
-            cfg.num_nodes = N
-            
-            t0 = time.time()
+
+        parallel_active = bool(max_workers > 1 and len(jobs) > 1)
+        if parallel_active:
+            print(f"  Parallel execution enabled (workers={max_workers}).")
             try:
-                with suppress_stdout():
-                    res = solve_optimal_trajectory(cfg, self.veh, self.env, print_level=0)
-                
-                if res.get("success", False):
-                    m_final = res['X3'][6, -1]
-                    status = "Converged"
-                    ok = True
-                else:
-                    m_final = np.nan
-                    status = "Failed"
-                    ok = False
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    fut_to_n = {executor.submit(_run_grid_independence_worker, payload): int(payload["num_nodes"]) for payload in jobs}
+                    parallel_ok = True
+                    for fut in as_completed(fut_to_n):
+                        n_key = fut_to_n[fut]
+                        try:
+                            job_results[n_key] = fut.result()
+                        except Exception:
+                            parallel_ok = False
+                            break
+                if not parallel_ok:
+                    print("  Worker failure during grid study; switching to serial mode.")
+                    parallel_active = False
+                    job_results = {}
             except Exception:
-                m_final = np.nan
-                status = "Failed"
-                ok = False
-            
-            dt = time.time() - t0
+                print("  Parallel execution unavailable; switching to serial mode.")
+                parallel_active = False
+                job_results = {}
+
+        if not parallel_active:
+            print("  Serial execution mode.")
+            for payload in jobs:
+                n_key = int(payload["num_nodes"])
+                try:
+                    job_results[n_key] = _run_grid_independence_worker(payload)
+                except Exception:
+                    job_results[n_key] = {
+                        "nodes": n_key,
+                        "solver_success": 0,
+                        "status": "Failed",
+                        "final_mass_kg": np.nan,
+                        "runtime_s": np.nan,
+                    }
+
+        for N in node_counts:
+            r = job_results.get(int(N), None)
+            if r is None:
+                r = {
+                    "nodes": int(N),
+                    "solver_success": 0,
+                    "status": "Failed",
+                    "final_mass_kg": np.nan,
+                    "runtime_s": np.nan,
+                }
+            m_final = float(r.get("final_mass_kg", np.nan))
+            dt = float(r.get("runtime_s", np.nan))
+            ok = int(r.get("solver_success", 0))
+            status = str(r.get("status", "Failed"))
+
             masses.append(m_final)
             runtimes.append(dt)
-            success_flags.append(int(ok))
+            success_flags.append(ok)
             print(f"{N:<6} | {m_final:<15.1f} | {dt:<10.2f} | {status:<10}")
 
         self._save_table(
@@ -953,7 +1677,18 @@ class ReliabilitySuite:
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc="best")
 
-        ax2.semilogy(valid_nodes, np.maximum(mass_err, 1e-12), "o-", color="tab:purple", label=f"|m(N)-m({ref_node})|")
+        # Omit the reference node itself from error plotting (its error is exactly zero by construction).
+        err_mask = np.arange(len(valid_nodes)) != (len(valid_nodes) - 1)
+        if np.any(err_mask):
+            ax2.semilogy(
+                valid_nodes[err_mask],
+                np.maximum(mass_err[err_mask], 1e-12),
+                "o-",
+                color="tab:purple",
+                label=f"|m(N)-m({ref_node})|",
+            )
+        else:
+            ax2.text(0.5, 0.5, "Insufficient points for error curve", transform=ax2.transAxes, ha="center", va="center")
         ax2.axhline(100.0, color="tab:orange", linestyle="--", alpha=0.8, label="Criterion (100 kg)")
         ax2.set_ylabel("Mass Error (kg)")
         ax2.grid(True, which="both", alpha=0.3)
@@ -1102,37 +1837,49 @@ class ReliabilitySuite:
         plt.legend(loc="best")
         self._finalize_figure(fig, "integrator_tolerance_convergence")
 
-    def analyze_randomized_multistart(self, n_trials=8):
+    def analyze_randomized_multistart(self, n_trials=8, max_workers=None):
         debug._print_sub_header("Randomized Multi-Start Robustness")
         n_use = max(4, int(n_trials))
         rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        if max_workers is None:
+            max_workers = min(4, max(1, os.cpu_count() or 1))
+        max_workers = max(1, int(max_workers))
 
         rows = []
-        masses = []
+        solver_success_flags = []
+        mission_success_flags = []
+        masses_scored = []
         runtimes = []
-        success_flags = []
         labels = []
+        trial_results = {}
 
         print(
             f"{'Trial':<7} | {'Guess':<8} | {'Time x':<8} | {'Pos %':<7} | {'Vel %':<7} | "
-            f"{'Mass %':<8} | {'Throt %':<8} | {'Dir (deg)':<10} | {'Status':<10} | "
+            f"{'Mass %':<8} | {'Throt %':<8} | {'Dir (deg)':<10} | {'Solve':<5} | {'Mission':<7} | {'Status':<12} | "
             f"{'Final Mass (kg)':<15} | {'Runtime (s)':<10}"
         )
-        print("-" * 141)
+        print("-" * 166)
 
+        # Guidance warm start is deterministic for the nominal configuration; compute once.
+        guidance_guess = None
+        try:
+            cfg_g = copy.deepcopy(self.base_config)
+            env_cfg_g = copy.deepcopy(self.base_env_config)
+            env_g = Environment(env_cfg_g)
+            veh_g = Vehicle(cfg_g, env_g)
+            with suppress_stdout():
+                guidance_guess = guidance.get_initial_guess(cfg_g, veh_g, env_g, num_nodes=cfg_g.num_nodes)
+        except Exception:
+            guidance_guess = None
+
+        trial_jobs = []
         for i in range(n_use):
             cfg = copy.deepcopy(self.base_config)
             env_cfg = copy.deepcopy(self.base_env_config)
-            env_i = Environment(env_cfg)
-            veh_i = Vehicle(cfg, env_i)
-
-            with suppress_stdout():
-                base_guess = guidance.get_initial_guess(cfg, veh_i, env_i, num_nodes=cfg.num_nodes)
 
             if i == 0:
                 # Always include nominal guidance warm start as deterministic anchor.
                 label = "nominal"
-                guess_i = copy.deepcopy(base_guess)
                 params = {
                     "time_scale": 1.0,
                     "pos_sigma": 0.0,
@@ -1143,60 +1890,221 @@ class ReliabilitySuite:
                 }
             else:
                 label = f"rand_{i:02d}"
-                guess_i, params = self._build_randomized_initial_guess(base_guess, cfg, rng)
+                params = {
+                    "time_scale": np.nan,
+                    "pos_sigma": np.nan,
+                    "vel_sigma": np.nan,
+                    "mass_sigma": np.nan,
+                    "throttle_sigma": np.nan,
+                    "direction_sigma_deg": np.nan,
+                }
 
-            t0 = time.time()
+            if guidance_guess is None:
+                trial_results[i] = {
+                    "trial_index": i,
+                    "label": label,
+                    "params": params,
+                    "solver_success": 0,
+                    "mission_success": 0,
+                    "terminal_strict_success": 0,
+                    "path_ok": 0,
+                    "q_ok": 0,
+                    "g_ok": 0,
+                    "status": "GUESS_FAIL",
+                    "final_mass_kg": np.nan,
+                    "runtime_s": 0.0,
+                }
+                continue
+
             try:
-                with suppress_stdout():
-                    res = solve_optimal_trajectory(
-                        cfg,
-                        veh_i,
-                        env_i,
-                        print_level=0,
-                        initial_guess_override=guess_i
-                    )
-                ok = bool(res.get("success", False))
-                m_final = float(res["X3"][6, -1]) if ok else np.nan
+                if i == 0:
+                    guess_i = copy.deepcopy(guidance_guess)
+                else:
+                    guess_i, params = self._build_randomized_initial_guess(guidance_guess, cfg, rng)
             except Exception:
-                ok = False
-                m_final = np.nan
-            dt = time.time() - t0
+                trial_results[i] = {
+                    "trial_index": i,
+                    "label": label,
+                    "params": params,
+                    "solver_success": 0,
+                    "mission_success": 0,
+                    "terminal_strict_success": 0,
+                    "path_ok": 0,
+                    "q_ok": 0,
+                    "g_ok": 0,
+                    "status": "PERTURB",
+                    "final_mass_kg": np.nan,
+                    "runtime_s": 0.0,
+                }
+                continue
+
+            trial_jobs.append(
+                {
+                    "trial_index": i,
+                    "label": label,
+                    "params": params,
+                    "cfg": cfg,
+                    "env_cfg": env_cfg,
+                    "guess": guess_i,
+                    "q_slack_pa": float(self.path_q_slack_pa),
+                    "g_slack": float(self.path_g_slack),
+                }
+            )
+
+        parallel_active = bool(max_workers > 1 and len(trial_jobs) > 1)
+        if parallel_active:
+            print(f"  Parallel execution enabled (workers={max_workers}).")
+            try:
+                failed_trial_payloads = []
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    idx_to_payload = {int(payload["trial_index"]): payload for payload in trial_jobs}
+                    fut_to_idx = {
+                        executor.submit(_run_multistart_trial_worker, payload): int(payload["trial_index"])
+                        for payload in trial_jobs
+                    }
+                    for fut in as_completed(fut_to_idx):
+                        idx = fut_to_idx[fut]
+                        payload = idx_to_payload[idx]
+                        try:
+                            trial_results[idx] = fut.result()
+                        except Exception:
+                            failed_trial_payloads.append(payload)
+                if len(failed_trial_payloads) > 0:
+                    print(f"  Retrying {len(failed_trial_payloads)} failed worker trial(s) in serial mode.")
+                    for payload in failed_trial_payloads:
+                        idx = int(payload["trial_index"])
+                        try:
+                            trial_results[idx] = _run_multistart_trial_worker(payload)
+                        except Exception:
+                            trial_results[idx] = {
+                                "trial_index": idx,
+                                "label": payload["label"],
+                                "params": payload["params"],
+                                "solver_success": 0,
+                                "mission_success": 0,
+                                "terminal_strict_success": 0,
+                                "path_ok": 0,
+                                "q_ok": 0,
+                                "g_ok": 0,
+                                "status": "WORKER_ERR",
+                                "final_mass_kg": np.nan,
+                                "runtime_s": np.nan,
+                            }
+            except Exception:
+                print("  Parallel execution unavailable; falling back to serial trial evaluation.")
+                parallel_active = False
+
+        if not parallel_active:
+            print("  Serial execution mode.")
+            for payload in trial_jobs:
+                idx = int(payload["trial_index"])
+                try:
+                    trial_results[idx] = _run_multistart_trial_worker(payload)
+                except Exception:
+                    trial_results[idx] = {
+                        "trial_index": idx,
+                        "label": payload["label"],
+                        "params": payload["params"],
+                        "solver_success": 0,
+                        "mission_success": 0,
+                        "terminal_strict_success": 0,
+                        "path_ok": 0,
+                        "q_ok": 0,
+                        "g_ok": 0,
+                        "status": "WORKER_ERR",
+                        "final_mass_kg": np.nan,
+                        "runtime_s": np.nan,
+                    }
+
+        for i in range(n_use):
+            r = trial_results.get(i, None)
+            if r is None:
+                # Defensive fallback to preserve table shape on unexpected edge cases.
+                r = {
+                    "trial_index": i,
+                    "label": f"rand_{i:02d}" if i > 0 else "nominal",
+                    "params": {
+                        "time_scale": np.nan,
+                        "pos_sigma": np.nan,
+                        "vel_sigma": np.nan,
+                        "mass_sigma": np.nan,
+                        "throttle_sigma": np.nan,
+                        "direction_sigma_deg": np.nan,
+                    },
+                    "solver_success": 0,
+                    "mission_success": 0,
+                    "terminal_strict_success": 0,
+                    "path_ok": 0,
+                    "q_ok": 0,
+                    "g_ok": 0,
+                    "status": "INTERNAL_ERR",
+                    "final_mass_kg": np.nan,
+                    "runtime_s": np.nan,
+                }
+
+            params = r["params"]
+            m_final = float(r["final_mass_kg"]) if np.isfinite(r["final_mass_kg"]) else np.nan
+            solver_ok = int(r["solver_success"])
+            mission_ok = int(r["mission_success"])
+            terminal_strict_ok = int(r["terminal_strict_success"])
+            path_ok = int(r["path_ok"])
+            q_ok = int(r["q_ok"])
+            g_ok = int(r["g_ok"])
+            status = str(r["status"])
+            dt = float(r["runtime_s"]) if np.isfinite(r["runtime_s"]) else np.nan
+            label = str(r["label"])
 
             labels.append(label)
-            masses.append(m_final)
+            masses_scored.append(m_final if mission_ok and np.isfinite(m_final) else np.nan)
             runtimes.append(dt)
-            success_flags.append(int(ok))
+            solver_success_flags.append(solver_ok)
+            mission_success_flags.append(mission_ok)
 
-            status = "Converged" if ok else "Failed"
-            rows.append((
-                i + 1, label, params["time_scale"],
-                params["pos_sigma"], params["vel_sigma"], params["mass_sigma"],
-                params["throttle_sigma"], params["direction_sigma_deg"],
-                int(ok), m_final, dt
-            ))
+            rows.append({
+                "trial": i + 1,
+                "label": label,
+                "time_scale": params["time_scale"],
+                "position_noise_sigma": params["pos_sigma"],
+                "velocity_noise_sigma": params["vel_sigma"],
+                "mass_noise_sigma": params["mass_sigma"],
+                "throttle_noise_sigma": params["throttle_sigma"],
+                "direction_noise_sigma_deg": params["direction_sigma_deg"],
+                "solver_success": solver_ok,
+                "mission_success": mission_ok,
+                "terminal_strict_success": terminal_strict_ok,
+                "path_ok": path_ok,
+                "q_ok": q_ok,
+                "g_ok": g_ok,
+                "status": status,
+                "final_mass_kg": m_final,
+                "runtime_s": dt,
+            })
             print(
                 f"{i+1:<7} | {label:<8} | {params['time_scale']:<8.3f} | "
                 f"{100.0 * params['pos_sigma']:<7.2f} | {100.0 * params['vel_sigma']:<7.2f} | "
                 f"{100.0 * params['mass_sigma']:<8.2f} | {100.0 * params['throttle_sigma']:<8.2f} | "
-                f"{params['direction_sigma_deg']:<10.2f} | {status:<10} | {m_final:<15.2f} | {dt:<10.2f}"
+                f"{params['direction_sigma_deg']:<10.2f} | {solver_ok:<5d} | {mission_ok:<7d} | "
+                f"{status:<12} | {m_final:<15.2f} | {dt:<10.2f}"
             )
 
-        success_rate = float(np.mean(success_flags)) if len(success_flags) > 0 else 0.0
-        valid_masses = np.array([m for m in masses if np.isfinite(m)], dtype=float)
+        solver_rate = float(np.mean(solver_success_flags)) if len(solver_success_flags) > 0 else 0.0
+        success_rate = float(np.mean(mission_success_flags)) if len(mission_success_flags) > 0 else 0.0
+        valid_masses = np.array([m for m in masses_scored if np.isfinite(m)], dtype=float)
         if len(valid_masses) > 0:
             best_mass = float(np.max(valid_masses))
-            mass_gap_kg = [(best_mass - m) if np.isfinite(m) else np.nan for m in masses]
+            mass_gap_kg = [(best_mass - m) if np.isfinite(m) else np.nan for m in masses_scored]
         else:
             best_mass = np.nan
-            mass_gap_kg = [np.nan for _ in masses]
+            mass_gap_kg = [np.nan for _ in masses_scored]
 
         mass_spread = float(np.max(valid_masses) - np.min(valid_masses)) if len(valid_masses) > 1 else np.nan
 
-        print(f"\nSuccess rate: {success_rate:.1%}")
+        print(f"\nSolver convergence rate: {solver_rate:.1%}")
+        print(f"Strict mission success rate: {success_rate:.1%}")
         if np.isfinite(best_mass):
-            print(f"Best final mass among converged runs: {best_mass:.3f} kg")
+            print(f"Best final mass among mission-valid runs: {best_mass:.3f} kg")
         if np.isfinite(mass_spread):
-            print(f"Final-mass spread across converged runs: {mass_spread:.3f} kg")
+            print(f"Final-mass spread across mission-valid runs: {mass_spread:.3f} kg")
         if success_rate >= 0.8 and (not np.isfinite(mass_spread) or mass_spread < 300.0):
             print(f">>> {debug.Style.GREEN}PASS: Multi-start test supports robust local optimum.{debug.Style.RESET}")
         else:
@@ -1205,16 +2113,21 @@ class ReliabilitySuite:
         self._save_table(
             "randomized_multistart",
             [
-                "trial", "label", "time_scale",
-                "position_noise_sigma", "velocity_noise_sigma", "mass_noise_sigma",
-                "throttle_noise_sigma", "direction_noise_sigma_deg",
-                "solver_success", "final_mass_kg", "final_mass_gap_to_best_kg", "runtime_s"
+                "trial", "label", "time_scale", "position_noise_sigma", "velocity_noise_sigma",
+                "mass_noise_sigma", "throttle_noise_sigma", "direction_noise_sigma_deg",
+                "solver_success", "mission_success", "terminal_strict_success",
+                "path_ok", "q_ok", "g_ok", "status",
+                "final_mass_kg", "final_mass_scored_kg", "final_mass_gap_to_best_kg", "runtime_s"
             ],
             [
                 (
-                    rows[i][0], rows[i][1], rows[i][2],
-                    rows[i][3], rows[i][4], rows[i][5], rows[i][6], rows[i][7],
-                    rows[i][8], rows[i][9], mass_gap_kg[i], rows[i][10]
+                    rows[i]["trial"], rows[i]["label"], rows[i]["time_scale"],
+                    rows[i]["position_noise_sigma"], rows[i]["velocity_noise_sigma"],
+                    rows[i]["mass_noise_sigma"], rows[i]["throttle_noise_sigma"],
+                    rows[i]["direction_noise_sigma_deg"], rows[i]["solver_success"],
+                    rows[i]["mission_success"], rows[i]["terminal_strict_success"],
+                    rows[i]["path_ok"], rows[i]["q_ok"], rows[i]["g_ok"], rows[i]["status"],
+                    rows[i]["final_mass_kg"], masses_scored[i], mass_gap_kg[i], rows[i]["runtime_s"]
                 )
                 for i in range(len(rows))
             ]
@@ -1225,13 +2138,22 @@ class ReliabilitySuite:
             3, 1, figsize=(11, 9), sharex=True, gridspec_kw={"height_ratios": [0.9, 1.2, 1.0]}
         )
 
-        ax1.bar(x, success_flags, color=["tab:green" if s else "tab:red" for s in success_flags], alpha=0.7)
+        ax1.bar(x, mission_success_flags, color=["tab:green" if s else "tab:red" for s in mission_success_flags], alpha=0.7)
+        # Explicit markers make failed trials visible even when bar height is zero.
+        success_idx_top = [i for i, s in enumerate(mission_success_flags) if s]
+        fail_idx_top = [i for i, s in enumerate(mission_success_flags) if not s]
+        if len(success_idx_top) > 0:
+            ax1.scatter(success_idx_top, [1.0] * len(success_idx_top), s=20, c="tab:green", marker="o", label="Mission OK")
+        if len(fail_idx_top) > 0:
+            ax1.scatter(fail_idx_top, [0.03] * len(fail_idx_top), s=40, c="tab:red", marker="x", label="Failed")
         ax1.set_ylim(-0.05, 1.15)
-        ax1.set_ylabel("Success (0/1)")
+        ax1.set_ylabel("Mission Success (0/1)")
         ax1.set_title("Randomized Multi-Start Robustness")
         ax1.grid(True, axis="y", alpha=0.3)
+        if len(success_idx_top) > 0 or len(fail_idx_top) > 0:
+            ax1.legend(loc="upper right")
 
-        success_idx = [i for i, m in enumerate(masses) if np.isfinite(m)]
+        success_idx = [i for i, m in enumerate(masses_scored) if np.isfinite(m)]
         if len(success_idx) > 0:
             ax2.plot(
                 success_idx,
@@ -1241,7 +2163,7 @@ class ReliabilitySuite:
                 label="Fuel gap to best"
             )
             ax2.axhline(0.0, color="tab:blue", linestyle="--", alpha=0.6, label="Best run")
-        fail_idx = [i for i, ok in enumerate(success_flags) if not ok]
+        fail_idx = [i for i, ok in enumerate(mission_success_flags) if not ok]
         if len(fail_idx) > 0:
             ax2.scatter(fail_idx, [0.0] * len(fail_idx), marker="x", color="tab:red", label="Failed")
         ax2.set_ylabel("Gap to Best (kg)")
@@ -1259,7 +2181,8 @@ class ReliabilitySuite:
 
         summary = (
             f"Trials: {n_use}\n"
-            f"Success: {success_rate:.1%}\n"
+            f"Solver: {solver_rate:.1%}\n"
+            f"Mission: {success_rate:.1%}\n"
             + (f"Mass spread: {mass_spread:.3f} kg" if np.isfinite(mass_spread) else "Mass spread: n/a")
         )
         ax2.text(
@@ -1273,58 +2196,96 @@ class ReliabilitySuite:
         )
         self._finalize_figure(fig, "randomized_multistart")
 
-    def analyze_collocation_defect_audit(self):
+    def analyze_collocation_defect_audit(self, max_workers=None):
         debug._print_sub_header("Collocation Defect Audit")
         opt_res = self._get_baseline_opt_res()
+        if max_workers is None:
+            max_workers = min(3, max(1, os.cpu_count() or 1))
+        max_workers = max(1, int(max_workers))
 
-        def phase_defects(X, U, T, t_start, stage_mode):
-            if U is None:
-                N_loc = X.shape[1] - 1
-            else:
-                N_loc = U.shape[1]
-            dt = T / max(N_loc, 1)
-            pos_def = np.zeros(N_loc)
-            vel_def = np.zeros(N_loc)
-            mass_def = np.zeros(N_loc)
-            rel_state_max = np.zeros(N_loc)
-            for k in range(N_loc):
-                xk = X[:, k]
-                if U is None:
-                    throttle = 0.0
-                    u_dir = np.array([1.0, 0.0, 0.0])
-                else:
-                    uk = U[:, k]
-                    throttle = float(uk[0])
-                    u_dir = uk[1:]
-                tk = float(t_start + k * dt)
-
-                def dyn(x, t):
-                    return self.veh.get_dynamics(x, throttle, u_dir, t, stage_mode=stage_mode, scaling=None)
-
-                k1 = dyn(xk, tk)
-                k2 = dyn(xk + 0.5 * dt * k1, tk + 0.5 * dt)
-                k3 = dyn(xk + 0.5 * dt * k2, tk + 0.5 * dt)
-                k4 = dyn(xk + dt * k3, tk + dt)
-                x_pred = xk + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-                defect = X[:, k + 1] - x_pred
-                denom = np.maximum(np.abs(X[:, k + 1]), 1.0)
-                pos_def[k] = float(np.linalg.norm(defect[0:3]))
-                vel_def[k] = float(np.linalg.norm(defect[3:6]))
-                mass_def[k] = float(abs(defect[6]))
-                rel_state_max[k] = float(np.max(np.abs(defect) / denom))
-            return pos_def, vel_def, mass_def, rel_state_max
-
-        phase_series = []
-        pos1, vel1, m1, rel1 = phase_defects(opt_res["X1"], opt_res["U1"], opt_res["T1"], 0.0, "boost")
-        phase_series.append(("boost", pos1, vel1, m1, rel1))
-
+        phase_jobs = [
+            {
+                "phase_name": "boost",
+                "X": opt_res["X1"],
+                "U": opt_res["U1"],
+                "T": float(opt_res["T1"]),
+                "t_start": 0.0,
+                "stage_mode": "boost",
+                "cfg": self.base_config,
+                "env_cfg": self.base_env_config,
+            }
+        ]
         t_phase3 = float(opt_res["T1"] + opt_res.get("T2", 0.0))
         if opt_res.get("T2", 0.0) > 1e-8 and "X2" in opt_res:
-            pos2, vel2, m2, rel2 = phase_defects(opt_res["X2"], None, opt_res["T2"], float(opt_res["T1"]), "coast")
-            phase_series.append(("coast", pos2, vel2, m2, rel2))
+            phase_jobs.append(
+                {
+                    "phase_name": "coast",
+                    "X": opt_res["X2"],
+                    "U": None,
+                    "T": float(opt_res["T2"]),
+                    "t_start": float(opt_res["T1"]),
+                    "stage_mode": "coast",
+                    "cfg": self.base_config,
+                    "env_cfg": self.base_env_config,
+                }
+            )
+        phase_jobs.append(
+            {
+                "phase_name": "ship",
+                "X": opt_res["X3"],
+                "U": opt_res["U3"],
+                "T": float(opt_res["T3"]),
+                "t_start": t_phase3,
+                "stage_mode": "ship",
+                "cfg": self.base_config,
+                "env_cfg": self.base_env_config,
+            }
+        )
 
-        pos3, vel3, m3, rel3 = phase_defects(opt_res["X3"], opt_res["U3"], opt_res["T3"], t_phase3, "ship")
-        phase_series.append(("ship", pos3, vel3, m3, rel3))
+        phase_results = {}
+        parallel_active = bool(max_workers > 1 and len(phase_jobs) > 1)
+        if parallel_active:
+            print(f"  Parallel execution enabled (workers={max_workers}).")
+            try:
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    fut_to_name = {
+                        executor.submit(_run_collocation_phase_defects_worker, payload): str(payload["phase_name"])
+                        for payload in phase_jobs
+                    }
+                    parallel_ok = True
+                    for fut in as_completed(fut_to_name):
+                        key = fut_to_name[fut]
+                        try:
+                            phase_results[key] = fut.result()
+                        except Exception:
+                            parallel_ok = False
+                            break
+                if not parallel_ok:
+                    print("  Worker failure during collocation audit; switching to serial mode.")
+                    parallel_active = False
+                    phase_results = {}
+            except Exception:
+                print("  Parallel execution unavailable; switching to serial mode.")
+                parallel_active = False
+                phase_results = {}
+
+        if not parallel_active:
+            print("  Serial execution mode.")
+            for payload in phase_jobs:
+                key = str(payload["phase_name"])
+                phase_results[key] = _run_collocation_phase_defects_worker(payload)
+
+        phase_series = []
+        for payload in phase_jobs:
+            key = str(payload["phase_name"])
+            r = phase_results.get(key, None)
+            if r is None:
+                continue
+            pos_s = np.asarray(r.get("position_defect", []), dtype=float)
+            vel_s = np.asarray(r.get("velocity_defect", []), dtype=float)
+            mass_s = np.asarray(r.get("mass_defect", []), dtype=float)
+            rel_s = np.asarray(r.get("relative_defect", []), dtype=float)
+            phase_series.append((key, pos_s, vel_s, mass_s, rel_s))
 
         max_pos = float(max(np.max(s[1]) for s in phase_series))
         max_vel = float(max(np.max(s[2]) for s in phase_series))
@@ -1540,6 +2501,182 @@ class ReliabilitySuite:
             "pass_flag": drift["pass_flag"],
         }
 
+    # 14. THEORETICAL EFFICIENCY
+    def analyze_theoretical_efficiency(self):
+        debug._print_sub_header("14. Theoretical Efficiency (Hohmann Comparison)")
+
+        # 1. Get Simulation Data
+        opt_res = self._get_baseline_opt_res()
+        with suppress_stdout():
+            sim_res = run_simulation(opt_res, self.veh, self.base_config)
+
+        terminal_metrics = evaluate_terminal_state(sim_res, self.base_config, self.base_env_config)
+        traj_diag = self._trajectory_diagnostics(sim_res, self.veh, self.base_config)
+        path_diag = self._evaluate_path_compliance(traj_diag, self.base_config)
+        terminal_strict_ok = bool(terminal_metrics.get("strict_ok", False))
+        mission_success = bool(self._is_strict_path_success(terminal_metrics, traj_diag, self.base_config))
+        if not terminal_metrics["terminal_valid"]:
+            print("  Cannot evaluate efficiency: simulation produced invalid terminal state.")
+            return
+
+        # 2. Calculate Actual Delta-V (Integrated)
+        t, y, u = sim_res["t"], sim_res["y"], sim_res["u"]
+        dv_actual = 0.0
+        for i in range(len(t) - 1):
+            dt = t[i + 1] - t[i]
+            m, th = y[6, i], u[0, i]
+            if th > 0.01:
+                m_stg2_wet = (
+                    self.base_config.stage_2.dry_mass
+                    + self.base_config.stage_2.propellant_mass
+                    + self.base_config.payload_mass
+                )
+                stg = self.base_config.stage_1 if m > m_stg2_wet + 1000 else self.base_config.stage_2
+                r = y[0:3, i]
+                env_state = self.env.get_state_sim(r, t[i])
+                isp_eff = stg.isp_vac + (env_state["pressure"] / stg.p_sl) * (stg.isp_sl - stg.isp_vac)
+                thrust = th * stg.thrust_vac * (isp_eff / stg.isp_vac)
+                dv_actual += (thrust / m) * dt
+
+        if dv_actual < 1.0:
+            print("  Simulation failed to generate Delta-V (Crash or no burn).")
+            return
+
+        # 3. Calculate Theoretical Minimum (Hohmann-like)
+        mu = self.env.config.earth_mu
+        R1 = self.env.config.earth_radius_equator
+        R2 = R1 + self.base_config.target_altitude
+        lat = self.base_env_config.launch_latitude
+        v_surf = self.env.config.earth_omega_vector[2] * R1 * np.cos(np.radians(lat))
+
+        a_tx = (R1 + R2) / 2.0
+        v_peri_tx = np.sqrt(mu * (2 / R1 - 1 / a_tx))
+        v_apo_tx = np.sqrt(mu * (2 / R2 - 1 / a_tx))
+        v_circ_2 = np.sqrt(mu / R2)
+
+        dv_burn1 = v_peri_tx - v_surf
+        dv_burn2 = v_circ_2 - v_apo_tx
+        dv_theoretical = dv_burn1 + dv_burn2
+
+        efficiency = (dv_theoretical / dv_actual) * 100.0
+
+        print(f"  Theoretical Min Delta-V (Hohmann): {dv_theoretical:.1f} m/s")
+        print(f"    - Burn 1 (Surf -> Transfer):     {dv_burn1:.1f} m/s")
+        print(f"    - Burn 2 (Circularization):      {dv_burn2:.1f} m/s")
+        print(f"  Actual Delta-V (Simulation):       {dv_actual:.1f} m/s")
+        print(f"  Gravity/Drag/Steering Losses:      {dv_actual - dv_theoretical:.1f} m/s")
+        print(f"  Mission Efficiency:                {efficiency:.1f}%")
+        if terminal_strict_ok and not mission_success:
+            print(
+                "  Terminal target met but path constraints were violated "
+                f"(q_ok={int(path_diag['q_ok'])}, g_ok={int(path_diag['g_ok'])})."
+            )
+        if not mission_success:
+            print(
+                f">>> {debug.Style.YELLOW}NOTE: Strict mission criteria (terminal + path) were not met; "
+                f"efficiency is diagnostic only.{debug.Style.RESET}"
+            )
+
+        self._save_table(
+            "theoretical_efficiency",
+            [
+                "mission_success_strict_path",
+                "terminal_strict_success",
+                "q_ok",
+                "g_ok",
+                "dv_theoretical_m_s",
+                "dv_actual_m_s",
+                "losses_m_s",
+                "efficiency_percent",
+            ],
+            [
+                (
+                    int(mission_success),
+                    int(terminal_strict_ok),
+                    int(path_diag["q_ok"]),
+                    int(path_diag["g_ok"]),
+                    dv_theoretical,
+                    dv_actual,
+                    dv_actual - dv_theoretical,
+                    efficiency,
+                )
+            ],
+        )
+        losses = dv_actual - dv_theoretical
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+
+        # Left: direct Delta-V comparison.
+        bar_labels = ["Theoretical Min", "Actual Trajectory"]
+        bar_vals = [dv_theoretical, dv_actual]
+        bar_colors = ["tab:blue", "tab:green"]
+        bars = ax1.bar(bar_labels, bar_vals, color=bar_colors, alpha=0.8)
+        for bar, val in zip(bars, bar_vals):
+            ax1.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                val + 0.015 * max(bar_vals),
+                f"{val:.0f} m/s",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+        delta_sign = "+" if losses >= 0.0 else "-"
+        ax1.annotate(
+            f"{delta_sign}{abs(losses):.0f} m/s",
+            xy=(1, dv_actual),
+            xytext=(0.48, 0.92),
+            textcoords="axes fraction",
+            arrowprops=dict(arrowstyle="->", color="0.25"),
+            ha="center",
+            va="center",
+            fontsize=10,
+        )
+        ax1.set_ylabel("Delta-V (m/s)")
+        ax1.set_title("Delta-V Budget Comparison")
+        ax1.grid(True, axis="y", alpha=0.3)
+
+        # Right: efficiency summary with report threshold.
+        eff_color = "tab:green" if efficiency >= 85.0 else "tab:orange"
+        x_max = max(100.0, efficiency + 8.0)
+        ax2.barh(["Mission Efficiency"], [efficiency], color=eff_color, alpha=0.85)
+        ax2.axvline(85.0, color="tab:orange", linestyle="--", alpha=0.8, label="85% reference")
+        ax2.set_xlim(0.0, x_max)
+        ax2.set_xlabel("Efficiency (%)")
+        ax2.set_title("Efficiency Summary")
+        ax2.grid(True, axis="x", alpha=0.3)
+        ax2.legend(loc="lower right")
+        ax2.text(
+            efficiency + 1.0,
+            0,
+            f"{efficiency:.1f}%",
+            va="center",
+            ha="left",
+            fontsize=10,
+            color=eff_color,
+        )
+        ax2.text(
+            0.03,
+            0.95,
+            (
+                f"Burn 1: {dv_burn1:.0f} m/s\n"
+                f"Burn 2: {dv_burn2:.0f} m/s\n"
+                f"Losses: {losses:.0f} m/s"
+            ),
+            transform=ax2.transAxes,
+            va="top",
+            ha="left",
+            bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.7"),
+        )
+
+        fig.suptitle("Theoretical Efficiency (Hohmann Reference vs Simulated Trajectory)")
+        self._finalize_figure(fig, "theoretical_efficiency")
+
+        if mission_success and efficiency > 85.0:
+            print(f">>> {debug.Style.GREEN}PASS: High efficiency (>85%). Trajectory is near-optimal.{debug.Style.RESET}")
+        elif mission_success:
+            print(f">>> {debug.Style.YELLOW}NOTE: Efficiency is {efficiency:.1f}%. Losses are significant.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}NOTE: Skip pass/fail efficiency grading because mission was off-target.{debug.Style.RESET}")
+
     # 15. SMOOTH ODE BENCHMARK (FORMAL ORDER CHECK)
     def analyze_smooth_integrator_benchmark(self):
         debug._print_sub_header("15. Smooth ODE Benchmark (Formal Integrator Order)")
@@ -1653,8 +2790,9 @@ class ReliabilitySuite:
         target_half_width=0.04,
         target_relative_half_width=0.60,
         min_samples=80,
-        max_samples=300,
-        batch_size=20
+        max_samples=400,
+        batch_size=20,
+        max_workers=None,
     ):
         debug._print_sub_header("17. Monte Carlo Precision Target (CI-Based Stop)")
         print("Running Monte Carlo until Wilson 95% CI half-width reaches target precision.")
@@ -1665,56 +2803,180 @@ class ReliabilitySuite:
 
         opt_res = self._get_baseline_opt_res()
         rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
+        if max_workers is None:
+            max_workers = min(4, max(1, os.cpu_count() or 1))
+        max_workers = max(1, int(max_workers))
+
         successes = 0
         path_failures = 0
+        orbit_errors_all = []
+        mission_flags_all = []
         n = 0
         batch_rows = []
         stop_reason = "max_samples"
         t0 = time.time()
+        parallel_active = bool(max_workers > 1 and batch_size > 1)
+        executor = None
+        if parallel_active:
+            try:
+                executor = ProcessPoolExecutor(max_workers=max_workers)
+                print(f"  Parallel execution enabled (workers={max_workers}).")
+            except Exception:
+                parallel_active = False
+                executor = None
+                print("  Parallel execution unavailable; using serial mode.")
+        if not parallel_active:
+            print("  Serial execution mode.")
 
-        while n < max_samples:
-            n_batch = min(batch_size, max_samples - n)
-            for _ in range(n_batch):
-                thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
-                result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
-                successes += int(result["strict_path_ok"])
-                path_failures += int(
-                    bool(result["terminal"].get("strict_ok", False)) and not bool(result["strict_path_ok"])
+        try:
+            while n < max_samples:
+                n_batch = min(batch_size, max_samples - n)
+                draws = [
+                    self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
+                    for _ in range(n_batch)
+                ]
+                batch_successes = 0
+                batch_path_failures = 0
+
+                if parallel_active and executor is not None:
+                    n_chunks = min(max_workers, n_batch)
+                    chunk_size = int(np.ceil(n_batch / max(n_chunks, 1)))
+                    futures = []
+                    for i0 in range(0, n_batch, chunk_size):
+                        chunk = draws[i0:i0 + chunk_size]
+                        payload = {
+                            "opt_res": opt_res,
+                            "base_cfg": self.base_config,
+                            "base_env_cfg": self.base_env_config,
+                            "q_slack_pa": float(self.path_q_slack_pa),
+                            "g_slack": float(self.path_g_slack),
+                            "samples": chunk,
+                        }
+                        futures.append(executor.submit(_run_monte_carlo_batch_worker, payload))
+
+                    parallel_ok = True
+                    parallel_successes = 0
+                    parallel_path_failures = 0
+                    parallel_orbit_errors = []
+                    parallel_mission_flags = []
+                    for fut in as_completed(futures):
+                        try:
+                            res = fut.result()
+                            parallel_successes += int(res.get("successes", 0))
+                            parallel_path_failures += int(res.get("path_failures", 0))
+                            batch_orbit_errors = res.get("orbit_errors", [])
+                            batch_mission_flags = res.get("mission_flags", [])
+                            parallel_orbit_errors.extend([float(v) if np.isfinite(v) else np.nan for v in batch_orbit_errors])
+                            parallel_mission_flags.extend([int(v) for v in batch_mission_flags])
+                        except Exception:
+                            parallel_ok = False
+                            break
+
+                    if not parallel_ok:
+                        print("  Worker failure during Monte Carlo batch; switching to serial mode.")
+                        parallel_active = False
+                        if executor is not None:
+                            executor.shutdown(wait=True)
+                            executor = None
+                        batch_successes = 0
+                        batch_path_failures = 0
+                        for thrust_mult, isp_mult, dens_mult in draws:
+                            result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
+                            batch_successes += int(result["strict_path_ok"])
+                            batch_path_failures += int(
+                                bool(result["terminal"].get("strict_ok", False)) and not bool(result["strict_path_ok"])
+                            )
+                            orbit_err = normalized_orbit_error(result["terminal"])
+                            orbit_errors_all.append(float(orbit_err) if np.isfinite(orbit_err) else np.nan)
+                            mission_flags_all.append(int(result["strict_path_ok"]))
+                    else:
+                        batch_successes = parallel_successes
+                        batch_path_failures = parallel_path_failures
+                        orbit_errors_all.extend(parallel_orbit_errors)
+                        mission_flags_all.extend(parallel_mission_flags)
+                else:
+                    for thrust_mult, isp_mult, dens_mult in draws:
+                        result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
+                        batch_successes += int(result["strict_path_ok"])
+                        batch_path_failures += int(
+                            bool(result["terminal"].get("strict_ok", False)) and not bool(result["strict_path_ok"])
+                        )
+                        orbit_err = normalized_orbit_error(result["terminal"])
+                        orbit_errors_all.append(float(orbit_err) if np.isfinite(orbit_err) else np.nan)
+                        mission_flags_all.append(int(result["strict_path_ok"]))
+
+                successes += batch_successes
+                path_failures += batch_path_failures
+                n += n_batch
+
+                lo, hi = wilson_interval(successes, n, z=1.96)
+                p = successes / n
+                half_width = 0.5 * (hi - lo)
+                rel_half_width = half_width / max(p, 1.0 / max(n, 1))
+                finite_orbit = np.array([x for x in orbit_errors_all if np.isfinite(x)], dtype=float)
+                if finite_orbit.size > 0:
+                    orbit_p50 = float(np.percentile(finite_orbit, 50.0))
+                    orbit_p90 = float(np.percentile(finite_orbit, 90.0))
+                    orbit_p95 = float(np.percentile(finite_orbit, 95.0))
+                    orbit_feasible_frac = float(np.mean(finite_orbit <= 1.0))
+                else:
+                    orbit_p50 = np.nan
+                    orbit_p90 = np.nan
+                    orbit_p95 = np.nan
+                    orbit_feasible_frac = np.nan
+
+                batch_rows.append(
+                    (
+                        n, p, lo, hi, half_width, rel_half_width,
+                        orbit_p50, orbit_p90, orbit_p95, orbit_feasible_frac
+                    )
                 )
-            n += n_batch
+                print(
+                    f"  N={n:4d} | Success={p*100:6.2f}% | CI=[{lo*100:5.2f}, {hi*100:5.2f}] | "
+                    f"Half-width={half_width*100:5.2f}% | Relative={rel_half_width*100:5.1f}% | "
+                    f"OrbitErr p90={orbit_p90:6.2f} | Feasible<=1: {orbit_feasible_frac*100 if np.isfinite(orbit_feasible_frac) else np.nan:5.1f}%"
+                )
 
-            lo, hi = wilson_interval(successes, n, z=1.96)
-            p = successes / n
-            half_width = 0.5 * (hi - lo)
-            rel_half_width = half_width / max(p, 1.0 / max(n, 1))
-            batch_rows.append((n, p, lo, hi, half_width, rel_half_width))
-            print(
-                f"  N={n:4d} | Success={p*100:6.2f}% | CI=[{lo*100:5.2f}, {hi*100:5.2f}] | "
-                f"Half-width={half_width*100:5.2f}% | Relative={rel_half_width*100:5.1f}%"
-            )
-
-            abs_ok = half_width <= target_half_width
-            rel_ok = True
-            if target_relative_half_width is not None:
-                rel_ok = rel_half_width <= float(target_relative_half_width)
-            if n >= min_samples and abs_ok and rel_ok:
-                stop_reason = "target_precision"
-                break
+                abs_ok = half_width <= target_half_width
+                rel_ok = True
+                if target_relative_half_width is not None:
+                    rel_ok = rel_half_width <= float(target_relative_half_width)
+                if n >= min_samples and abs_ok and rel_ok:
+                    stop_reason = "target_precision"
+                    break
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         elapsed = time.time() - t0
-        final_n, final_p, final_lo, final_hi, final_half, final_rel_half = batch_rows[-1]
+        final_n, final_p, final_lo, final_hi, final_half, final_rel_half, final_orbit_p50, final_orbit_p90, final_orbit_p95, final_orbit_feas = batch_rows[-1]
         print(f"  Stop reason: {stop_reason}")
         print(
             f"  Final: N={final_n}, Success={final_p*100:.2f}%, "
             f"CI=[{final_lo*100:.2f}, {final_hi*100:.2f}], "
             f"Half-width={final_half*100:.2f}% ({final_rel_half*100:.1f}% relative)"
         )
+        print(
+            f"  Orbit-error quantiles: p50={final_orbit_p50:.3f}, "
+            f"p90={final_orbit_p90:.3f}, p95={final_orbit_p95:.3f}, "
+            f"feasible(error<=1)={final_orbit_feas*100 if np.isfinite(final_orbit_feas) else np.nan:.1f}%"
+        )
+        p_eff = float(np.clip(final_p, 1e-9, 1.0 - 1e-9))
+        n_req_abs = int(np.ceil((1.96 ** 2) * p_eff * (1.0 - p_eff) / (target_half_width ** 2)))
+        n_req_rel = np.nan
+        if target_relative_half_width is not None:
+            n_req_rel = int(np.ceil((1.96 ** 2) * (1.0 - p_eff) / ((target_relative_half_width ** 2) * p_eff)))
+        n_req = max(min_samples, n_req_abs, int(n_req_rel) if np.isfinite(n_req_rel) else min_samples)
         print(f"  Path-violation reclassifications: {path_failures}")
         print(f"  Runtime: {elapsed:.1f}s")
+        print(
+            f"  Approx. required N from current success rate: "
+            f"abs~{n_req_abs}, rel~{n_req_rel if np.isfinite(n_req_rel) else 'n/a'}, combined~{n_req}"
+        )
         if stop_reason != "target_precision":
             print(
                 f">>> {debug.Style.YELLOW}WARN: Precision targets not met before max samples "
-                f"(N={max_samples}).{debug.Style.RESET}"
+                f"(N={max_samples}). Consider increasing max_samples toward ~{n_req}.{debug.Style.RESET}"
             )
 
         self._save_table(
@@ -1722,25 +2984,41 @@ class ReliabilitySuite:
             [
                 "n", "success_rate", "wilson_low_95", "wilson_high_95",
                 "ci_half_width_95", "relative_half_width", "target_half_width",
-                "target_relative_half_width"
+                "target_relative_half_width",
+                "orbit_error_p50", "orbit_error_p90", "orbit_error_p95",
+                "orbit_feasible_fraction_error_leq_1"
             ],
             [
                 (
                     row[0], row[1], row[2], row[3], row[4], row[5],
                     target_half_width,
-                    np.nan if target_relative_half_width is None else target_relative_half_width
+                    np.nan if target_relative_half_width is None else target_relative_half_width,
+                    row[6], row[7], row[8], row[9]
                 )
                 for row in batch_rows
             ]
         )
 
-        fig, ax1 = plt.subplots(figsize=(10, 6))
+        self._save_table(
+            "monte_carlo_orbit_error_samples",
+            ["sample_index", "mission_success", "normalized_orbit_error"],
+            [
+                (i + 1, mission_flags_all[i], orbit_errors_all[i])
+                for i in range(min(len(orbit_errors_all), len(mission_flags_all)))
+            ],
+        )
+
+        fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
         n_vals = np.array([r[0] for r in batch_rows], dtype=int)
         p_vals = np.array([r[1] for r in batch_rows], dtype=float) * 100.0
         lo_vals = np.array([r[2] for r in batch_rows], dtype=float) * 100.0
         hi_vals = np.array([r[3] for r in batch_rows], dtype=float) * 100.0
         hw_vals = np.array([r[4] for r in batch_rows], dtype=float) * 100.0
         rel_hw_vals = np.array([r[5] for r in batch_rows], dtype=float) * 100.0
+        orbit_p50_vals = np.array([r[6] for r in batch_rows], dtype=float)
+        orbit_p90_vals = np.array([r[7] for r in batch_rows], dtype=float)
+        orbit_p95_vals = np.array([r[8] for r in batch_rows], dtype=float)
+        orbit_feas_vals = np.array([r[9] for r in batch_rows], dtype=float) * 100.0
 
         ax1.plot(n_vals, p_vals, "b-o", label="Success rate")
         ax1.fill_between(n_vals, lo_vals, hi_vals, color="b", alpha=0.15, label="Wilson 95% CI")
@@ -1767,11 +3045,34 @@ class ReliabilitySuite:
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax2.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
-        plt.title("Monte Carlo Precision Target (Adaptive Sample Size)")
+        ax1.set_title("Monte Carlo Precision Target (Adaptive Sample Size)")
+
+        finite_mask = np.isfinite(orbit_p50_vals) & np.isfinite(orbit_p90_vals) & np.isfinite(orbit_p95_vals)
+        if np.any(finite_mask):
+            ax3.plot(n_vals[finite_mask], orbit_p50_vals[finite_mask], "o-", color="tab:green", label="Orbit error p50")
+            ax3.plot(n_vals[finite_mask], orbit_p90_vals[finite_mask], "s-", color="tab:orange", label="Orbit error p90")
+            ax3.plot(n_vals[finite_mask], orbit_p95_vals[finite_mask], "^-", color="tab:red", label="Orbit error p95")
+            ax3.axhline(1.0, color="k", linestyle="--", alpha=0.7, label="Feasible threshold (=1)")
+        else:
+            ax3.text(0.5, 0.5, "No finite orbit-error values", transform=ax3.transAxes, ha="center", va="center")
+        ax3.set_ylabel("Normalized Orbit Error (-)")
+        ax3.grid(True, alpha=0.3)
+
+        ax4 = ax3.twinx()
+        if np.any(np.isfinite(orbit_feas_vals)):
+            ax4.plot(n_vals[np.isfinite(orbit_feas_vals)], orbit_feas_vals[np.isfinite(orbit_feas_vals)], "d-.", color="tab:purple", label="Feasible fraction (error<=1)")
+        ax4.set_ylabel("Orbit-Feasible Fraction (%)", color="tab:purple")
+        ax4.tick_params(axis="y", labelcolor="tab:purple")
+        lines3, labels3 = ax3.get_legend_handles_labels()
+        lines4, labels4 = ax4.get_legend_handles_labels()
+        if len(lines3) > 0 or len(lines4) > 0:
+            ax3.legend(lines3 + lines4, labels3 + labels4, loc="best")
+
+        ax3.set_xlabel("Samples N")
         self._finalize_figure(fig, "monte_carlo_precision_target")
 
     # 19. Q2 UNCERTAINTY BUDGET (MINIMUM FUEL)
-    def analyze_q2_uncertainty_budget(self, parameter_samples=30):
+    def analyze_q2_uncertainty_budget(self, parameter_samples=30, max_workers=None):
         debug._print_sub_header("19. Q2 Uncertainty Budget (Minimum Fuel)")
         print("Quantifying minimum-fuel uncertainty split: numerical vs parameter sources.")
 
@@ -1781,6 +3082,9 @@ class ReliabilitySuite:
             print("  Baseline optimization did not return a valid final mass. Skipping.")
             return
         fuel_nominal = float(self.base_config.launch_mass - m_final_nom)
+        if max_workers is None:
+            max_workers = min(4, max(1, os.cpu_count() or 1))
+        max_workers = max(1, int(max_workers))
 
         # --- A) Numerical component 1: transcription/grid sensitivity of objective ---
         node_counts = [120, 130, 140]
@@ -1790,28 +3094,57 @@ class ReliabilitySuite:
         print("\n  [A] Grid sensitivity on minimum fuel:")
         print(f"  {'Nodes':<6} | {'Status':<10} | {'Min Fuel (kg)':<15} | {'Runtime (s)':<10}")
         print("  " + "-" * 52)
-        for N in node_counts:
-            cfg = copy.deepcopy(self.base_config)
-            cfg.num_nodes = int(N)
-            t0 = time.time()
+        grid_jobs = [
+            {"num_nodes": int(N), "base_cfg": self.base_config, "base_env_cfg": self.base_env_config}
+            for N in node_counts
+        ]
+        grid_results = {}
+        grid_parallel = bool(max_workers > 1 and len(grid_jobs) > 1)
+        if grid_parallel:
+            print(f"  [A] Parallel execution enabled (workers={max_workers}).")
             try:
-                with suppress_stdout():
-                    env_i = Environment(self.base_env_config)
-                    veh_i = Vehicle(cfg, env_i)
-                    opt_i = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
-                ok = bool(opt_i.get("success", False))
-                m_final_i = self._extract_final_mass_from_opt(opt_i) if ok else np.nan
-                fuel_i = float(cfg.launch_mass - m_final_i) if np.isfinite(m_final_i) else np.nan
-                status = "Converged" if ok and np.isfinite(fuel_i) else "Failed"
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    fut_to_n = {executor.submit(_run_q2_grid_point_worker, payload): int(payload["num_nodes"]) for payload in grid_jobs}
+                    parallel_ok = True
+                    for fut in as_completed(fut_to_n):
+                        n_key = fut_to_n[fut]
+                        try:
+                            grid_results[n_key] = fut.result()
+                        except Exception:
+                            parallel_ok = False
+                            break
+                if not parallel_ok:
+                    print("  [A] Worker failure; switching to serial mode.")
+                    grid_parallel = False
+                    grid_results = {}
             except Exception:
-                ok = False
-                fuel_i = np.nan
-                status = "Error"
-            dt = float(time.time() - t0)
+                print("  [A] Parallel execution unavailable; switching to serial mode.")
+                grid_parallel = False
+                grid_results = {}
+        if not grid_parallel:
+            print("  [A] Serial execution mode.")
+            for payload in grid_jobs:
+                n_key = int(payload["num_nodes"])
+                grid_results[n_key] = _run_q2_grid_point_worker(payload)
+
+        for N in node_counts:
+            r = grid_results.get(int(N), None)
+            if r is None:
+                r = {
+                    "nodes": int(N),
+                    "solver_success": 0,
+                    "status": "Error",
+                    "minimum_fuel_kg": np.nan,
+                    "runtime_s": np.nan,
+                }
+            ok = int(r["solver_success"])
+            status = str(r["status"])
+            fuel_i = float(r["minimum_fuel_kg"]) if np.isfinite(r["minimum_fuel_kg"]) else np.nan
+            dt = float(r["runtime_s"]) if np.isfinite(r["runtime_s"]) else np.nan
             if np.isfinite(fuel_i):
                 grid_fuels.append(fuel_i)
-            grid_rows.append((N, int(ok), status, fuel_i, dt))
-            print(f"  {N:<6d} | {status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}")
+            grid_rows.append((int(N), ok, status, fuel_i, dt))
+            print(f"  {int(N):<6d} | {status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}")
 
         sigma_grid = float(np.std(grid_fuels, ddof=1)) if len(grid_fuels) >= 2 else np.nan
 
@@ -1828,25 +3161,77 @@ class ReliabilitySuite:
         print("\n  [B] Integrator sensitivity on verified terminal fuel:")
         print(f"  {'RTOL':<8} | {'ATOL':<8} | {'Status':<10} | {'Path':<6} | {'Fuel Used (kg)':<15}")
         print("  " + "-" * 62)
+        integ_jobs = [
+            {
+                "rtol": float(rtol),
+                "atol": float(atol),
+                "opt_nom": opt_nom,
+                "base_cfg": self.base_config,
+                "base_env_cfg": self.base_env_config,
+                "q_slack_pa": float(self.path_q_slack_pa),
+                "g_slack": float(self.path_g_slack),
+            }
+            for rtol, atol in integrator_tols
+        ]
+        integ_results = {}
+        integ_parallel = bool(max_workers > 1 and len(integ_jobs) > 1)
+        if integ_parallel:
+            print(f"  [B] Parallel execution enabled (workers={max_workers}).")
+            try:
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    fut_to_key = {
+                        executor.submit(_run_q2_integrator_point_worker, payload): (float(payload["rtol"]), float(payload["atol"]))
+                        for payload in integ_jobs
+                    }
+                    parallel_ok = True
+                    for fut in as_completed(fut_to_key):
+                        key = fut_to_key[fut]
+                        try:
+                            integ_results[key] = fut.result()
+                        except Exception:
+                            parallel_ok = False
+                            break
+                if not parallel_ok:
+                    print("  [B] Worker failure; switching to serial mode.")
+                    integ_parallel = False
+                    integ_results = {}
+            except Exception:
+                print("  [B] Parallel execution unavailable; switching to serial mode.")
+                integ_parallel = False
+                integ_results = {}
+        if not integ_parallel:
+            print("  [B] Serial execution mode.")
+            for payload in integ_jobs:
+                key = (float(payload["rtol"]), float(payload["atol"]))
+                integ_results[key] = _run_q2_integrator_point_worker(payload)
+
         for rtol, atol in integrator_tols:
-            with suppress_stdout():
-                sim_i = run_simulation(opt_nom, self.veh, self.base_config, rtol=rtol, atol=atol)
-            term_i = evaluate_terminal_state(sim_i, self.base_config, self.base_env_config)
-            traj_i = self._trajectory_diagnostics(sim_i, self.veh, self.base_config)
-            path_i = self._evaluate_path_compliance(traj_i, self.base_config)
-            strict_path_i = int(self._is_strict_path_success(term_i, traj_i, self.base_config))
-            m_final_sim = self._extract_final_mass_from_sim(sim_i)
-            fuel_sim = float(self.base_config.launch_mass - m_final_sim) if np.isfinite(m_final_sim) else np.nan
-            status = term_i.get("status", "SIM_ERROR")
-            if bool(term_i.get("strict_ok", False)) and not bool(strict_path_i):
-                status = "PATH"
+            key = (float(rtol), float(atol))
+            r = integ_results.get(key, None)
+            if r is None:
+                r = {
+                    "rtol": float(rtol),
+                    "atol": float(atol),
+                    "terminal_valid": 0,
+                    "strict_ok": 0,
+                    "strict_path_ok": 0,
+                    "q_ok": 0,
+                    "g_ok": 0,
+                    "status": "SIM_ERROR",
+                    "fuel_used_kg": np.nan,
+                }
+            status = str(r["status"])
+            strict_path_i = int(r["strict_path_ok"])
+            fuel_sim = float(r["fuel_used_kg"]) if np.isfinite(r["fuel_used_kg"]) else np.nan
             integ_rows.append((
-                rtol, atol,
-                int(term_i.get("terminal_valid", False)),
-                int(term_i.get("strict_ok", False)),
+                float(rtol), float(atol),
+                int(r["terminal_valid"]),
+                int(r["strict_ok"]),
                 strict_path_i,
-                int(path_i["q_ok"]), int(path_i["g_ok"]),
-                status, fuel_sim
+                int(r["q_ok"]),
+                int(r["g_ok"]),
+                status,
+                fuel_sim,
             ))
             if np.isfinite(fuel_sim):
                 integ_fuels.append(fuel_sim)
@@ -1870,60 +3255,107 @@ class ReliabilitySuite:
             f"{'Status':<10} | {'Min Fuel (kg)':<15} | {'Runtime (s)':<10}"
         )
         print("  " + "-" * 88)
-        for i in range(n_param):
-            thrust_mult, isp_mult, dens_mult = self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
-            cfg_i = copy.deepcopy(self.base_config)
-            env_cfg_i = copy.deepcopy(self.base_env_config)
-            cfg_i.stage_1.thrust_vac *= thrust_mult
-            cfg_i.stage_2.thrust_vac *= thrust_mult
-            cfg_i.stage_1.isp_vac *= isp_mult
-            cfg_i.stage_2.isp_vac *= isp_mult
-            env_cfg_i.density_multiplier = dens_mult
+        param_draws = [self._draw_uncertainty_multipliers(rng, model="gaussian_independent") for _ in range(n_param)]
+        param_jobs = []
+        for i, draw in enumerate(param_draws):
+            thrust_mult, isp_mult, dens_mult = draw
+            param_jobs.append(
+                {
+                    "run_index": int(i),
+                    "thrust_multiplier": float(thrust_mult),
+                    "isp_multiplier": float(isp_mult),
+                    "density_multiplier": float(dens_mult),
+                    "base_cfg": self.base_config,
+                    "base_env_cfg": self.base_env_config,
+                    "q_slack_pa": float(self.path_q_slack_pa),
+                    "g_slack": float(self.path_g_slack),
+                }
+            )
 
-            t0 = time.time()
-            opt_success = False
-            strict_ok = False
-            strict_path_ok = False
-            fuel_i = np.nan
-            status = "OPT_FAIL"
-            path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+        param_results = {}
+        param_parallel = bool(max_workers > 1 and len(param_jobs) > 1)
+        if param_parallel:
+            print(f"  [C] Parallel execution enabled (workers={max_workers}).")
             try:
-                with suppress_stdout():
-                    env_i = Environment(env_cfg_i)
-                    veh_i = Vehicle(cfg_i, env_i)
-                    opt_i = solve_optimal_trajectory(cfg_i, veh_i, env_i, print_level=0)
-                opt_success = bool(opt_i.get("success", False))
-                if opt_success:
-                    m_final_i = self._extract_final_mass_from_opt(opt_i)
-                    if np.isfinite(m_final_i):
-                        fuel_i = float(cfg_i.launch_mass - m_final_i)
-                    with suppress_stdout():
-                        sim_i = run_simulation(opt_i, veh_i, cfg_i, rtol=1e-9, atol=1e-12)
-                    term_i = evaluate_terminal_state(sim_i, cfg_i, env_cfg_i)
-                    traj_i = self._trajectory_diagnostics(sim_i, veh_i, cfg_i)
-                    path_i = self._evaluate_path_compliance(traj_i, cfg_i)
-                    strict_ok = bool(term_i.get("strict_ok", False))
-                    strict_path_ok = bool(self._is_strict_path_success(term_i, traj_i, cfg_i))
-                    status = term_i.get("status", "SIM_ERROR")
-                    if strict_ok and not strict_path_ok:
-                        status = "PATH"
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    fut_to_i = {
+                        executor.submit(_run_q2_parameter_sample_worker, payload): int(payload["run_index"])
+                        for payload in param_jobs
+                    }
+                    parallel_ok = True
+                    for fut in as_completed(fut_to_i):
+                        idx = fut_to_i[fut]
+                        try:
+                            param_results[idx] = fut.result()
+                        except Exception:
+                            parallel_ok = False
+                            break
+                if not parallel_ok:
+                    print("  [C] Worker failure; switching to serial mode.")
+                    param_parallel = False
+                    param_results = {}
             except Exception:
-                status = "ERROR"
-                path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
+                print("  [C] Parallel execution unavailable; switching to serial mode.")
+                param_parallel = False
+                param_results = {}
+        if not param_parallel:
+            print("  [C] Serial execution mode.")
+            for payload in param_jobs:
+                idx = int(payload["run_index"])
+                param_results[idx] = _run_q2_parameter_sample_worker(payload)
 
-            dt = float(time.time() - t0)
+        for i in range(n_param):
+            r = param_results.get(i, None)
+            if r is None:
+                thrust_mult, isp_mult, dens_mult = param_draws[i]
+                r = {
+                    "run": i + 1,
+                    "thrust_multiplier": float(thrust_mult),
+                    "isp_multiplier": float(isp_mult),
+                    "density_multiplier": float(dens_mult),
+                    "optimizer_success": 0,
+                    "strict_ok": 0,
+                    "strict_path_ok": 0,
+                    "q_ok": 0,
+                    "g_ok": 0,
+                    "status": "ERROR",
+                    "minimum_fuel_kg": np.nan,
+                    "runtime_s": np.nan,
+                }
+            run_i = int(r["run"])
+            thrust_mult = float(r["thrust_multiplier"])
+            isp_mult = float(r["isp_multiplier"])
+            dens_mult = float(r["density_multiplier"])
+            opt_success = int(r["optimizer_success"])
+            strict_ok = int(r["strict_ok"])
+            strict_path_ok = int(r["strict_path_ok"])
+            q_ok = int(r["q_ok"])
+            g_ok = int(r["g_ok"])
+            status = str(r["status"])
+            fuel_i = float(r["minimum_fuel_kg"]) if np.isfinite(r["minimum_fuel_kg"]) else np.nan
+            dt = float(r["runtime_s"]) if np.isfinite(r["runtime_s"]) else np.nan
+
             if opt_success and np.isfinite(fuel_i):
                 param_fuels_all.append(fuel_i)
             if opt_success and strict_path_ok and np.isfinite(fuel_i):
                 param_fuels_feasible.append(fuel_i)
 
             param_rows.append((
-                i + 1, thrust_mult, isp_mult, dens_mult,
-                int(opt_success), int(strict_ok), int(strict_path_ok),
-                int(path_i["q_ok"]), int(path_i["g_ok"]), status, fuel_i, dt
+                run_i,
+                thrust_mult,
+                isp_mult,
+                dens_mult,
+                opt_success,
+                strict_ok,
+                strict_path_ok,
+                q_ok,
+                g_ok,
+                status,
+                fuel_i,
+                dt,
             ))
             print(
-                f"  {i+1:<4d} | {thrust_mult:<7.3f} | {isp_mult:<7.3f} | {dens_mult:<7.3f} | "
+                f"  {run_i:<4d} | {thrust_mult:<7.3f} | {isp_mult:<7.3f} | {dens_mult:<7.3f} | "
                 f"{status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}"
             )
 
@@ -2186,7 +3618,7 @@ class ReliabilitySuite:
         }
 
     # 22. BIFURCATION 2D MAP
-    def analyze_bifurcation_2d_map(self, n_thrust=11, n_density=11):
+    def analyze_bifurcation_2d_map(self, n_thrust=11, n_density=11, max_workers=None):
         debug._print_sub_header("22. Bifurcation 2D Map (Thrust x Density)")
         print("Mapping open-loop strict success and orbit-error structure over a 2D parameter grid.")
 
@@ -2204,25 +3636,99 @@ class ReliabilitySuite:
         orbit_err_map = np.full((len(density_vals), len(thrust_vals)), np.nan, dtype=float)
         rows = []
 
+        if max_workers is None:
+            max_workers = min(4, max(1, os.cpu_count() or 1))
+        max_workers = max(1, int(max_workers))
+
+        samples = []
         for iy, dens in enumerate(density_vals):
             for ix, thrust in enumerate(thrust_vals):
-                result = self._simulate_uncertainty_case(opt_res, thrust, 1.0, dens)
-                tm = result["terminal"]
-                path = result["path"]
-                success = int(result["strict_path_ok"])
-                margin = tm["fuel_margin_kg"] if tm["terminal_valid"] else np.nan
-                orbit_err = normalized_orbit_error(tm)
+                samples.append((int(iy), int(ix), float(thrust), float(dens)))
+
+        sample_rows = []
+        parallel_active = bool(max_workers > 1 and len(samples) > 1)
+        if parallel_active:
+            print(f"  Parallel execution enabled (workers={max_workers}).")
+            try:
+                n_chunks = min(max_workers, len(samples))
+                chunk_size = int(np.ceil(len(samples) / max(n_chunks, 1)))
+                with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for i0 in range(0, len(samples), chunk_size):
+                        chunk = samples[i0:i0 + chunk_size]
+                        payload = {
+                            "opt_res": opt_res,
+                            "base_cfg": self.base_config,
+                            "base_env_cfg": self.base_env_config,
+                            "q_slack_pa": float(self.path_q_slack_pa),
+                            "g_slack": float(self.path_g_slack),
+                            "samples": chunk,
+                        }
+                        futures.append(executor.submit(_run_bifurcation_batch_worker, payload))
+
+                    parallel_ok = True
+                    for fut in as_completed(futures):
+                        try:
+                            r = fut.result()
+                            sample_rows.extend(r.get("rows", []))
+                        except Exception:
+                            parallel_ok = False
+                            break
+                if not parallel_ok:
+                    print("  Worker failure during bifurcation map; switching to serial mode.")
+                    parallel_active = False
+                    sample_rows = []
+            except Exception:
+                print("  Parallel execution unavailable; switching to serial mode.")
+                parallel_active = False
+                sample_rows = []
+
+        if not parallel_active:
+            print("  Serial execution mode.")
+            r = _run_bifurcation_batch_worker(
+                {
+                    "opt_res": opt_res,
+                    "base_cfg": self.base_config,
+                    "base_env_cfg": self.base_env_config,
+                    "q_slack_pa": float(self.path_q_slack_pa),
+                    "g_slack": float(self.path_g_slack),
+                    "samples": samples,
+                }
+            )
+            sample_rows = list(r.get("rows", []))
+
+        sample_rows.sort(key=lambda d: (int(d.get("iy", 0)), int(d.get("ix", 0))))
+        for item in sample_rows:
+            iy = int(item.get("iy", 0))
+            ix = int(item.get("ix", 0))
+            thrust = float(item.get("thrust", np.nan))
+            dens = float(item.get("density", np.nan))
+            success = int(item.get("strict_success", 0))
+            margin = float(item.get("fuel_margin_kg", np.nan))
+            orbit_err = float(item.get("normalized_orbit_error", np.nan))
+            alt_err = float(item.get("altitude_error_m", np.nan))
+            vel_err = float(item.get("velocity_error_m_s", np.nan))
+            q_ok = int(item.get("q_ok", 0))
+            g_ok = int(item.get("g_ok", 0))
+            status = str(item.get("status", "SIM_ERROR"))
+
+            if 0 <= iy < success_map.shape[0] and 0 <= ix < success_map.shape[1]:
                 success_map[iy, ix] = success
                 margin_map[iy, ix] = margin
                 orbit_err_map[iy, ix] = orbit_err
-                status = tm["status"]
-                if bool(tm.get("strict_ok", False)) and not bool(result["strict_path_ok"]):
-                    status = "PATH"
-                rows.append((
-                    float(thrust), float(dens), int(success), float(margin),
-                    float(orbit_err), float(tm["alt_err_m"]), float(tm["vel_err_m_s"]),
-                    int(path["q_ok"]), int(path["g_ok"]), status
-                ))
+
+            rows.append((
+                thrust,
+                dens,
+                success,
+                margin,
+                orbit_err,
+                alt_err,
+                vel_err,
+                q_ok,
+                g_ok,
+                status,
+            ))
 
         self._save_table(
             "bifurcation_2d_map",
@@ -2510,6 +4016,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for exported figures and CSV tables.")
     parser.add_argument("--seed", type=int, default=1337, help="Global random seed for reproducible Monte Carlo runs.")
     parser.add_argument("--mc-samples", type=int, default=200, help="Monte Carlo sample count used in Monte Carlo-based analyses.")
+    parser.add_argument("--max-workers", type=int, default=None, help="Maximum parallel workers (set 1 for fully serial mode).")
     parser.add_argument("--no-show", action="store_true", help="Do not open interactive plot windows (save figures only).")
     parser.add_argument("--no-save", action="store_true", help="Do not save figures/CSV outputs.")
     args = parser.parse_args()
@@ -2520,4 +4027,4 @@ if __name__ == "__main__":
         show_plots=not args.no_show,
         random_seed=args.seed
     )
-    suite.run_all(monte_carlo_samples=args.mc_samples)
+    suite.run_all(monte_carlo_samples=args.mc_samples, max_workers=args.max_workers)

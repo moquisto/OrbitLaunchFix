@@ -1,0 +1,4 @@
+nodes,solver_success,status,minimum_fuel_kg,runtime_s
+120,1,Converged,4658609.16984,71.7005150318
+130,1,Converged,4658606.05273,97.8650739193
+140,1,Converged,4658604.49502,75.5209972858

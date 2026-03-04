@@ -1,0 +1,9 @@
+trial,label,time_scale,position_noise_sigma,velocity_noise_sigma,mass_noise_sigma,throttle_noise_sigma,direction_noise_sigma_deg,solver_success,mission_success,terminal_strict_success,path_ok,q_ok,g_ok,status,final_mass_kg,final_mass_scored_kg,final_mass_gap_to_best_kg,runtime_s
+1,nominal,1,0,0,0,0,0,1,1,1,1,1,1,MISSION_OK,316395.504982,316395.504982,5.42431371287e-06,65.8073320389
+2,rand_01,0.997204828076,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,203.339385033
+3,rand_02,1.00252686898,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,242.830410004
+4,rand_03,1.00929567933,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,158.34604907
+5,rand_04,1.00216191755,0.01,0.01,0.01,0.01,0.572967344857,1,1,1,1,1,1,MISSION_OK,316395.504988,316395.504988,0,670.406270981
+6,rand_05,1.00946328777,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,322.559916973
+7,rand_06,0.993423345659,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,126.204787731
+8,rand_07,0.990289458149,0.01,0.01,0.01,0.01,0.572967344857,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,255.873222828

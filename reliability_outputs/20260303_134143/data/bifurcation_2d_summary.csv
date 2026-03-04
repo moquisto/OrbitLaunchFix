@@ -1,0 +1,8 @@
+metric,value
+strict_success_fraction,0.0413223140496
+orbit_feasible_fraction,0.0909090909091
+nominal_density_row_lower_thrust,1
+nominal_density_row_upper_thrust,1.00102067106
+nominal_density_row_lower_margin_percent,0
+nominal_density_row_upper_margin_percent,0.102067106216
+nominal_density_row_min_margin_percent,0

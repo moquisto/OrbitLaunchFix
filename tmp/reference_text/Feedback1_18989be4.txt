@@ -1,0 +1,103 @@
+
+
+===== PAGE 1 =====
+Feedback project 1
+•
+Reports are being looked at, results should come end of
+next week.
+•
+If completions are needed, the deadline for submitting
+those is a week after you got your feedback
+
+
+===== PAGE 2 =====
+Feedback on reports & presentations
+•
+Reports:
+•
+Most are clear and good
+•
+Right amount of information and detail
+•
+Some issues:
+•
+Avoid pages with only figures and try to place
+figures close to the relevant text
+•
+Avoid very small font for (axis-)labels in plots
+•
+Presentations:
+•
+Generally very good!
+•
+Some slides did not mention an important parameter
+like the time step
+
+
+===== PAGE 3 =====
+Project feedback
+•
+Accuracy of integrators: Euler O(Δt), Velocity Verlet
+O(Δt2), RK4 O(Δt4)
+•
+But only VV is symplectic
+•
+So RK4 is more accurate over short times
+•
+For Hamiltonian dynamics VV is more accurate for
+energy conservation over long times (but can have
+worse accuracy)
+•
+Verlet does not support velocity dependent acceleration
+•
+Some students saw bad energy conservation with RK4
+over 30 steps, either too fast drop of energy or an
+increase; likely cause: a bug in the code
+
+
+===== PAGE 4 =====
+Chaotic behaviour
+•
+Main criterion: sensitivity to initial conditions
+•
+No check for sensitivity in this particular
+exercise
+•
+Chaotic behaviour can depend on:
+•
+values of parameters (e.g. energy)
+•
+initial conditions
+•
+the regime in the simulation, and can thus vary
+over time
+
+
+===== PAGE 5 =====
+Double pendulum
+Time to first flip
+vs initial conditions
+for pendulum with
+mass along rod
+•
+One source of chaotic behaviour:
+3
+flips no/yes
+•
+A flip needs an energy of
+2 m g l
+θ
+2
+•
+You observed chaotic behaviour
+from an energy of 12 to 15
+-3
+•
+So there are other sources -3 θ 3
+1
+of chaotic behaviour, such as
+green: flip within
+10 g/l
+(non-)alignment of rods red: flip within
+100 g/l
+white: no flips
