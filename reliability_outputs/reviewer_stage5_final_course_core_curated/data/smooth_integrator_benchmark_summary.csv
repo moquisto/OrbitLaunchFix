@@ -1,0 +1,6 @@
+metric,value
+euler_slope,0.963389102616
+rk4_slope,4.04500820819
+euler_pass,1
+rk4_pass,1
+overall_pass,1

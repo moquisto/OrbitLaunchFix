@@ -1,0 +1,9 @@
+metric,value
+valid,1
+max_position_drift_m,3.04034402312
+max_velocity_drift_m_s,0.00821173688831
+max_mass_drift_kg,0.616648457013
+pass_flag,1
+threshold_position_m,2000
+threshold_velocity_m_s,30
+threshold_mass_kg,500

@@ -6,7 +6,7 @@ The project follows an explicit workflow:
 
 1. Optimize a fuel-minimal ascent trajectory with direct collocation (CasADi + IPOPT).
 2. Re-fly the optimized controls in forward time (`solve_ivp`) to verify physical consistency.
-3. Quantify confidence with targeted reliability analyses (optimality, uncertainty, robustness, drift, and bifurcation behavior).
+3. Quantify confidence with targeted reliability analyses, with optional robustness/sensitivity extensions enabled through config toggles.
 
 ## What This Repository Contains
 
@@ -38,11 +38,10 @@ The project follows an explicit workflow:
   - Objective: maximize final mass (equivalently minimize fuel used)
 
 - **Reliability/validation model**
-  - Grid independence, defect audits, randomized multistart
-  - Integrator convergence checks
+  - Core course-aligned checks: grid independence, defect audits, theoretical efficiency
+  - Integrator convergence, drift, and method-order checks
   - Monte Carlo uncertainty and precision targeting
-  - Drift and integrator-order checks
-  - Bifurcation 2D feasibility evidence
+  - Optional extensions: randomized multistart, 2D sensitivity map, model-limitations summary, Q7 synthesis support
 
 ## Repository Structure
 
@@ -108,6 +107,7 @@ Default behavior:
 - Saves figures to `figures/` (PNG + PDF).
 - Saves tabular outputs to `data/` (CSV).
 - Uses random seed `1337` unless overridden.
+- Runs the analyses enabled in `RELIABILITY_ANALYSIS_TOGGLES`; optional extensions are off by default.
 
 CLI options:
 
@@ -115,6 +115,7 @@ CLI options:
 --output-dir <path>   Custom output directory
 --seed <int>          RNG seed for reproducible Monte Carlo analyses
 --mc-samples <int>    Monte Carlo sample count (default: 200)
+--max-workers <int>   Maximum parallel workers (use 1 for serial mode)
 --no-show             Do not open interactive plot windows
 --no-save             Do not save figures/CSV outputs
 ```
@@ -165,6 +166,22 @@ Note: `EnvConfig.use_wind_model` exists in config but is not currently used as a
 
 The `ReliabilityAnalysisToggles` dataclass controls which test blocks execute in `ReliabilitySuite.run_all()`.
 
+Default enabled:
+- `grid_independence`
+- `collocation_defect_audit`
+- `theoretical_efficiency`
+- `integrator_tolerance`
+- `monte_carlo_precision_target`
+- `q2_uncertainty_budget`
+- `smooth_integrator_benchmark`
+- `drift`
+
+Default disabled:
+- `randomized_multistart`
+- `bifurcation_2d_map`
+- `model_limitations`
+- `q7_conclusion_support`
+
 ## Model and Assumptions
 
 - 3D inertial-frame translational dynamics.
@@ -179,12 +196,12 @@ Treat conclusions as valid within this modeling envelope, not as flight-certifie
 
 The reliability suite is structured to support question-driven reporting:
 
-- **Q1** credible optimum: grid independence, collocation defect audit, multistart robustness, theoretical efficiency.
+- **Q1** credible optimum: grid independence, collocation defect audit, theoretical efficiency; multistart robustness is available as an optional extension.
 - **Q2** uncertainty/accuracy: integrator sensitivity, Monte Carlo precision, uncertainty budget.
 - **Q3** code reliability: optimizer-vs-simulator drift and benchmark checks.
-- **Q5** cliff-edge behavior: 2D feasibility mapping.
-- **Q6** model limitations: explicit validity/limitation documentation.
-- **Q7** engineering conclusion support: cross-test evidence synthesis.
+- **Q5** cliff-edge behavior: optional 2D sensitivity/feasibility mapping.
+- **Q6** model limitations: optional validity/limitation documentation.
+- **Q7** engineering conclusion support: optional cross-test evidence synthesis.
 
 ## Expected Outputs
 

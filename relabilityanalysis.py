@@ -17,12 +17,17 @@ from pathlib import Path
 from datetime import datetime
 import argparse
 import platform
+from matplotlib.ticker import StrMethodFormatter
 
 # Project Imports
 from config import StarshipBlock2, EARTH_CONFIG, RELIABILITY_ANALYSIS_TOGGLES
 from vehicle import Vehicle
 from environment import Environment
-from main import solve_optimal_trajectory
+from main import (
+    OPTIMIZATION_G_GUARD_BAND,
+    OPTIMIZATION_Q_GUARD_BAND_PA,
+    solve_optimal_trajectory,
+)
 from simulation import run_simulation
 import debug
 import guidance
@@ -54,6 +59,31 @@ TERMINAL_ALT_TOL_M = 5_000.0
 TERMINAL_VEL_TOL_M_S = 10.0
 TERMINAL_RADIAL_VEL_TOL_M_S = 5.0
 TERMINAL_INC_TOL_DEG = 0.25
+
+
+def resolve_target_inclination_deg(cfg, env_cfg):
+    """Return the effective target inclination used by the solver/checks."""
+    if cfg.target_inclination is None:
+        return abs(float(env_cfg.launch_latitude))
+    return float(cfg.target_inclination)
+
+
+def apply_analysis_profile(toggles, profile):
+    """Apply a named analysis profile to a toggle copy."""
+    if profile == "course_core":
+        toggles.randomized_multistart = False
+        toggles.grid_independence = True
+        toggles.collocation_defect_audit = True
+        toggles.theoretical_efficiency = True
+        toggles.integrator_tolerance = True
+        toggles.monte_carlo_precision_target = False
+        toggles.q2_uncertainty_budget = False
+        toggles.smooth_integrator_benchmark = True
+        toggles.bifurcation_2d_map = False
+        toggles.drift = True
+        toggles.model_limitations = False
+        toggles.q7_conclusion_support = False
+    return toggles
 
 
 
@@ -552,6 +582,8 @@ def _run_grid_independence_worker(payload):
     node_count = int(payload["num_nodes"])
     base_cfg = payload["base_cfg"]
     base_env_cfg = payload["base_env_cfg"]
+    q_slack_pa = float(payload["q_slack_pa"])
+    g_slack = float(payload["g_slack"])
 
     cfg = copy.deepcopy(base_cfg)
     cfg.num_nodes = node_count
@@ -560,6 +592,16 @@ def _run_grid_independence_worker(payload):
     m_final = np.nan
     status = "Failed"
     solver_ok = False
+    terminal_valid = 0
+    strict_terminal_ok = 0
+    strict_path_ok = 0
+    raw_path_ok = 0
+    raw_q_ok = 0
+    raw_g_ok = 0
+    q_ok = 0
+    g_ok = 0
+    max_q_pa = np.nan
+    max_g = np.nan
     try:
         with suppress_stdout():
             env_i = Environment(copy.deepcopy(base_env_cfg))
@@ -567,8 +609,31 @@ def _run_grid_independence_worker(payload):
             res = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
         if res.get("success", False):
             m_final = float(res["X3"][6, -1])
-            status = "Converged"
             solver_ok = True
+            with suppress_stdout():
+                sim_res = run_simulation(res, veh_i, cfg, rtol=1e-9, atol=1e-12)
+            terminal = evaluate_terminal_state(sim_res, cfg, env_i.config)
+            traj = _ms_trajectory_diagnostics(sim_res, veh_i, cfg)
+            path_slack = _ms_evaluate_path_compliance(traj, cfg, q_slack_pa, g_slack)
+            path_raw = _ms_evaluate_path_compliance(traj, cfg, 0.0, 0.0)
+            terminal_valid = int(terminal.get("terminal_valid", False))
+            strict_terminal_ok = int(terminal.get("strict_ok", False))
+            strict_path_ok = int(bool(terminal.get("strict_ok", False) and path_slack.get("path_ok", False)))
+            raw_path_ok = int(bool(terminal.get("strict_ok", False) and path_raw.get("path_ok", False)))
+            raw_q_ok = int(path_raw.get("q_ok", False))
+            raw_g_ok = int(path_raw.get("g_ok", False))
+            q_ok = int(path_slack.get("q_ok", False))
+            g_ok = int(path_slack.get("g_ok", False))
+            max_q_pa = float(path_slack.get("max_q_pa", np.nan))
+            max_g = float(path_slack.get("max_g", np.nan))
+            if raw_path_ok:
+                status = "PASS_RAW"
+            elif strict_path_ok:
+                status = "PASS_SLACK"
+            elif strict_terminal_ok:
+                status = "PATH_FAIL"
+            else:
+                status = str(terminal.get("status", "Failed"))
     except Exception:
         m_final = np.nan
         status = "Failed"
@@ -579,6 +644,16 @@ def _run_grid_independence_worker(payload):
         "solver_success": int(solver_ok),
         "status": status,
         "final_mass_kg": float(m_final) if np.isfinite(m_final) else np.nan,
+        "terminal_valid": int(terminal_valid),
+        "strict_terminal_ok": int(strict_terminal_ok),
+        "strict_path_ok": int(strict_path_ok),
+        "raw_path_ok": int(raw_path_ok),
+        "raw_q_ok": int(raw_q_ok),
+        "raw_g_ok": int(raw_g_ok),
+        "q_ok": int(q_ok),
+        "g_ok": int(g_ok),
+        "max_q_pa": float(max_q_pa) if np.isfinite(max_q_pa) else np.nan,
+        "max_g": float(max_g) if np.isfinite(max_g) else np.nan,
         "runtime_s": float(time.time() - t0),
     }
 
@@ -913,10 +988,11 @@ def _export_csv(path, headers, rows):
 
 
 class ReliabilitySuite:
-    def __init__(self, output_dir=None, save_figures=True, show_plots=True, random_seed=1337):
+    def __init__(self, output_dir=None, save_figures=True, show_plots=True, random_seed=1337, analysis_profile="default"):
         self.base_config = copy.deepcopy(StarshipBlock2)
         self.base_env_config = copy.deepcopy(EARTH_CONFIG)
-        self.test_toggles = copy.deepcopy(RELIABILITY_ANALYSIS_TOGGLES)
+        self.analysis_profile = str(analysis_profile)
+        self.test_toggles = apply_analysis_profile(copy.deepcopy(RELIABILITY_ANALYSIS_TOGGLES), self.analysis_profile)
         self.random_seed = int(random_seed)
         self.seed_sequence = np.random.SeedSequence(self.random_seed)
         self.rng = np.random.default_rng(self.random_seed)
@@ -967,6 +1043,7 @@ class ReliabilitySuite:
         
         print(f"\n{debug.Style.BOLD}=== RELIABILITY ANALYSIS SUITE ==={debug.Style.RESET}")
         print(f"Target: {self.base_config.name}")
+        print(f"Analysis profile: {self.analysis_profile}")
         print(f"Output directory: {self.output_dir}")
         print(f"Reproducible seed: {self.random_seed}")
         self._save_run_metadata()
@@ -978,13 +1055,18 @@ class ReliabilitySuite:
             [
                 ("timestamp_utc", datetime.utcnow().isoformat(timespec="seconds")),
                 ("analysis_output_dir", str(self.output_dir)),
+                ("analysis_profile", self.analysis_profile),
                 ("vehicle_name", self.base_config.name),
                 ("target_altitude_m", self.base_config.target_altitude),
-                ("target_inclination_deg", self.base_config.target_inclination),
+                ("requested_target_inclination_deg", self.base_config.target_inclination),
+                ("effective_target_inclination_deg", resolve_target_inclination_deg(self.base_config, self.base_env_config)),
+                ("launch_latitude_deg", self.base_env_config.launch_latitude),
                 ("num_nodes", self.base_config.num_nodes),
                 ("max_iter", self.base_config.max_iter),
                 ("max_q_limit_pa", self.base_config.max_q_limit),
                 ("max_g_limit", self.base_config.max_g_load),
+                ("optimization_q_guard_band_pa", OPTIMIZATION_Q_GUARD_BAND_PA),
+                ("optimization_g_guard_band", OPTIMIZATION_G_GUARD_BAND),
                 ("terminal_alt_tol_m", TERMINAL_ALT_TOL_M),
                 ("terminal_vel_tol_m_s", TERMINAL_VEL_TOL_M_S),
                 ("terminal_radial_vel_tol_m_s", TERMINAL_RADIAL_VEL_TOL_M_S),
@@ -1043,11 +1125,11 @@ class ReliabilitySuite:
                 fn(*args, **kwargs)
                 status = "completed"
                 err = ""
-            except Exception as exc:
-                status = "error"
+            except BaseException as exc:
+                status = "interrupted" if isinstance(exc, KeyboardInterrupt) else "error"
                 err = str(exc)
                 dt = time.time() - t0
-                print(f"{prog}Failed: {label} ({dt:.2f}s)")
+                print(f"{prog}{'Interrupted' if status == 'interrupted' else 'Failed'}: {label} ({dt:.2f}s)")
                 self._analysis_execution.append((flag_name, label, int(enabled), status, dt, err[:240]))
                 raise
             dt = time.time() - t0
@@ -1308,10 +1390,12 @@ class ReliabilitySuite:
             return np.nan
         return float(np.sqrt(np.sum(arr * arr)))
 
-    def _evaluate_path_compliance(self, traj_diag, cfg):
+    def _evaluate_path_compliance(self, traj_diag, cfg, q_slack_pa=None, g_slack=None):
         """
         Evaluate path-constraint compliance with small numerical slack.
         """
+        q_slack_use = self.path_q_slack_pa if q_slack_pa is None else float(q_slack_pa)
+        g_slack_use = self.path_g_slack if g_slack is None else float(g_slack)
         out = {
             "path_ok": False,
             "q_ok": False,
@@ -1320,15 +1404,15 @@ class ReliabilitySuite:
             "max_g": np.nan,
             "q_limit_pa": float(cfg.max_q_limit),
             "g_limit": float(cfg.max_g_load),
-            "q_slack_pa": float(self.path_q_slack_pa),
-            "g_slack": float(self.path_g_slack),
+            "q_slack_pa": q_slack_use,
+            "g_slack": g_slack_use,
         }
         if not isinstance(traj_diag, dict) or not bool(traj_diag.get("valid", False)):
             return out
         max_q = float(traj_diag.get("max_q_pa", np.nan))
         max_g = float(traj_diag.get("max_g", np.nan))
-        q_ok = bool(np.isfinite(max_q) and max_q <= cfg.max_q_limit + self.path_q_slack_pa)
-        g_ok = bool(np.isfinite(max_g) and max_g <= cfg.max_g_load + self.path_g_slack)
+        q_ok = bool(np.isfinite(max_q) and max_q <= cfg.max_q_limit + q_slack_use)
+        g_ok = bool(np.isfinite(max_g) and max_g <= cfg.max_g_load + g_slack_use)
         out.update({
             "path_ok": bool(q_ok and g_ok),
             "q_ok": q_ok,
@@ -1507,78 +1591,127 @@ class ReliabilitySuite:
             "monte_carlo_precision_target",
             "q2_uncertainty_budget",
         )
-        if any(bool(getattr(self.test_toggles, name, True)) for name in baseline_flags):
-            print(f"\n{debug.Style.BOLD}--- Precomputing Shared Baseline Solution ---{debug.Style.RESET}")
-            self._get_baseline_opt_res()
+        try:
+            if any(bool(getattr(self.test_toggles, name, True)) for name in baseline_flags):
+                print(f"\n{debug.Style.BOLD}--- Precomputing Shared Baseline Solution ---{debug.Style.RESET}")
+                self._get_baseline_opt_res()
 
-        # Runtime order based on observed execution cost (short -> long).
-        ordered_tests = [
-            ("model_limitations", "Model limitations", self.analyze_model_limitations, (), {}),
-            ("smooth_integrator_benchmark", "Smooth ODE integrator benchmark", self.analyze_smooth_integrator_benchmark, (), {}),
-            ("drift", "Drift analysis", _run_drift_with_cached_baseline, (), {}),
-            ("theoretical_efficiency", "Theoretical efficiency", self.analyze_theoretical_efficiency, (), {}),
-            ("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance, (), {}),
-            ("collocation_defect_audit", "Collocation defect audit", self.analyze_collocation_defect_audit, (), {"max_workers": worker_cap}),
-            ("grid_independence", "Grid independence", self.analyze_grid_independence, (), {"max_workers": worker_cap}),
-            ("bifurcation_2d_map", "Bifurcation 2D map", self.analyze_bifurcation_2d_map, (), {"max_workers": worker_cap}),
-            ("randomized_multistart", "Randomized multi-start robustness", self.analyze_randomized_multistart, (), {"max_workers": worker_cap}),
-            (
-                "monte_carlo_precision_target",
-                "Monte Carlo precision target",
-                self.analyze_monte_carlo_precision_target,
-                (),
-                {"min_samples": mc_min_precision, "max_samples": mc_max_precision, "batch_size": mc_batch, "max_workers": worker_cap},
-            ),
-            (
-                "q2_uncertainty_budget",
-                "Q2 uncertainty budget",
-                self.analyze_q2_uncertainty_budget,
-                (),
-                {"parameter_samples": max(30, min(60, mc_n // 6)), "max_workers": worker_cap},
-            ),
-        ]
-        total_steps = len(ordered_tests) + 1  # + synthesis step
-        for i, (flag, label, fn, args, kwargs) in enumerate(ordered_tests, start=1):
-            progress = f"{i}/{total_steps}"
-            ran_any |= self._run_if_enabled(flag, label, fn, *args, progress=progress, **kwargs)
+            # Runtime order based on observed execution cost (short -> long).
+            ordered_tests = [
+                ("model_limitations", "Model limitations", self.analyze_model_limitations, (), {}),
+                ("smooth_integrator_benchmark", "Smooth ODE integrator benchmark", self.analyze_smooth_integrator_benchmark, (), {}),
+                ("drift", "Drift analysis", _run_drift_with_cached_baseline, (), {}),
+                ("theoretical_efficiency", "Theoretical efficiency", self.analyze_theoretical_efficiency, (), {}),
+                ("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance, (), {}),
+                ("collocation_defect_audit", "Collocation defect audit", self.analyze_collocation_defect_audit, (), {"max_workers": worker_cap}),
+                ("grid_independence", "Grid independence", self.analyze_grid_independence, (), {"max_workers": worker_cap}),
+                ("bifurcation_2d_map", "Bifurcation 2D map", self.analyze_bifurcation_2d_map, (), {"max_workers": worker_cap}),
+                ("randomized_multistart", "Randomized multi-start robustness", self.analyze_randomized_multistart, (), {"max_workers": worker_cap}),
+                (
+                    "monte_carlo_precision_target",
+                    "Monte Carlo precision target",
+                    self.analyze_monte_carlo_precision_target,
+                    (),
+                    {"min_samples": mc_min_precision, "max_samples": mc_max_precision, "batch_size": mc_batch, "max_workers": worker_cap},
+                ),
+                (
+                    "q2_uncertainty_budget",
+                    "Q2 uncertainty budget",
+                    self.analyze_q2_uncertainty_budget,
+                    (),
+                    {"parameter_samples": max(30, min(60, mc_n // 6)), "max_workers": worker_cap},
+                ),
+            ]
+            total_steps = len(ordered_tests) + 1  # + synthesis step
+            for i, (flag, label, fn, args, kwargs) in enumerate(ordered_tests, start=1):
+                progress = f"{i}/{total_steps}"
+                ran_any |= self._run_if_enabled(flag, label, fn, *args, progress=progress, **kwargs)
 
-        # Keep synthesis last because it consumes outputs from earlier analyses.
-        ran_any |= self._run_if_enabled(
-            "q7_conclusion_support",
-            "Q7 conclusion support",
-            self.analyze_q7_conclusion_support,
-            progress=f"{total_steps}/{total_steps}",
-        )
+            # Keep synthesis last because it consumes outputs from earlier analyses.
+            ran_any |= self._run_if_enabled(
+                "q7_conclusion_support",
+                "Q7 conclusion support",
+                self.analyze_q7_conclusion_support,
+                progress=f"{total_steps}/{total_steps}",
+            )
 
-        if not ran_any:
-            print("\nNo analyses executed. Enable tests in RELIABILITY_ANALYSIS_TOGGLES in config.py.")
-
-        self._save_table(
-            "analysis_execution_log",
-            ["toggle", "label", "enabled", "status", "runtime_s", "error_message"],
-            self._analysis_execution
-        )
+            if not ran_any:
+                print("\nNo analyses executed. Enable tests in RELIABILITY_ANALYSIS_TOGGLES in config.py.")
+        finally:
+            self._save_table(
+                "analysis_execution_log",
+                ["toggle", "label", "enabled", "status", "runtime_s", "error_message"],
+                self._analysis_execution
+            )
 
     # 1. GRID INDEPENDENCE STUDY
     def analyze_grid_independence(self, max_workers=None):
         debug._print_sub_header("1. Grid Independence Study")
-        # User limit: Max 140 nodes
-        # Increased resolution for smoother convergence graph
-        node_counts = [40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140]
+        # Paper-focused convergence sweep: enough spacing to show convergence
+        # without turning the evidence run into an unnecessarily large batch.
+        node_counts = [80, 100, 120, 140]
         masses = []
         runtimes = []
         success_flags = []
+        strict_path_flags = []
+        raw_path_flags = []
         if max_workers is None:
             max_workers = min(4, max(1, os.cpu_count() or 1))
         max_workers = max(1, int(max_workers))
+        baseline_node = int(self.base_config.num_nodes)
+        baseline_opt = self._get_baseline_opt_res()
+        if max_workers > len(node_counts) - 1:
+            max_workers = max(1, len(node_counts) - 1)
         jobs = [
-            {"num_nodes": int(N), "base_cfg": self.base_config, "base_env_cfg": self.base_env_config}
+            {
+                "num_nodes": int(N),
+                "base_cfg": self.base_config,
+                "base_env_cfg": self.base_env_config,
+                "q_slack_pa": float(self.path_q_slack_pa),
+                "g_slack": float(self.path_g_slack),
+            }
             for N in node_counts
+            if int(N) != baseline_node
         ]
         job_results = {}
 
-        print(f"{'Nodes':<6} | {'Final Mass (kg)':<15} | {'Runtime (s)':<10} | {'Status':<10}")
-        print("-" * 50)
+        print(
+            f"{'Nodes':<6} | {'Final Mass (kg)':<15} | {'Runtime (s)':<10} | "
+            f"{'RawPath':<7} | {'SlackPath':<9} | {'Status':<11}"
+        )
+        print("-" * 73)
+
+        with suppress_stdout():
+            baseline_sim = run_simulation(baseline_opt, self.veh, self.base_config, rtol=1e-9, atol=1e-12)
+        baseline_terminal = evaluate_terminal_state(baseline_sim, self.base_config, self.base_env_config)
+        baseline_traj = self._trajectory_diagnostics(baseline_sim, self.veh, self.base_config)
+        baseline_path_slack = self._evaluate_path_compliance(baseline_traj, self.base_config)
+        baseline_path_raw = self._evaluate_path_compliance(
+            baseline_traj, self.base_config, q_slack_pa=0.0, g_slack=0.0
+        )
+        baseline_status = (
+            "PASS_RAW" if baseline_terminal.get("strict_ok", False) and baseline_path_raw["path_ok"]
+            else "PASS_SLACK" if baseline_terminal.get("strict_ok", False) and baseline_path_slack["path_ok"]
+            else "PATH_FAIL" if baseline_terminal.get("strict_ok", False)
+            else str(baseline_terminal.get("status", "Failed"))
+        )
+        job_results[baseline_node] = {
+            "nodes": baseline_node,
+            "solver_success": int(baseline_opt.get("success", False)),
+            "status": baseline_status,
+            "final_mass_kg": float(baseline_opt["X3"][6, -1]),
+            "terminal_valid": int(baseline_terminal.get("terminal_valid", False)),
+            "strict_terminal_ok": int(baseline_terminal.get("strict_ok", False)),
+            "strict_path_ok": int(bool(baseline_terminal.get("strict_ok", False) and baseline_path_slack["path_ok"])),
+            "raw_path_ok": int(bool(baseline_terminal.get("strict_ok", False) and baseline_path_raw["path_ok"])),
+            "raw_q_ok": int(baseline_path_raw["q_ok"]),
+            "raw_g_ok": int(baseline_path_raw["g_ok"]),
+            "q_ok": int(baseline_path_slack["q_ok"]),
+            "g_ok": int(baseline_path_slack["g_ok"]),
+            "max_q_pa": float(baseline_path_slack["max_q_pa"]),
+            "max_g": float(baseline_path_slack["max_g"]),
+            "runtime_s": 0.0,
+        }
 
         parallel_active = bool(max_workers > 1 and len(jobs) > 1)
         if parallel_active:
@@ -1635,17 +1768,45 @@ class ReliabilitySuite:
             m_final = float(r.get("final_mass_kg", np.nan))
             dt = float(r.get("runtime_s", np.nan))
             ok = int(r.get("solver_success", 0))
+            strict_path_ok = int(r.get("strict_path_ok", 0))
+            raw_path_ok = int(r.get("raw_path_ok", 0))
             status = str(r.get("status", "Failed"))
 
             masses.append(m_final)
             runtimes.append(dt)
             success_flags.append(ok)
-            print(f"{N:<6} | {m_final:<15.1f} | {dt:<10.2f} | {status:<10}")
+            strict_path_flags.append(strict_path_ok)
+            raw_path_flags.append(raw_path_ok)
+            print(f"{N:<6} | {m_final:<15.1f} | {dt:<10.2f} | {raw_path_ok:<7d} | {strict_path_ok:<9d} | {status:<11}")
 
         self._save_table(
             "grid_independence",
-            ["nodes", "final_mass_kg", "runtime_s", "solver_success"],
-            [(node_counts[i], masses[i], runtimes[i], success_flags[i]) for i in range(len(node_counts))]
+            [
+                "nodes", "final_mass_kg", "runtime_s", "solver_success",
+                "terminal_valid", "strict_terminal_ok", "strict_path_ok",
+                "raw_path_ok", "raw_q_ok", "raw_g_ok", "q_ok", "g_ok",
+                "max_q_pa", "max_g", "status"
+            ],
+            [
+                (
+                    int(node_counts[i]),
+                    masses[i],
+                    runtimes[i],
+                    success_flags[i],
+                    int(job_results[int(node_counts[i])].get("terminal_valid", 0)),
+                    int(job_results[int(node_counts[i])].get("strict_terminal_ok", 0)),
+                    int(job_results[int(node_counts[i])].get("strict_path_ok", 0)),
+                    int(job_results[int(node_counts[i])].get("raw_path_ok", 0)),
+                    int(job_results[int(node_counts[i])].get("raw_q_ok", 0)),
+                    int(job_results[int(node_counts[i])].get("raw_g_ok", 0)),
+                    int(job_results[int(node_counts[i])].get("q_ok", 0)),
+                    int(job_results[int(node_counts[i])].get("g_ok", 0)),
+                    float(job_results[int(node_counts[i])].get("max_q_pa", np.nan)),
+                    float(job_results[int(node_counts[i])].get("max_g", np.nan)),
+                    str(job_results[int(node_counts[i])].get("status", "Failed")),
+                )
+                for i in range(len(node_counts))
+            ]
         )
             
         # Convergence Check
@@ -1655,14 +1816,16 @@ class ReliabilitySuite:
         if np.isfinite(m_100) and np.isfinite(m_140):
             diff = abs(m_140 - m_100)
             print(f"\nMass Delta (140 vs 100 nodes): {diff:.1f} kg")
-            if diff < 100.0:
-                print(f">>> {debug.Style.GREEN}PASS: Grid Independent (<100kg change).{debug.Style.RESET}")
+            if diff < 100.0 and bool(job_results[100].get("strict_path_ok", 0)) and bool(job_results[140].get("strict_path_ok", 0)):
+                print(f">>> {debug.Style.GREEN}PASS: Grid Independent (<100kg change) with replay-valid endpoints.{debug.Style.RESET}")
             else:
-                print(f">>> {debug.Style.YELLOW}WARN: Grid Dependent (Solution still changing).{debug.Style.RESET}")
+                print(f">>> {debug.Style.YELLOW}WARN: Grid study did not show both convergence and replay-valid endpoints.{debug.Style.RESET}")
         else:
             print(f"\n>>> {debug.Style.YELLOW}WARN: Cannot assess grid independence because node 100 or 140 failed.{debug.Style.RESET}")
         
-        # Visualization: convergence and computational cost on separate axes/panels.
+        # Visualization: convergence and replay validity. Runtime is omitted from the
+        # paper figure because the reference node reuses the cached baseline solve,
+        # so its marginal runtime is not directly comparable to the other sweeps.
         valid_indices = [i for i, m in enumerate(masses) if np.isfinite(m)]
         if len(valid_indices) == 0:
             print("  No converged grid points available for plotting.")
@@ -1676,7 +1839,7 @@ class ReliabilitySuite:
         mass_err = np.abs(valid_masses - ref_mass)
 
         fig, (ax1, ax2, ax3) = plt.subplots(
-            3, 1, figsize=(10, 9), sharex=True, gridspec_kw={"height_ratios": [1.2, 1.0, 1.0]}
+            3, 1, figsize=(10, 8.5), sharex=True, gridspec_kw={"height_ratios": [1.2, 1.0, 0.8]}
         )
 
         ax1.plot(valid_nodes, valid_masses, "o-", color="tab:blue", label="Final mass")
@@ -1684,7 +1847,9 @@ class ReliabilitySuite:
         if np.isfinite(m_100) and np.isfinite(m_140):
             ax1.scatter([100, 140], [m_100, m_140], color="k", s=40, zorder=3)
         ax1.set_ylabel("Final Mass (kg)")
-        ax1.set_title("Grid Independence: Objective Convergence and Computational Cost")
+        ax1.set_title("Grid Independence: Objective Convergence and Replay Validity")
+        ax1.ticklabel_format(style="plain", axis="y", useOffset=False)
+        ax1.yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc="best")
 
@@ -1705,10 +1870,17 @@ class ReliabilitySuite:
         ax2.grid(True, which="both", alpha=0.3)
         ax2.legend(loc="best")
 
-        ax3.plot(valid_nodes, valid_runtimes, "x--", color="tab:red")
+        slack_vals = np.array([strict_path_flags[i] for i in valid_indices], dtype=float)
+        raw_vals = np.array([raw_path_flags[i] for i in valid_indices], dtype=float)
+        ax3.scatter(valid_nodes, slack_vals + 0.02, color="tab:green", marker="o", label="Replay-valid (slack)")
+        ax3.scatter(valid_nodes, raw_vals - 0.02, color="tab:purple", marker="x", label="Replay-valid (raw)")
         ax3.set_xlabel("Number of Nodes")
-        ax3.set_ylabel("Runtime (s)")
+        ax3.set_ylabel("Replay Validity")
+        ax3.set_ylim(-0.1, 1.1)
+        ax3.set_yticks([0.0, 1.0])
+        ax3.set_yticklabels(["Invalid", "Valid"])
         ax3.grid(True, alpha=0.3)
+        ax3.legend(loc="best")
         self._finalize_figure(fig, "grid_independence_convergence_cost")
 
     # 2. INTEGRATOR TOLERANCE SWEEP
@@ -1738,10 +1910,15 @@ class ReliabilitySuite:
             terminal = evaluate_terminal_state(sim_res, self.base_config, self.base_env_config)
             traj = self._trajectory_diagnostics(sim_res, self.veh, self.base_config)
             path = self._evaluate_path_compliance(traj, self.base_config)
+            path_raw = self._evaluate_path_compliance(traj, self.base_config, q_slack_pa=0.0, g_slack=0.0)
             strict_path_ok = int(self._is_strict_path_success(terminal, traj, self.base_config))
 
             status = terminal.get("status", "SIM_ERROR")
-            if bool(terminal.get("strict_ok", False)) and not bool(strict_path_ok):
+            if bool(terminal.get("strict_ok", False)) and bool(path_raw.get("path_ok", False)):
+                status = "PASS_RAW"
+            elif bool(terminal.get("strict_ok", False)) and bool(strict_path_ok):
+                status = "PASS_SLACK"
+            elif bool(terminal.get("strict_ok", False)) and not bool(strict_path_ok):
                 status = "PATH"
 
             rows.append((
@@ -1755,6 +1932,9 @@ class ReliabilitySuite:
                 int(terminal.get("terminal_valid", False)),
                 int(terminal.get("strict_ok", False)),
                 strict_path_ok,
+                int(path_raw["path_ok"]),
+                int(path_raw["q_ok"]),
+                int(path_raw["g_ok"]),
                 int(path["q_ok"]),
                 int(path["g_ok"]),
                 path["max_q_pa"],
@@ -1774,6 +1954,7 @@ class ReliabilitySuite:
                 "final_altitude_m", "final_velocity_m_s",
                 "altitude_error_m", "velocity_error_m_s", "radial_velocity_m_s",
                 "terminal_valid", "strict_terminal_ok", "strict_path_ok",
+                "raw_path_ok", "raw_q_ok", "raw_g_ok",
                 "q_ok", "g_ok", "max_q_pa", "max_g", "status"
             ],
             rows
@@ -1832,20 +2013,37 @@ class ReliabilitySuite:
         d_vel = np.array([_drift(r[5], ref[5]) for r in rows[:-1]], dtype=float)
         d_rad = np.array([_drift(r[6], ref[6]) for r in rows[:-1]], dtype=float)
 
-        fig = plt.figure(figsize=(10, 6))
-        if np.any(np.isfinite(d_alt) & (d_alt > 0.0)):
-            plt.loglog(rtols[np.isfinite(d_alt) & (d_alt > 0.0)], d_alt[np.isfinite(d_alt) & (d_alt > 0.0)], "o-", label="|Delta altitude error|")
-        if np.any(np.isfinite(d_vel) & (d_vel > 0.0)):
-            plt.loglog(rtols[np.isfinite(d_vel) & (d_vel > 0.0)], d_vel[np.isfinite(d_vel) & (d_vel > 0.0)], "s-", label="|Delta velocity error|")
-        if np.any(np.isfinite(d_rad) & (d_rad > 0.0)):
-            plt.loglog(rtols[np.isfinite(d_rad) & (d_rad > 0.0)], d_rad[np.isfinite(d_rad) & (d_rad > 0.0)], "^-", label="|Delta radial velocity|")
-        plt.xlabel("Integrator Relative Tolerance (rtol)")
-        plt.ylabel("Error Drift vs Tightest Tolerance")
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         baseline_rtol = tols[-1][0]
-        plt.title(f"Integrator Convergence (Baseline: rtol={baseline_rtol:.0e})")
-        plt.grid(True, which="both", ls="-")
-        plt.gca().invert_xaxis()  # Higher precision (lower tol) to the right.
-        plt.legend(loc="best")
+
+        if np.any(np.isfinite(d_alt) & (d_alt > 0.0)):
+            mask = np.isfinite(d_alt) & (d_alt > 0.0)
+            ax1.loglog(rtols[mask], d_alt[mask], "o-", color="tab:blue", label="Altitude drift")
+        ax1.axhline(50.0, color="tab:orange", linestyle="--", alpha=0.8, label="Convergence criterion")
+        ax1.set_ylabel("Altitude Drift (m)")
+        ax1.set_title(f"Integrator Convergence (Baseline: rtol={baseline_rtol:.0e})")
+        ax1.grid(True, which="both", ls="-", alpha=0.3)
+        ax1.legend(loc="best")
+
+        if np.any(np.isfinite(d_vel) & (d_vel > 0.0)):
+            mask = np.isfinite(d_vel) & (d_vel > 0.0)
+            ax2.loglog(rtols[mask], d_vel[mask], "s-", color="tab:orange", label="Velocity drift")
+        ax2.axhline(0.5, color="tab:red", linestyle="--", alpha=0.8, label="Convergence criterion")
+        ax2.set_ylabel("Velocity Drift (m/s)")
+        ax2.grid(True, which="both", ls="-", alpha=0.3)
+        ax2.legend(loc="best")
+
+        if np.any(np.isfinite(d_rad) & (d_rad > 0.0)):
+            mask = np.isfinite(d_rad) & (d_rad > 0.0)
+            ax3.loglog(rtols[mask], d_rad[mask], "^-", color="tab:green", label="Radial-velocity drift")
+        ax3.axhline(0.5, color="tab:red", linestyle="--", alpha=0.8, label="Convergence criterion")
+        ax3.set_xlabel("Integrator Relative Tolerance (rtol)")
+        ax3.set_ylabel("Radial-Velocity Drift (m/s)")
+        ax3.grid(True, which="both", ls="-", alpha=0.3)
+        ax3.legend(loc="best")
+
+        for ax in (ax1, ax2, ax3):
+            ax.invert_xaxis()  # Higher precision (lower tol) to the right.
         self._finalize_figure(fig, "integrator_tolerance_convergence")
 
     def analyze_randomized_multistart(self, n_trials=8, max_workers=None):
@@ -2524,7 +2722,7 @@ class ReliabilitySuite:
 
     # 14. THEORETICAL EFFICIENCY
     def analyze_theoretical_efficiency(self):
-        debug._print_sub_header("14. Theoretical Efficiency (Hohmann Comparison)")
+        debug._print_sub_header("14. Idealized Delta-V Reference (Hohmann-like Comparison)")
 
         # 1. Get Simulation Data
         opt_res = self._get_baseline_opt_res()
@@ -2563,7 +2761,8 @@ class ReliabilitySuite:
             print("  Simulation failed to generate Delta-V (Crash or no burn).")
             return
 
-        # 3. Calculate Theoretical Minimum (Hohmann-like)
+        # 3. Calculate an idealized lower-bound delta-v reference (Hohmann-like).
+        # This is a diagnostic reference for ascent losses, not a strict fuel lower bound.
         mu = self.env.config.earth_mu
         R1 = self.env.config.earth_radius_equator
         R2 = R1 + self.base_config.target_altitude
@@ -2581,12 +2780,13 @@ class ReliabilitySuite:
 
         efficiency = (dv_theoretical / dv_actual) * 100.0
 
-        print(f"  Theoretical Min Delta-V (Hohmann): {dv_theoretical:.1f} m/s")
+        print(f"  Idealized Lower-Bound Delta-V Reference (Hohmann-like): {dv_theoretical:.1f} m/s")
         print(f"    - Burn 1 (Surf -> Transfer):     {dv_burn1:.1f} m/s")
         print(f"    - Burn 2 (Circularization):      {dv_burn2:.1f} m/s")
         print(f"  Actual Delta-V (Simulation):       {dv_actual:.1f} m/s")
         print(f"  Gravity/Drag/Steering Losses:      {dv_actual - dv_theoretical:.1f} m/s")
         print(f"  Mission Efficiency:                {efficiency:.1f}%")
+        print("  Note: This is an idealized delta-v reference, not a strict lower bound on fuel burned.")
         if terminal_strict_ok and not mission_success:
             print(
                 "  Terminal target met but path constraints were violated "
@@ -2627,7 +2827,7 @@ class ReliabilitySuite:
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
         # Left: direct Delta-V comparison.
-        bar_labels = ["Theoretical Min", "Actual Trajectory"]
+        bar_labels = ["Idealized Reference", "Actual Trajectory"]
         bar_vals = [dv_theoretical, dv_actual]
         bar_colors = ["tab:blue", "tab:green"]
         bars = ax1.bar(bar_labels, bar_vals, color=bar_colors, alpha=0.8)
@@ -2655,16 +2855,14 @@ class ReliabilitySuite:
         ax1.set_title("Delta-V Budget Comparison")
         ax1.grid(True, axis="y", alpha=0.3)
 
-        # Right: efficiency summary with report threshold.
-        eff_color = "tab:green" if efficiency >= 85.0 else "tab:orange"
+        # Right: efficiency context, intentionally without a pass/fail threshold line.
+        eff_color = "tab:orange"
         x_max = max(100.0, efficiency + 8.0)
         ax2.barh(["Mission Efficiency"], [efficiency], color=eff_color, alpha=0.85)
-        ax2.axvline(85.0, color="tab:orange", linestyle="--", alpha=0.8, label="85% reference")
         ax2.set_xlim(0.0, x_max)
         ax2.set_xlabel("Efficiency (%)")
-        ax2.set_title("Efficiency Summary")
+        ax2.set_title("Efficiency Context")
         ax2.grid(True, axis="x", alpha=0.3)
-        ax2.legend(loc="lower right")
         ax2.text(
             efficiency + 1.0,
             0,
@@ -2678,9 +2876,9 @@ class ReliabilitySuite:
             0.03,
             0.95,
             (
-                f"Burn 1: {dv_burn1:.0f} m/s\n"
-                f"Burn 2: {dv_burn2:.0f} m/s\n"
-                f"Losses: {losses:.0f} m/s"
+                f"Losses: {losses:.0f} m/s\n"
+                "Diagnostic only\n"
+                "Not a fuel lower bound"
             ),
             transform=ax2.transAxes,
             va="top",
@@ -2688,13 +2886,14 @@ class ReliabilitySuite:
             bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.7"),
         )
 
-        fig.suptitle("Theoretical Efficiency (Hohmann Reference vs Simulated Trajectory)")
+        fig.suptitle("Idealized Delta-V Reference (Hohmann-like vs Simulated Trajectory)")
         self._finalize_figure(fig, "theoretical_efficiency")
 
-        if mission_success and efficiency > 85.0:
-            print(f">>> {debug.Style.GREEN}PASS: High efficiency (>85%). Trajectory is near-optimal.{debug.Style.RESET}")
-        elif mission_success:
-            print(f">>> {debug.Style.YELLOW}NOTE: Efficiency is {efficiency:.1f}%. Losses are significant.{debug.Style.RESET}")
+        if mission_success:
+            print(
+                f">>> {debug.Style.YELLOW}NOTE: Efficiency is a contextual delta-v benchmark only; "
+                f"it is not used as a pass/fail criterion.{debug.Style.RESET}"
+            )
         else:
             print(f">>> {debug.Style.YELLOW}NOTE: Skip pass/fail efficiency grading because mission was off-target.{debug.Style.RESET}")
 
@@ -4062,6 +4261,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=1337, help="Global random seed for reproducible Monte Carlo runs.")
     parser.add_argument("--mc-samples", type=int, default=200, help="Monte Carlo sample count used in Monte Carlo-based analyses.")
     parser.add_argument("--max-workers", type=int, default=None, help="Maximum parallel workers (set 1 for fully serial mode).")
+    parser.add_argument("--course-core", action="store_true", help="Run only the recommended paper-safe course-core evidence set.")
     parser.add_argument("--no-show", action="store_true", help="Do not open interactive plot windows (save figures only).")
     parser.add_argument("--no-save", action="store_true", help="Do not save figures/CSV outputs.")
     args = parser.parse_args()
@@ -4070,6 +4270,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         save_figures=not args.no_save,
         show_plots=not args.no_show,
-        random_seed=args.seed
+        random_seed=args.seed,
+        analysis_profile="course_core" if args.course_core else "default",
     )
     suite.run_all(monte_carlo_samples=args.mc_samples, max_workers=args.max_workers)

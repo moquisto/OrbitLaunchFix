@@ -161,20 +161,22 @@ class ReliabilityAnalysisToggles:
     Enables/disables each analysis block in relabilityanalysis.py.
     Field order mirrors ReliabilitySuite.run_all() execution order.
     """
-    randomized_multistart: bool = True
+    # Optional extension: optimizer-initialization robustness (off by default).
+    randomized_multistart: bool = False
     grid_independence: bool = True
     collocation_defect_audit: bool = True
     theoretical_efficiency: bool = True
     integrator_tolerance: bool = True
     monte_carlo_precision_target: bool = True
     q2_uncertainty_budget: bool = True
-    # Keep foundational numerical-method checks enabled by default so
-    # report pipelines include explicit integrator-order evidence.
+    # Foundational numerical-method check from course integrator material.
     smooth_integrator_benchmark: bool = True
-    bifurcation_2d_map: bool = True
+    # Optional extension: deterministic 2D sensitivity map (off by default).
+    bifurcation_2d_map: bool = False
+    # Course-aligned "drift" consistency check (kept on).
     drift: bool = True
-    model_limitations: bool = True
-    # Summary synthesis metric; disabled by default for lean report pipelines.
+    # Optional reporting aids (off by default; conclusions should be written in paper text).
+    model_limitations: bool = False
     q7_conclusion_support: bool = False
 
 # --- SpaceX Starship Block 2 Configuration ---

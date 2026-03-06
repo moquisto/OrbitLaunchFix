@@ -1,0 +1,20 @@
+key,value
+timestamp_utc,2026-03-05T20:17:13
+analysis_output_dir,reliability_outputs/reviewer_stage2_course_core
+analysis_profile,course_core
+vehicle_name,SpaceX Starship IFT-6 (Booster 13 / Ship 31)
+target_altitude_m,420000
+requested_target_inclination_deg,nan
+effective_target_inclination_deg,25.997
+launch_latitude_deg,25.997
+num_nodes,140
+max_iter,2000
+max_q_limit_pa,35000
+max_g_limit,4
+terminal_alt_tol_m,5000
+terminal_vel_tol_m_s,10
+terminal_radial_vel_tol_m_s,5
+terminal_inc_tol_deg,0.25
+seed,1337
+python_version,3.11.5
+numpy_version,1.26.0

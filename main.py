@@ -10,6 +10,12 @@ import copy
 import guidance
 import debug
 
+# Small internal guard bands make the replayed trajectory respect the published
+# hard limits without relying on post hoc path slacks in the reliability suite.
+OPTIMIZATION_Q_GUARD_BAND_PA = 200.0
+OPTIMIZATION_G_GUARD_BAND = 0.03
+
+
 def solve_optimal_trajectory(
     config,
     vehicle,
@@ -104,6 +110,8 @@ def solve_optimal_trajectory(
         Re_s = R_earth / scaling.length
         f = environment.config.earth_flattening
         Rp_s = (R_earth * (1.0 - f)) / scaling.length
+        q_limit_internal = config.max_q_limit - OPTIMIZATION_Q_GUARD_BAND_PA
+        g_limit_internal = (config.max_g_load - OPTIMIZATION_G_GUARD_BAND) * environment.config.g0
         
         # Apply Mass Constraints to ALL nodes (0 to N)
         # This ensures the final node (result of last integration step) also respects the limit.
@@ -158,7 +166,7 @@ def solve_optimal_trajectory(
             # Structural Constraints
             # 1. Max Q (35 kPa limit)
             q_val, _ = vehicle.get_aero_properties(x_k, u_dir, t_k_scaled, stage_mode=phase_mode, scaling=scaling)
-            opti.subject_to(q_val <= config.max_q_limit)
+            opti.subject_to(q_val <= q_limit_internal)
             
             # 2. G-Force Limit (4.0 g)
             # Calculate Sensed Acceleration = |a_kinematic - g|
@@ -173,7 +181,7 @@ def solve_optimal_trajectory(
             
             a_sensed = acc_phys - g_phys
             g_load = ca.norm_2(a_sensed)
-            opti.subject_to(g_load <= config.max_g_load * environment.config.g0)
+            opti.subject_to(g_load <= g_limit_internal)
             
             # --- End-of-Interval Checks (Rigorous) ---
             # We check the future point (k+1) using the CURRENT control (u_k) to prevent inter-node violations.
@@ -182,7 +190,7 @@ def solve_optimal_trajectory(
             # 1. Max Q (End of Interval)
             # Dynamic pressure can peak between nodes if velocity increases significantly.
             q_val_next, _ = vehicle.get_aero_properties(x_next, u_dir, t_next_scaled, stage_mode=phase_mode, scaling=scaling)
-            opti.subject_to(q_val_next <= config.max_q_limit)
+            opti.subject_to(q_val_next <= q_limit_internal)
             
             # Calculate dynamics at the next step (x_next is already computed by RK4 above)
             derivs_next = vehicle.get_dynamics(x_next, u_throttle, u_dir, t_next_scaled, stage_mode=phase_mode, scaling=scaling)
@@ -193,7 +201,7 @@ def solve_optimal_trajectory(
             env_state_next = environment.get_state_opti(r_phys_next, t_phys_next)
             
             g_load_next = ca.norm_2(acc_phys_next - env_state_next['gravity'])
-            opti.subject_to(g_load_next <= config.max_g_load * environment.config.g0)
+            opti.subject_to(g_load_next <= g_limit_internal)
             
         # --- Constraint Check for Final Node (k=N) ---
         # Critical for G-Load (Burnout) as mass is lowest here.
@@ -211,7 +219,7 @@ def solve_optimal_trajectory(
              
         # Max Q (Final Node)
         q_val_f, _ = vehicle.get_aero_properties(x_final_phase, u_dir_f, t_final_phase, stage_mode=phase_mode, scaling=scaling)
-        opti.subject_to(q_val_f <= config.max_q_limit)
+        opti.subject_to(q_val_f <= q_limit_internal)
         
         # G-Load (Final Node)
         derivs_f = vehicle.get_dynamics(x_final_phase, u_th_f, u_dir_f, t_final_phase, stage_mode=phase_mode, scaling=scaling)
@@ -222,7 +230,7 @@ def solve_optimal_trajectory(
         env_state_f = environment.get_state_opti(r_phys_f, t_phys_f)
         
         g_load_f = ca.norm_2(acc_phys_f - env_state_f['gravity'])
-        opti.subject_to(g_load_f <= config.max_g_load * environment.config.g0)
+        opti.subject_to(g_load_f <= g_limit_internal)
 
     # Apply Dynamics
     # Phase 1: Boost
@@ -332,14 +340,28 @@ def solve_optimal_trajectory(
     debug.debug_optimization_structure(opti)
     
     t_solve = time.time()
+    solver_stats = {}
     try:
         sol = opti.solve()
         success = True
+        try:
+            solver_stats = opti.stats()
+        except Exception:
+            solver_stats = {}
         print(f"[Optimizer] SUCCESS: Optimal solution found in {time.time() - t_solve:.2f}s.")
-    except:
+    except Exception:
         print(f"[Optimizer] FAILURE: Solver did not converge after {time.time() - t_solve:.2f}s. Returning debug values.")
         success = False
         sol = opti.debug
+        try:
+            solver_stats = opti.stats()
+        except Exception:
+            solver_stats = {}
+        try:
+            print("[Optimizer] CasADi infeasibility report:")
+            opti.debug.show_infeasibilities()
+        except Exception as exc:
+            print(f"[Optimizer] Could not produce infeasibility report: {exc}")
         debug.print_debug_info(opti, sol, scaling, config, environment, vehicle, X1, U1, T1_scaled, X3, U3, T3_scaled)
     
     # --- 6b. CHECK SCALING ---
@@ -368,6 +390,13 @@ def solve_optimal_trajectory(
     res["X3"] = sol.value(X3) * s_vec[:, None]
     res["U3"] = sol.value(U3)
     res["success"] = success
+    res["solver_return_status"] = solver_stats.get("return_status", "")
+    iter_count = solver_stats.get("iter_count", np.nan)
+    try:
+        res["solver_iter_count"] = int(iter_count)
+    except Exception:
+        res["solver_iter_count"] = np.nan
+    res["solver_stats"] = solver_stats
     
     # Reliability Analysis Data
     res["lam_g"] = sol.value(opti.lam_g) # Lagrange Multipliers (Constraint Sensitivity)
