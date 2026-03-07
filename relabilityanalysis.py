@@ -1596,15 +1596,15 @@ class ReliabilitySuite:
                 print(f"\n{debug.Style.BOLD}--- Precomputing Shared Baseline Solution ---{debug.Style.RESET}")
                 self._get_baseline_opt_res()
 
-            # Runtime order based on observed execution cost (short -> long).
+            # Run grid independence first so the main discretization check is available early.
             ordered_tests = [
+                ("grid_independence", "Grid independence", self.analyze_grid_independence, (), {"max_workers": worker_cap}),
                 ("model_limitations", "Model limitations", self.analyze_model_limitations, (), {}),
                 ("smooth_integrator_benchmark", "Smooth ODE integrator benchmark", self.analyze_smooth_integrator_benchmark, (), {}),
                 ("drift", "Drift analysis", _run_drift_with_cached_baseline, (), {}),
                 ("theoretical_efficiency", "Theoretical efficiency", self.analyze_theoretical_efficiency, (), {}),
                 ("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance, (), {}),
                 ("collocation_defect_audit", "Collocation defect audit", self.analyze_collocation_defect_audit, (), {"max_workers": worker_cap}),
-                ("grid_independence", "Grid independence", self.analyze_grid_independence, (), {"max_workers": worker_cap}),
                 ("bifurcation_2d_map", "Bifurcation 2D map", self.analyze_bifurcation_2d_map, (), {"max_workers": worker_cap}),
                 ("randomized_multistart", "Randomized multi-start robustness", self.analyze_randomized_multistart, (), {"max_workers": worker_cap}),
                 (
@@ -1647,17 +1647,16 @@ class ReliabilitySuite:
     # 1. GRID INDEPENDENCE STUDY
     def analyze_grid_independence(self, max_workers=None):
         debug._print_sub_header("1. Grid Independence Study")
-        # Paper-focused convergence sweep: enough spacing to show convergence
-        # without turning the evidence run into an unnecessarily large batch.
-        node_counts = [80, 100, 120, 140]
+        # Broad convergence sweep for the final grid study.
+        node_counts = list(range(20, 141, 20))
         masses = []
         runtimes = []
         success_flags = []
         strict_path_flags = []
         raw_path_flags = []
-        if max_workers is None:
-            max_workers = min(4, max(1, os.cpu_count() or 1))
-        max_workers = max(1, int(max_workers))
+        # Keep the grid study serial. Parallel CasADi/IPOPT solves become memory-heavy,
+        # and the denser midpoint path checks can trigger native crashes on smaller machines.
+        max_workers = 1
         baseline_node = int(self.base_config.num_nodes)
         baseline_opt = self._get_baseline_opt_res()
         if max_workers > len(node_counts) - 1:
@@ -1890,18 +1889,30 @@ class ReliabilitySuite:
         # Get a solution first
         opt_res = self._get_baseline_opt_res()
             
-        # Increased resolution: Logarithmic sweep from 1e-6 to 1e-12
+        # Readable refined sweep: 1 / 5 / 1 / 5 pattern, with ATOL kept three
+        # orders tighter than RTOL throughout.
         tols = [
-            (1e-6, 1e-9), (5e-7, 5e-10), (1e-7, 1e-10), (5e-8, 5e-11), (1e-8, 1e-11),
-            (5e-9, 5e-12), (1e-9, 1e-12), (1e-10, 1e-13), (1e-11, 1e-14), (1e-12, 1e-14)
+            (1e-6, 1e-9),
+            (5e-7, 5e-10),
+            (1e-7, 1e-10),
+            (5e-8, 5e-11),
+            (1e-8, 1e-11),
+            (5e-9, 5e-12),
+            (1e-9, 1e-12),
+            (5e-10, 5e-13),
+            (1e-10, 1e-13),
+            (5e-11, 5e-14),
+            (1e-11, 1e-14),
+            (5e-12, 5e-15),
+            (1e-12, 1e-15),
         ]
         rows = []
         
         print(
-            f"{'RTOL':<8} | {'ATOL':<8} | {'Alt err (m)':<12} | {'Vel err (m/s)':<14} | "
+            f"{'RTOL':<10} | {'ATOL':<10} | {'Alt err (m)':<12} | {'Vel err (m/s)':<14} | "
             f"{'Max-Q (kPa)':<12} | {'Max-g':<8} | {'Path':<6} | {'Status':<10}"
         )
-        print("-" * 105)
+        print("-" * 109)
         
         for rtol, atol in tols:
             with suppress_stdout():
@@ -1942,7 +1953,7 @@ class ReliabilitySuite:
                 status,
             ))
             print(
-                f"{rtol:<8.0e} | {atol:<8.0e} | {terminal.get('alt_err_m', np.nan):<12.2f} | "
+                f"{rtol:<10.1e} | {atol:<10.1e} | {terminal.get('alt_err_m', np.nan):<12.2f} | "
                 f"{terminal.get('vel_err_m_s', np.nan):<14.3f} | {path['max_q_pa']/1000.0:<12.3f} | "
                 f"{path['max_g']:<8.3f} | {strict_path_ok:<6d} | {status:<10}"
             )
@@ -1960,11 +1971,14 @@ class ReliabilitySuite:
             rows
         )
 
-        # Compare operating tolerance against tightest result using multiple metrics.
-        idx_std = 6  # (1e-9, 1e-12) is at index 6
+        # Compare the operating tolerance against the tightest result using multiple metrics.
+        idx_std = next(i for i, (rtol_i, atol_i) in enumerate(tols) if np.isclose(rtol_i, 1e-9) and np.isclose(atol_i, 1e-12))
         ref = rows[-1]
         op = rows[idx_std]
         loose = rows[0]
+        loose_rtol, loose_atol = tols[0]
+        op_rtol, op_atol = tols[idx_std]
+        ref_rtol, ref_atol = tols[-1]
 
         def _drift(a, b):
             if np.isfinite(a) and np.isfinite(b):
@@ -1975,16 +1989,16 @@ class ReliabilitySuite:
         drift_alt_op = _drift(op[4], ref[4])
         drift_vel_op = _drift(op[5], ref[5])
         drift_radial_op = _drift(op[6], ref[6])
-        drift_q_op = _drift(op[12], ref[12])
-        drift_g_op = _drift(op[13], ref[13])
+        drift_q_op = _drift(op[15], ref[15])
+        drift_g_op = _drift(op[16], ref[16])
 
-        print(f"\nDrift vs tightest (1e-12/1e-14):")
-        print(f"  Altitude error drift (1e-6 -> ref): {drift_alt_loose:.2f} m")
-        print(f"  Altitude error drift (1e-9 -> ref): {drift_alt_op:.2f} m")
-        print(f"  Velocity error drift (1e-9 -> ref): {drift_vel_op:.4f} m/s")
-        print(f"  Radial-velocity drift (1e-9 -> ref): {drift_radial_op:.4f} m/s")
-        print(f"  Max-Q drift (1e-9 -> ref): {drift_q_op:.3f} Pa")
-        print(f"  Max-g drift (1e-9 -> ref): {drift_g_op:.6f} g")
+        print(f"\nDrift vs tightest ({ref_rtol:.0e}/{ref_atol:.0e}):")
+        print(f"  Altitude error drift ({loose_rtol:.0e} -> ref): {drift_alt_loose:.2f} m")
+        print(f"  Altitude error drift ({op_rtol:.0e} -> ref): {drift_alt_op:.2f} m")
+        print(f"  Velocity error drift ({op_rtol:.0e} -> ref): {drift_vel_op:.4f} m/s")
+        print(f"  Radial-velocity drift ({op_rtol:.0e} -> ref): {drift_radial_op:.4f} m/s")
+        print(f"  Max-Q drift ({op_rtol:.0e} -> ref): {drift_q_op:.3f} Pa")
+        print(f"  Max-g drift ({op_rtol:.0e} -> ref): {drift_g_op:.6f} g")
 
         op_path_ok = bool(op[9])
         ref_path_ok = bool(ref[9])
@@ -1999,7 +2013,7 @@ class ReliabilitySuite:
         )
         if converged_op:
             print(
-                f">>> {debug.Style.GREEN}PASS: Operating tolerance (1e-9/1e-12) is converged and "
+                f">>> {debug.Style.GREEN}PASS: Operating tolerance ({op_rtol:.0e}/{op_atol:.0e}) is converged and "
                 f"path-compliant.{debug.Style.RESET}"
             )
         else:
@@ -2606,6 +2620,13 @@ class ReliabilitySuite:
         max_pos_err = 0.0
         max_vel_err = 0.0
         max_mass_err = 0.0
+        sum_sq_pos = 0.0
+        sum_sq_vel = 0.0
+        sum_sq_mass = 0.0
+        sample_count = 0
+        final_position_drift = np.nan
+        final_velocity_drift = np.nan
+        final_mass_drift = np.nan
 
         for p_opt, p_sim in zip(phases_opt, sim_segments):
             f_sim = interp1d(
@@ -2617,12 +2638,25 @@ class ReliabilitySuite:
             vel_err = np.linalg.norm(p_opt["x"][3:6, :] - y_interp[3:6, :], axis=0)
             mass_err = np.abs(p_opt["x"][6, :] - y_interp[6, :])
             p_max = float(np.max(pos_err))
+            p_rms = float(np.sqrt(np.mean(pos_err * pos_err)))
             v_max = float(np.max(vel_err))
+            v_rms = float(np.sqrt(np.mean(vel_err * vel_err)))
             m_max = float(np.max(mass_err))
-            phase_rows.append((p_opt["label"], p_max, v_max, m_max))
+            m_rms = float(np.sqrt(np.mean(mass_err * mass_err)))
+            phase_rows.append((p_opt["label"], p_max, p_rms, v_max, v_rms, m_max, m_rms))
             max_pos_err = max(max_pos_err, p_max)
             max_vel_err = max(max_vel_err, v_max)
             max_mass_err = max(max_mass_err, m_max)
+            sum_sq_pos += float(np.sum(pos_err * pos_err))
+            sum_sq_vel += float(np.sum(vel_err * vel_err))
+            sum_sq_mass += float(np.sum(mass_err * mass_err))
+            sample_count += int(len(pos_err))
+            final_position_drift = float(pos_err[-1])
+            final_velocity_drift = float(vel_err[-1])
+            final_mass_drift = float(mass_err[-1])
+
+        if sample_count <= 0:
+            return {"valid": False, "reason": "no_overlap_samples"}
 
         pass_flag = bool(max_pos_err <= 2000.0 and max_vel_err <= 30.0 and max_mass_err <= 500.0)
         return {
@@ -2631,6 +2665,12 @@ class ReliabilitySuite:
             "max_pos_m": float(max_pos_err),
             "max_vel_m_s": float(max_vel_err),
             "max_mass_kg": float(max_mass_err),
+            "rms_pos_m": float(np.sqrt(sum_sq_pos / sample_count)),
+            "rms_vel_m_s": float(np.sqrt(sum_sq_vel / sample_count)),
+            "rms_mass_kg": float(np.sqrt(sum_sq_mass / sample_count)),
+            "final_position_drift_m": final_position_drift,
+            "final_velocity_drift_m_s": final_velocity_drift,
+            "final_mass_drift_kg": final_mass_drift,
             "pass_flag": int(pass_flag)
         }
 
@@ -2648,13 +2688,27 @@ class ReliabilitySuite:
             )
             return
 
-        print(f"{'Phase':<10} | {'Max Pos (m)':<12} | {'Max Vel (m/s)':<14} | {'Max Mass (kg)':<14}")
-        print("-" * 62)
-        for phase, p_max, v_max, m_max in drift["phase_rows"]:
-            print(f"{phase:<10} | {p_max:<12.3f} | {v_max:<14.4f} | {m_max:<14.4f}")
+        print(
+            f"{'Phase':<10} | {'Max Pos (m)':<12} | {'RMS Pos (m)':<12} | "
+            f"{'Max Vel (m/s)':<14} | {'RMS Vel (m/s)':<14} | "
+            f"{'Max Mass (kg)':<14} | {'RMS Mass (kg)':<14}"
+        )
+        print("-" * 108)
+        for phase, p_max, p_rms, v_max, v_rms, m_max, m_rms in drift["phase_rows"]:
+            print(
+                f"{phase:<10} | {p_max:<12.3f} | {p_rms:<12.3f} | "
+                f"{v_max:<14.4f} | {v_rms:<14.4f} | "
+                f"{m_max:<14.4f} | {m_rms:<14.4f}"
+            )
         print(f"  Max Position Drift: {drift['max_pos_m']:.3f} m")
         print(f"  Max Velocity Drift: {drift['max_vel_m_s']:.4f} m/s")
         print(f"  Max Mass Drift:     {drift['max_mass_kg']:.4f} kg")
+        print(f"  RMS Position Drift: {drift['rms_pos_m']:.3f} m")
+        print(f"  RMS Velocity Drift: {drift['rms_vel_m_s']:.4f} m/s")
+        print(f"  RMS Mass Drift:     {drift['rms_mass_kg']:.4f} kg")
+        print(f"  Final Position Drift: {drift['final_position_drift_m']:.3f} m")
+        print(f"  Final Velocity Drift: {drift['final_velocity_drift_m_s']:.4f} m/s")
+        print(f"  Final Mass Drift:     {drift['final_mass_drift_kg']:.4f} kg")
         if drift["pass_flag"]:
             print(f">>> {debug.Style.GREEN}PASS: Simulation concurs with optimizer trajectory.{debug.Style.RESET}")
         else:
@@ -2662,7 +2716,15 @@ class ReliabilitySuite:
 
         self._save_table(
             "drift_phase_metrics",
-            ["phase", "max_position_drift_m", "max_velocity_drift_m_s", "max_mass_drift_kg"],
+            [
+                "phase",
+                "max_position_drift_m",
+                "rms_position_drift_m",
+                "max_velocity_drift_m_s",
+                "rms_velocity_drift_m_s",
+                "max_mass_drift_kg",
+                "rms_mass_drift_kg",
+            ],
             drift["phase_rows"]
         )
         self._save_table(
@@ -2673,6 +2735,12 @@ class ReliabilitySuite:
                 ("max_position_drift_m", drift["max_pos_m"]),
                 ("max_velocity_drift_m_s", drift["max_vel_m_s"]),
                 ("max_mass_drift_kg", drift["max_mass_kg"]),
+                ("rms_position_drift_m", drift["rms_pos_m"]),
+                ("rms_velocity_drift_m_s", drift["rms_vel_m_s"]),
+                ("rms_mass_drift_kg", drift["rms_mass_kg"]),
+                ("final_position_drift_m", drift["final_position_drift_m"]),
+                ("final_velocity_drift_m_s", drift["final_velocity_drift_m_s"]),
+                ("final_mass_drift_kg", drift["final_mass_drift_kg"]),
                 ("pass_flag", drift["pass_flag"]),
                 ("threshold_position_m", 2000.0),
                 ("threshold_velocity_m_s", 30.0),
@@ -2682,8 +2750,8 @@ class ReliabilitySuite:
 
         phases = [r[0] for r in drift["phase_rows"]]
         pos_vals = [r[1] for r in drift["phase_rows"]]
-        vel_vals = [r[2] for r in drift["phase_rows"]]
-        mass_vals = [r[3] for r in drift["phase_rows"]]
+        vel_vals = [r[3] for r in drift["phase_rows"]]
+        mass_vals = [r[5] for r in drift["phase_rows"]]
         x = np.arange(len(phases))
 
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
@@ -2717,6 +2785,12 @@ class ReliabilitySuite:
             "max_position_drift_m": drift["max_pos_m"],
             "max_velocity_drift_m_s": drift["max_vel_m_s"],
             "max_mass_drift_kg": drift["max_mass_kg"],
+            "rms_position_drift_m": drift["rms_pos_m"],
+            "rms_velocity_drift_m_s": drift["rms_vel_m_s"],
+            "rms_mass_drift_kg": drift["rms_mass_kg"],
+            "final_position_drift_m": drift["final_position_drift_m"],
+            "final_velocity_drift_m_s": drift["final_velocity_drift_m_s"],
+            "final_mass_drift_kg": drift["final_mass_drift_kg"],
             "pass_flag": drift["pass_flag"],
         }
 
