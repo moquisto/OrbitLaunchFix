@@ -151,34 +151,6 @@ def plot_analysis_dashboard(results):
     cbar = plt.colorbar(m, ax=ax, shrink=0.6, pad=0.05)
     cbar.set_label("Fuel Consumed (kg)", fontsize=12)
     
-    # --- ADD EARTH ROTATION VECTORS ---
-    # Visualize the "Free Boost" from Earth's rotation
-    # Subsample grid for arrows (plot every 4th point to avoid clutter)
-    step = 4
-    q_lats = lat_grid[::step, ::step]
-    q_lons = lon_grid[::step, ::step]
-    
-    rad_q_lat = np.radians(q_lats)
-    rad_q_lon = np.radians(q_lons)
-    
-    # Arrow Origins (Unit Sphere)
-    qx = np.cos(rad_q_lat) * np.cos(rad_q_lon)
-    qy = np.cos(rad_q_lat) * np.sin(rad_q_lon)
-    qz = np.sin(rad_q_lat)
-    
-    # Arrow Vectors (Eastward Direction, Magnitude ~ cos(lat))
-    scale = 0.15 # Visual scale factor
-    mag = np.cos(rad_q_lat) * scale
-    
-    vx = -np.sin(rad_q_lon) * mag
-    vy = np.cos(rad_q_lon) * mag
-    vz = np.zeros_like(vx)
-    
-    ax.quiver(qx, qy, qz, vx, vy, vz, color='white', alpha=0.6, 
-              arrow_length_ratio=0.3, linewidth=1.5, label='Earth Rotation Velocity')
-    
-    ax.legend(loc='lower right')
-    
     # Clean up axes
     ax.set_box_aspect([1,1,1])
     ax.set_axis_off() # Hide axes for cleaner globe look

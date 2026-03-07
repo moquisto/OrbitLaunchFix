@@ -3,6 +3,18 @@ import numpy as np
 # vehicle.py
 # Purpose: Defines the Equations of Motion (Dynamics).
 
+def _ellipsoidal_altitude_m(position_vector, env_cfg):
+    r = np.asarray(position_vector, dtype=float)
+    r_sq = float(np.dot(r, r))
+    r_mag = np.sqrt(max(r_sq, 1e-16))
+    r_eq = float(env_cfg.earth_radius_equator)
+    r_pol = r_eq * (1.0 - float(env_cfg.earth_flattening))
+    rho_sq = float(r[0] ** 2 + r[1] ** 2)
+    z_sq = float(r[2] ** 2)
+    denom = np.sqrt((r_pol**2) * rho_sq + (r_eq**2) * z_sq + 1e-16)
+    r_local = (r_eq * r_pol * r_mag) / denom
+    return r_mag - r_local
+
 class Vehicle:
     def __init__(self, rocket_config, environment):
         print(f"[Vehicle] Initializing vehicle dynamics model: {rocket_config.name}")
@@ -245,6 +257,7 @@ class Vehicle:
         f_gravity = g_vec * m
         f_aero_thrust = f_total - f_gravity # Combined Aero + Thrust
         
-        print(f"  [Force Diag] Mass: {m/1000:.1f}t | Alt: {(np.linalg.norm(r)-self.env.config.earth_radius_equator)/1000:.1f}km")
+        alt_km = _ellipsoidal_altitude_m(r, self.env.config) / 1000.0
+        print(f"  [Force Diag] Mass: {m/1000:.1f}t | Alt: {alt_km:.1f}km")
         print(f"  [Force Diag] G-Force: {np.linalg.norm(f_gravity)/1000:.1f} kN | Net Force: {np.linalg.norm(f_total)/1000:.1f} kN")
         print(f"  [Force Diag] Accel:   {np.linalg.norm(acc_total):.2f} m/s^2 ({(np.linalg.norm(acc_total)/self.env.config.g0):.2f} g)")

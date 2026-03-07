@@ -107,7 +107,7 @@ Default behavior:
 - Saves figures to `figures/` (PNG + PDF).
 - Saves tabular outputs to `data/` (CSV).
 - Uses random seed `1337` unless overridden.
-- Runs the analyses enabled in `RELIABILITY_ANALYSIS_TOGGLES`; optional extensions are off by default.
+- Runs the final-report default set from `RELIABILITY_ANALYSIS_TOGGLES`; supplementary uncertainty/robustness extensions are off by default.
 
 CLI options:
 
@@ -171,12 +171,12 @@ Default enabled:
 - `collocation_defect_audit`
 - `theoretical_efficiency`
 - `integrator_tolerance`
-- `monte_carlo_precision_target`
-- `q2_uncertainty_budget`
 - `smooth_integrator_benchmark`
 - `drift`
 
 Default disabled:
+- `monte_carlo_precision_target`
+- `q2_uncertainty_budget`
 - `randomized_multistart`
 - `bifurcation_2d_map`
 - `model_limitations`

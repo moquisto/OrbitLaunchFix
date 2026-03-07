@@ -167,8 +167,9 @@ class ReliabilityAnalysisToggles:
     collocation_defect_audit: bool = True
     theoretical_efficiency: bool = True
     integrator_tolerance: bool = True
-    monte_carlo_precision_target: bool = True
-    q2_uncertainty_budget: bool = True
+    # Supplementary uncertainty studies kept available but disabled for the final-report default run.
+    monte_carlo_precision_target: bool = False
+    q2_uncertainty_budget: bool = False
     # Foundational numerical-method check from course integrator material.
     smooth_integrator_benchmark: bool = True
     # Optional extension: deterministic 2D sensitivity map (off by default).
