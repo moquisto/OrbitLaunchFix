@@ -1,4 +1,4 @@
-rtol,atol,final_altitude_m,final_velocity_m_s,altitude_error_m,velocity_error_m_s,radial_velocity_m_s,terminal_valid,strict_terminal_ok,strict_path_ok,raw_path_ok,raw_q_ok,raw_g_ok,q_ok,g_ok,max_q_pa,max_g,status
+rtol,atol,final_spherical_height_m,final_velocity_m_s,spherical_height_error_m,velocity_error_m_s,radial_velocity_m_s,terminal_valid,strict_terminal_ok,strict_path_ok,raw_path_ok,raw_q_ok,raw_g_ok,q_ok,g_ok,max_q_pa,max_g,status
 1e-06,1e-09,419674.856551,7659.1407966,-325.143448564,1.8713120209,-0.341410480135,1,1,1,1,1,1,1,1,34886.7912181,3.96957856292,PASS_RAW
 5e-07,5e-10,419306.611772,7657.59182524,-693.388227725,0.322340658165,-2.07823301357,1,1,1,1,1,1,1,1,34846.1933543,3.97125892777,PASS_RAW
 1e-07,1e-10,419884.463844,7657.49125007,-115.536156424,0.221765485331,-0.407053514615,1,1,1,1,1,1,1,1,34847.5847725,3.9687836593,PASS_RAW

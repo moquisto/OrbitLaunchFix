@@ -56,7 +56,7 @@ Date: 2026-03-05
 
 ### Keep by explicit exception request
 - `theoretical_efficiency` (idealized delta-v reference / fuel-use context, short)
-- `collocation_defect_audit`
+- `interval_replay_audit`
 
 ### Keep available but disable by default (optional / supplementary)
 - `monte_carlo_precision_target`
@@ -84,8 +84,8 @@ Use this matrix when deciding what belongs in the main paper body vs appendix.
   - Why: optimizer-vs-simulator consistency and integration drift quality check.
 - `theoretical_efficiency`: KEEP (exception, short)
   - Why: idealized delta-v lower-bound reference for physical plausibility and fuel-use context; not a strict lower bound on fuel burned.
-- `collocation_defect_audit`: KEEP (exception, short)
-  - Why: direct transcription-quality evidence; requested exception.
+- `interval_replay_audit`: KEEP (appendix, short)
+  - Why: uses an independent DOP853 replay to check per-interval transcription mismatch instead of re-evaluating the same RK4 step used by the NLP.
 - `randomized_multistart`: REMOVE from main body (optional appendix only)
   - Why: useful robustness extension, but not core course requirement for grade defense.
 - `bifurcation_2d_map` (2D parameter sensitivity map): REMOVE from main body (optional appendix only)

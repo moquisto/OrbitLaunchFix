@@ -164,7 +164,7 @@ class ReliabilityAnalysisToggles:
     # Optional extension: optimizer-initialization robustness (off by default).
     randomized_multistart: bool = False
     grid_independence: bool = True
-    collocation_defect_audit: bool = True
+    interval_replay_audit: bool = True
     theoretical_efficiency: bool = True
     integrator_tolerance: bool = True
     # Supplementary uncertainty studies kept available but disabled for the final-report default run.

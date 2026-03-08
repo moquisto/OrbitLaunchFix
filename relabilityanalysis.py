@@ -29,6 +29,12 @@ from main import (
     solve_optimal_trajectory,
 )
 from simulation import run_simulation
+from trajectory_metrics import (
+    circular_target_speed_m_s,
+    ellipsoidal_altitude_m,
+    spherical_altitude_m,
+    target_orbit_radius_m,
+)
 import debug
 import guidance
 
@@ -73,7 +79,7 @@ def apply_analysis_profile(toggles, profile):
     if profile == "course_core":
         toggles.randomized_multistart = False
         toggles.grid_independence = True
-        toggles.collocation_defect_audit = True
+        toggles.interval_replay_audit = True
         toggles.theoretical_efficiency = True
         toggles.integrator_tolerance = True
         toggles.monte_carlo_precision_target = False
@@ -109,11 +115,15 @@ def evaluate_terminal_state(
         "strict_ok": False,
         "status": "SIM_ERROR",
         "r_f_m": np.nan,
+        "spherical_height_m": np.nan,
+        "ellipsoidal_altitude_m": np.nan,
         "v_f_m_s": np.nan,
         "target_alt_m": float(cfg.target_altitude),
+        "target_orbit_radius_m": np.nan,
         "target_vel_m_s": np.nan,
         "target_inclination_deg": np.nan,
         "alt_err_m": np.nan,
+        "spherical_height_err_m": np.nan,
         "vel_err_m_s": np.nan,
         "radial_velocity_m_s": np.nan,
         "fpa_deg": np.nan,
@@ -166,14 +176,16 @@ def evaluate_terminal_state(
         metrics["status"] = "CRASH"
         return metrics
 
-    r_f = rf - env_cfg.earth_radius_equator
+    spherical_height = spherical_altitude_m(final_state[0:3], env_cfg)
+    ellipsoidal_alt = ellipsoidal_altitude_m(final_state[0:3], env_cfg)
     v_f = np.linalg.norm(final_state[3:6])
     m_final = float(final_state[6])
     target_alt = float(cfg.target_altitude)
-    target_vel = np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + target_alt))
+    target_radius = target_orbit_radius_m(target_alt, env_cfg)
+    target_vel = circular_target_speed_m_s(target_alt, env_cfg)
     target_inc_deg = float(cfg.target_inclination) if cfg.target_inclination is not None else abs(float(env_cfg.launch_latitude))
 
-    alt_err = r_f - target_alt
+    alt_err = spherical_height - target_alt
     vel_err = v_f - target_vel
     radial_speed = float(np.dot(final_state[0:3], final_state[3:6]) / (rf + 1e-12))
     sin_fpa = np.clip(radial_speed / (v_f + 1e-12), -1.0, 1.0)
@@ -204,11 +216,15 @@ def evaluate_terminal_state(
         "orbit_ok": orbit_ok,
         "fuel_ok": fuel_ok,
         "strict_ok": strict_ok,
-        "r_f_m": r_f,
+        "r_f_m": spherical_height,
+        "spherical_height_m": spherical_height,
+        "ellipsoidal_altitude_m": ellipsoidal_alt,
         "v_f_m_s": v_f,
+        "target_orbit_radius_m": target_radius,
         "target_vel_m_s": target_vel,
         "target_inclination_deg": target_inc_deg,
         "alt_err_m": alt_err,
+        "spherical_height_err_m": alt_err,
         "vel_err_m_s": vel_err,
         "radial_velocity_m_s": radial_speed,
         "fpa_deg": fpa_deg,
@@ -658,9 +674,9 @@ def _run_grid_independence_worker(payload):
     }
 
 
-def _run_collocation_phase_defects_worker(payload):
+def _run_interval_replay_phase_worker(payload):
     """
-    Compute collocation defects for one phase.
+    Replay one transcription phase interval-by-interval with a different integrator.
     """
     phase_name = str(payload["phase_name"])
     X = np.asarray(payload["X"], dtype=float)
@@ -682,10 +698,13 @@ def _run_collocation_phase_defects_worker(payload):
         N_loc = U.shape[1]
     dt = T / max(N_loc, 1)
 
-    pos_def = np.zeros(N_loc)
-    vel_def = np.zeros(N_loc)
-    mass_def = np.zeros(N_loc)
-    rel_state_max = np.zeros(N_loc)
+    pos_err = np.full(N_loc, np.nan, dtype=float)
+    vel_err = np.full(N_loc, np.nan, dtype=float)
+    mass_err = np.full(N_loc, np.nan, dtype=float)
+    rel_state_max = np.full(N_loc, np.nan, dtype=float)
+    q_max = np.full(N_loc, np.nan, dtype=float)
+    g_max = np.full(N_loc, np.nan, dtype=float)
+    solver_ok = np.ones(N_loc, dtype=int)
 
     for k in range(N_loc):
         xk = X[:, k]
@@ -698,27 +717,65 @@ def _run_collocation_phase_defects_worker(payload):
             u_dir = np.array(uk[1:], dtype=float)
         tk = float(t_start + k * dt)
 
-        def dyn(x, t):
+        def dyn(t, x):
             return veh_i.get_dynamics(x, throttle, u_dir, t, stage_mode=stage_mode, scaling=None)
 
-        k1 = dyn(xk, tk)
-        k2 = dyn(xk + 0.5 * dt * k1, tk + 0.5 * dt)
-        k3 = dyn(xk + 0.5 * dt * k2, tk + 0.5 * dt)
-        k4 = dyn(xk + dt * k3, tk + dt)
-        x_pred = xk + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-        defect = X[:, k + 1] - x_pred
+        try:
+            sol = solve_ivp(
+                dyn,
+                (tk, tk + dt),
+                xk,
+                method="DOP853",
+                rtol=1e-10,
+                atol=1e-12,
+                dense_output=True,
+            )
+        except Exception:
+            solver_ok[k] = 0
+            continue
+
+        if not bool(sol.success) or sol.y.shape[1] < 1:
+            solver_ok[k] = 0
+            continue
+
+        x_replay = np.asarray(sol.y[:, -1], dtype=float)
+        mismatch = x_replay - X[:, k + 1]
         denom = np.maximum(np.abs(X[:, k + 1]), 1.0)
-        pos_def[k] = float(np.linalg.norm(defect[0:3]))
-        vel_def[k] = float(np.linalg.norm(defect[3:6]))
-        mass_def[k] = float(abs(defect[6]))
-        rel_state_max[k] = float(np.max(np.abs(defect) / denom))
+        pos_err[k] = float(np.linalg.norm(mismatch[0:3]))
+        vel_err[k] = float(np.linalg.norm(mismatch[3:6]))
+        mass_err[k] = float(abs(mismatch[6]))
+        rel_state_max[k] = float(np.max(np.abs(mismatch) / denom))
+
+        sample_t = np.linspace(tk, tk + dt, 17)
+        if sol.sol is not None:
+            x_samples = np.asarray(sol.sol(sample_t), dtype=float)
+        else:
+            x_samples = np.asarray(sol.y, dtype=float)
+            sample_t = np.asarray(sol.t, dtype=float)
+
+        q_peak = -np.inf
+        g_peak = -np.inf
+        for ti, xi in zip(sample_t, x_samples.T):
+            env_state = env_i.get_state_sim(xi[0:3], float(ti))
+            v_rel = xi[3:6] - env_state["wind_velocity"]
+            q_here = 0.5 * env_state["density"] * float(np.dot(v_rel, v_rel))
+            dyn_here = veh_i.get_dynamics(xi, throttle, u_dir, float(ti), stage_mode=stage_mode, scaling=None)
+            sensed_acc = dyn_here[3:6] - env_state["gravity"]
+            g_here = float(np.linalg.norm(sensed_acc) / env_i.config.g0)
+            q_peak = max(q_peak, q_here)
+            g_peak = max(g_peak, g_here)
+        q_max[k] = float(q_peak)
+        g_max[k] = float(g_peak)
 
     return {
         "phase_name": phase_name,
-        "position_defect": pos_def,
-        "velocity_defect": vel_def,
-        "mass_defect": mass_def,
-        "relative_defect": rel_state_max,
+        "position_error": pos_err,
+        "velocity_error": vel_err,
+        "mass_error": mass_err,
+        "relative_error": rel_state_max,
+        "max_q_pa": q_max,
+        "max_g": g_max,
+        "solver_ok": solver_ok,
     }
 
 
@@ -764,7 +821,7 @@ def _run_bifurcation_batch_worker(payload):
                     "strict_success": int(strict_path_ok),
                     "fuel_margin_kg": float(margin) if np.isfinite(margin) else np.nan,
                     "normalized_orbit_error": float(orbit_err) if np.isfinite(orbit_err) else np.nan,
-                    "altitude_error_m": float(terminal.get("alt_err_m", np.nan)),
+                    "spherical_height_error_m": float(terminal.get("spherical_height_err_m", np.nan)),
                     "velocity_error_m_s": float(terminal.get("vel_err_m_s", np.nan)),
                     "q_ok": int(path.get("q_ok", False)),
                     "g_ok": int(path.get("g_ok", False)),
@@ -781,7 +838,7 @@ def _run_bifurcation_batch_worker(payload):
                     "strict_success": 0,
                     "fuel_margin_kg": np.nan,
                     "normalized_orbit_error": np.nan,
-                    "altitude_error_m": np.nan,
+                    "spherical_height_error_m": np.nan,
                     "velocity_error_m_s": np.nan,
                     "q_ok": 0,
                     "g_ok": 0,
@@ -1586,7 +1643,7 @@ class ReliabilitySuite:
             "drift",
             "theoretical_efficiency",
             "integrator_tolerance",
-            "collocation_defect_audit",
+            "interval_replay_audit",
             "bifurcation_2d_map",
             "monte_carlo_precision_target",
             "q2_uncertainty_budget",
@@ -1604,7 +1661,7 @@ class ReliabilitySuite:
                 ("drift", "Drift analysis", _run_drift_with_cached_baseline, (), {}),
                 ("theoretical_efficiency", "Theoretical efficiency", self.analyze_theoretical_efficiency, (), {}),
                 ("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance, (), {}),
-                ("collocation_defect_audit", "Collocation defect audit", self.analyze_collocation_defect_audit, (), {"max_workers": worker_cap}),
+                ("interval_replay_audit", "Interval replay audit", self.analyze_interval_replay_audit, (), {"max_workers": worker_cap}),
                 ("bifurcation_2d_map", "Bifurcation 2D map", self.analyze_bifurcation_2d_map, (), {"max_workers": worker_cap}),
                 ("randomized_multistart", "Randomized multi-start robustness", self.analyze_randomized_multistart, (), {"max_workers": worker_cap}),
                 (
@@ -1909,7 +1966,7 @@ class ReliabilitySuite:
         rows = []
         
         print(
-            f"{'RTOL':<10} | {'ATOL':<10} | {'Alt err (m)':<12} | {'Vel err (m/s)':<14} | "
+            f"{'RTOL':<10} | {'ATOL':<10} | {'Height err (m)':<14} | {'Vel err (m/s)':<14} | "
             f"{'Max-Q (kPa)':<12} | {'Max-g':<8} | {'Path':<6} | {'Status':<10}"
         )
         print("-" * 109)
@@ -1935,9 +1992,9 @@ class ReliabilitySuite:
             rows.append((
                 rtol,
                 atol,
-                terminal.get("r_f_m", np.nan),
+                terminal.get("spherical_height_m", np.nan),
                 terminal.get("v_f_m_s", np.nan),
-                terminal.get("alt_err_m", np.nan),
+                terminal.get("spherical_height_err_m", np.nan),
                 terminal.get("vel_err_m_s", np.nan),
                 terminal.get("radial_velocity_m_s", np.nan),
                 int(terminal.get("terminal_valid", False)),
@@ -1953,7 +2010,7 @@ class ReliabilitySuite:
                 status,
             ))
             print(
-                f"{rtol:<10.1e} | {atol:<10.1e} | {terminal.get('alt_err_m', np.nan):<12.2f} | "
+                f"{rtol:<10.1e} | {atol:<10.1e} | {terminal.get('spherical_height_err_m', np.nan):<14.2f} | "
                 f"{terminal.get('vel_err_m_s', np.nan):<14.3f} | {path['max_q_pa']/1000.0:<12.3f} | "
                 f"{path['max_g']:<8.3f} | {strict_path_ok:<6d} | {status:<10}"
             )
@@ -1962,8 +2019,8 @@ class ReliabilitySuite:
             "integrator_tolerance",
             [
                 "rtol", "atol",
-                "final_altitude_m", "final_velocity_m_s",
-                "altitude_error_m", "velocity_error_m_s", "radial_velocity_m_s",
+                "final_spherical_height_m", "final_velocity_m_s",
+                "spherical_height_error_m", "velocity_error_m_s", "radial_velocity_m_s",
                 "terminal_valid", "strict_terminal_ok", "strict_path_ok",
                 "raw_path_ok", "raw_q_ok", "raw_g_ok",
                 "q_ok", "g_ok", "max_q_pa", "max_g", "status"
@@ -2425,8 +2482,8 @@ class ReliabilitySuite:
         )
         self._finalize_figure(fig, "randomized_multistart")
 
-    def analyze_collocation_defect_audit(self, max_workers=None):
-        debug._print_sub_header("Collocation Defect Audit")
+    def analyze_interval_replay_audit(self, max_workers=None):
+        debug._print_sub_header("Interval Replay Audit")
         opt_res = self._get_baseline_opt_res()
         if max_workers is None:
             max_workers = min(3, max(1, os.cpu_count() or 1))
@@ -2478,7 +2535,7 @@ class ReliabilitySuite:
             try:
                 with ProcessPoolExecutor(max_workers=max_workers) as executor:
                     fut_to_name = {
-                        executor.submit(_run_collocation_phase_defects_worker, payload): str(payload["phase_name"])
+                        executor.submit(_run_interval_replay_phase_worker, payload): str(payload["phase_name"])
                         for payload in phase_jobs
                     }
                     parallel_ok = True
@@ -2486,7 +2543,7 @@ class ReliabilitySuite:
                     done_phases = 0
                     for fut in as_completed(fut_to_name):
                         done_phases += 1
-                        self._print_parallel_progress("Collocation phases", done_phases, total_phases)
+                        self._print_parallel_progress("Replay phases", done_phases, total_phases)
                         key = fut_to_name[fut]
                         try:
                             phase_results[key] = fut.result()
@@ -2494,7 +2551,7 @@ class ReliabilitySuite:
                             parallel_ok = False
                             break
                 if not parallel_ok:
-                    print("  Worker failure during collocation audit; switching to serial mode.")
+                    print("  Worker failure during interval replay audit; switching to serial mode.")
                     parallel_active = False
                     phase_results = {}
             except Exception:
@@ -2506,7 +2563,7 @@ class ReliabilitySuite:
             print("  Serial execution mode.")
             for payload in phase_jobs:
                 key = str(payload["phase_name"])
-                phase_results[key] = _run_collocation_phase_defects_worker(payload)
+                phase_results[key] = _run_interval_replay_phase_worker(payload)
 
         phase_series = []
         for payload in phase_jobs:
@@ -2514,33 +2571,64 @@ class ReliabilitySuite:
             r = phase_results.get(key, None)
             if r is None:
                 continue
-            pos_s = np.asarray(r.get("position_defect", []), dtype=float)
-            vel_s = np.asarray(r.get("velocity_defect", []), dtype=float)
-            mass_s = np.asarray(r.get("mass_defect", []), dtype=float)
-            rel_s = np.asarray(r.get("relative_defect", []), dtype=float)
-            phase_series.append((key, pos_s, vel_s, mass_s, rel_s))
+            pos_s = np.asarray(r.get("position_error", []), dtype=float)
+            vel_s = np.asarray(r.get("velocity_error", []), dtype=float)
+            mass_s = np.asarray(r.get("mass_error", []), dtype=float)
+            rel_s = np.asarray(r.get("relative_error", []), dtype=float)
+            q_s = np.asarray(r.get("max_q_pa", []), dtype=float)
+            g_s = np.asarray(r.get("max_g", []), dtype=float)
+            ok_s = np.asarray(r.get("solver_ok", []), dtype=int)
+            phase_series.append((key, pos_s, vel_s, mass_s, rel_s, q_s, g_s, ok_s))
 
-        max_pos = float(max(np.max(s[1]) for s in phase_series))
-        max_vel = float(max(np.max(s[2]) for s in phase_series))
-        max_mass = float(max(np.max(s[3]) for s in phase_series))
-        max_rel = float(max(np.max(s[4]) for s in phase_series))
+        def _series_max(values):
+            finite_max = []
+            for arr in values:
+                arr = np.asarray(arr, dtype=float)
+                if arr.size > 0 and np.any(np.isfinite(arr)):
+                    finite_max.append(float(np.nanmax(arr)))
+            return float(max(finite_max)) if finite_max else np.nan
 
-        print(f"Max collocation position defect: {max_pos:.3e} m")
-        print(f"Max collocation velocity defect: {max_vel:.3e} m/s")
-        print(f"Max collocation mass defect:     {max_mass:.3e} kg")
-        print(f"Max state-relative defect:       {max_rel:.3e}")
-        if max_rel < 1e-4:
-            print(f">>> {debug.Style.GREEN}PASS: Collocation defects are small relative to state scales.{debug.Style.RESET}")
+        max_pos = _series_max([s[1] for s in phase_series])
+        max_vel = _series_max([s[2] for s in phase_series])
+        max_mass = _series_max([s[3] for s in phase_series])
+        max_rel = _series_max([s[4] for s in phase_series])
+        max_q_dense = _series_max([s[5] for s in phase_series])
+        max_g_dense = _series_max([s[6] for s in phase_series])
+        interval_failures = int(sum(int(np.size(s[7]) - np.count_nonzero(s[7])) for s in phase_series))
+
+        print(f"Max interval replay position error: {max_pos:.3e} m")
+        print(f"Max interval replay velocity error: {max_vel:.3e} m/s")
+        print(f"Max interval replay mass error:     {max_mass:.3e} kg")
+        print(f"Max state-relative mismatch:        {max_rel:.3e}")
+        print(f"Max dense-sampled Q during audit:   {max_q_dense/1000.0:.3f} kPa")
+        print(f"Max dense-sampled g during audit:   {max_g_dense:.3f} g")
+        print(f"Interval replay solver failures:    {interval_failures}")
+        if interval_failures == 0 and np.isfinite(max_rel) and max_rel < 1e-6:
+            print(f">>> {debug.Style.GREEN}PASS: Interval replay mismatches stay small under an independent solver.{debug.Style.RESET}")
         else:
-            print(f">>> {debug.Style.YELLOW}WARN: Non-negligible collocation defects detected.{debug.Style.RESET}")
+            print(f">>> {debug.Style.YELLOW}WARN: Interval replay audit found non-negligible mismatch or solver failures.{debug.Style.RESET}")
 
         rows = []
-        for phase_name, pos_s, vel_s, m_s, rel_s in phase_series:
+        for phase_name, pos_s, vel_s, m_s, rel_s, q_s, g_s, ok_s in phase_series:
             for k in range(len(pos_s)):
-                rows.append((phase_name, k, pos_s[k], vel_s[k], m_s[k], rel_s[k]))
+                q_margin = q_s[k] - self.base_config.max_q_limit if np.isfinite(q_s[k]) else np.nan
+                g_margin = g_s[k] - self.base_config.max_g_load if np.isfinite(g_s[k]) else np.nan
+                rows.append((phase_name, k, int(ok_s[k]), pos_s[k], vel_s[k], m_s[k], rel_s[k], q_s[k], g_s[k], q_margin, g_margin))
         self._save_table(
-            "collocation_defect_audit",
-            ["phase", "interval_index", "position_defect_m", "velocity_defect_m_s", "mass_defect_kg", "max_relative_defect"],
+            "interval_replay_audit",
+            [
+                "phase",
+                "interval_index",
+                "solver_ok",
+                "end_position_error_m",
+                "end_velocity_error_m_s",
+                "end_mass_error_kg",
+                "max_relative_error",
+                "sampled_max_q_pa",
+                "sampled_max_g",
+                "q_margin_pa",
+                "g_margin",
+            ],
             rows
         )
 
@@ -2549,26 +2637,26 @@ class ReliabilitySuite:
 
         total_intervals = int(sum(len(s[1]) for s in phase_series))
         offset = 0
-        for phase_name, pos_s, vel_s, m_s, rel_s in phase_series:
+        for phase_name, pos_s, vel_s, m_s, rel_s, q_s, g_s, ok_s in phase_series:
             idx = np.arange(offset, offset + len(pos_s))
-            ax1.semilogy(idx, np.maximum(pos_s, eps), label=f"{phase_name.title()} position defect")
-            ax2.semilogy(idx, np.maximum(rel_s, eps), label=f"{phase_name.title()} max relative defect")
+            ax1.semilogy(idx, np.maximum(pos_s, eps), label=f"{phase_name.title()} end-position error")
+            ax2.semilogy(idx, np.maximum(rel_s, eps), label=f"{phase_name.title()} max relative error")
             offset += len(pos_s)
             if offset < total_intervals:
                 ax1.axvline(offset - 0.5, color="0.5", linestyle="--", linewidth=0.8, alpha=0.6)
                 ax2.axvline(offset - 0.5, color="0.5", linestyle="--", linewidth=0.8, alpha=0.6)
 
-        ax1.set_ylabel("Position Defect (m)")
-        ax1.set_title("Collocation Defect Audit")
+        ax1.set_ylabel("End-position error (m)")
+        ax1.set_title("Interval Replay Audit")
         ax1.legend(loc="best")
         ax1.grid(True, which="both", ls="-", alpha=0.3)
 
-        ax2.axhline(1e-4, color="tab:orange", linestyle="--", alpha=0.8, label="Pass threshold (1e-4)")
+        ax2.axhline(1e-6, color="tab:orange", linestyle="--", alpha=0.8, label="Reference threshold (1e-6)")
         ax2.set_xlabel("Global Interval Index")
-        ax2.set_ylabel("Max Relative Defect (-)")
+        ax2.set_ylabel("Max relative error (-)")
         ax2.legend(loc="best")
         ax2.grid(True, which="both", ls="-", alpha=0.3)
-        self._finalize_figure(fig, "collocation_defect_audit")
+        self._finalize_figure(fig, "interval_replay_audit")
 
 
     def _compute_drift_metrics(self, optimization_data, simulation_data):
@@ -4024,7 +4112,7 @@ class ReliabilitySuite:
             success = int(item.get("strict_success", 0))
             margin = float(item.get("fuel_margin_kg", np.nan))
             orbit_err = float(item.get("normalized_orbit_error", np.nan))
-            alt_err = float(item.get("altitude_error_m", np.nan))
+            alt_err = float(item.get("spherical_height_error_m", np.nan))
             vel_err = float(item.get("velocity_error_m_s", np.nan))
             q_ok = int(item.get("q_ok", 0))
             g_ok = int(item.get("g_ok", 0))
@@ -4053,7 +4141,7 @@ class ReliabilitySuite:
             [
                 "thrust_multiplier", "density_multiplier", "strict_success",
                 "fuel_margin_kg", "normalized_orbit_error",
-                "altitude_error_m", "velocity_error_m_s", "q_ok", "g_ok", "status"
+                "spherical_height_error_m", "velocity_error_m_s", "q_ok", "g_ok", "status"
             ],
             rows
         )
