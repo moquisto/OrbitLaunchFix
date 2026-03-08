@@ -10,7 +10,7 @@
 
 ## Appendix / supplementary figures
 
-- `fig_app_01_collocation_defect`
+- `fig_app_01_interval_replay_audit`
 - `fig_app_02_smooth_integrator_order`
 - `fig_app_03_theoretical_efficiency`
 - `fig_app_04_3d_trajectory`

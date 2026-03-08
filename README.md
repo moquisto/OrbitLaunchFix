@@ -4,7 +4,7 @@ High-fidelity launch-to-orbit optimization for a Starship Block 2 style two-stag
 
 The project follows an explicit workflow:
 
-1. Optimize a fuel-minimal ascent trajectory with direct collocation (CasADi + IPOPT).
+1. Optimize a fuel-minimal ascent trajectory with node-based RK4 direct transcription (CasADi + IPOPT).
 2. Re-fly the optimized controls in forward time (`solve_ivp`) to verify physical consistency.
 3. Quantify confidence with targeted reliability analyses, with optional robustness/sensitivity extensions enabled through config toggles.
 
@@ -31,14 +31,14 @@ The project follows an explicit workflow:
   - Throttle-constrained propulsion
 
 - **Optimization model**
-  - Direct collocation using RK4 defect constraints
+  - Node-based RK4 direct transcription with piecewise-constant controls
   - Decision variables across booster + coast + upper-stage phases
   - Path constraints for dynamic pressure and sensed G-load
   - Terminal constraints for target circular orbit and inclination
   - Objective: maximize final mass (equivalently minimize fuel used)
 
 - **Reliability/validation model**
-  - Core course-aligned checks: grid independence, defect audits, theoretical efficiency
+  - Core course-aligned checks: grid independence, interval replay audit, theoretical efficiency
   - Integrator convergence, drift, and method-order checks
   - Monte Carlo uncertainty and precision targeting
   - Optional extensions: randomized multistart, 2D sensitivity map, model-limitations summary, Q7 synthesis support
@@ -88,8 +88,8 @@ python main.py
 What this does:
 
 - Prints mission config and preflight diagnostics.
-- Solves the collocation problem in IPOPT.
-- Runs forward verification simulation.
+ - Solves the direct-transcription problem in IPOPT.
+ - Runs forward verification simulation.
 - Prints objective/fuel-margin summary.
 - Opens mission visualization windows.
 
@@ -147,7 +147,7 @@ Edit `StarshipBlock2`, `EARTH_CONFIG`, and `RELIABILITY_ANALYSIS_TOGGLES` direct
 - `payload_mass`
 - `target_altitude`
 - `target_inclination` (`None` => defaults to absolute launch latitude)
-- `num_nodes` (collocation resolution)
+- `num_nodes` (transcription resolution)
 - `max_iter` (IPOPT iteration limit)
 - `max_q_limit`
 - `max_g_load`
@@ -168,7 +168,7 @@ The `ReliabilityAnalysisToggles` dataclass controls which test blocks execute in
 
 Default enabled:
 - `grid_independence`
-- `collocation_defect_audit`
+- `interval_replay_audit`
 - `theoretical_efficiency`
 - `integrator_tolerance`
 - `smooth_integrator_benchmark`
@@ -187,6 +187,7 @@ Default disabled:
 - 3D inertial-frame translational dynamics.
 - No active closed-loop guidance in verification; optimized open-loop control schedule is replayed.
 - Stage separation modeled as an instantaneous mass reset.
+- The orbit target is enforced as spherical height above `R_eq`; ellipsoidal altitude is exported separately as a ground-referenced diagnostic.
 - Aerodynamics are table/heuristic based (Mach-Cd + crossflow term), not full CFD.
 - Atmospheric properties from USSA1976 with interpolation/smoothing choices made for optimizer robustness.
 
@@ -196,7 +197,7 @@ Treat conclusions as valid within this modeling envelope, not as flight-certifie
 
 The reliability suite is structured to support question-driven reporting:
 
-- **Q1** credible optimum: grid independence, collocation defect audit, theoretical efficiency; multistart robustness is available as an optional extension.
+- **Q1** credible optimum: grid independence, interval replay audit, theoretical efficiency; multistart robustness is available as an optional extension.
 - **Q2** uncertainty/accuracy: integrator sensitivity, Monte Carlo precision, uncertainty budget.
 - **Q3** code reliability: optimizer-vs-simulator drift and benchmark checks.
 - **Q5** cliff-edge behavior: optional 2D sensitivity/feasibility mapping.
@@ -229,7 +230,7 @@ The reliability suite is structured to support question-driven reporting:
   - Keep warm start enabled (`guidance.py`) and verify reasonable initial trajectory.
 
 - **Simulation drifts from optimizer trajectory**
-  - Increase `num_nodes` in collocation.
+  - Increase `num_nodes` in the direct-transcription grid.
   - Tighten simulation tolerances in `run_simulation(..., rtol, atol)`.
   - Inspect drift diagnostics printed by `main.py`/`debug.py`.
 

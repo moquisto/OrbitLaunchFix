@@ -24,6 +24,11 @@ from main import (
 )
 from relabilityanalysis import ReliabilitySuite, evaluate_terminal_state
 from simulation import run_simulation
+from trajectory_metrics import (
+    circular_target_speed_m_s,
+    ellipsoidal_altitude_m,
+    spherical_altitude_m,
+)
 from vehicle import Vehicle
 
 
@@ -45,7 +50,7 @@ MAIN_FIGURES = [
 ]
 
 APPENDIX_FIGURES = [
-    "fig_app_01_collocation_defect",
+    "fig_app_01_interval_replay_audit",
     "fig_app_02_smooth_integrator_order",
     "fig_app_03_theoretical_efficiency",
     "fig_app_04_3d_trajectory",
@@ -57,11 +62,25 @@ REQUIRED_RELIABILITY_FILES = (
     "data/integrator_tolerance.csv",
     "data/drift_phase_metrics.csv",
     "data/drift_summary.csv",
-    "data/collocation_defect_audit.csv",
+    "data/interval_replay_audit.csv",
     "data/run_metadata.csv",
     "data/smooth_integrator_benchmark.csv",
     "data/smooth_integrator_benchmark_fit.csv",
     "data/theoretical_efficiency.csv",
+)
+
+STALE_PAPER_PACK_ARTIFACTS = (
+    "figures/fig_app_01_collocation_defect.png",
+    "figures/fig_app_01_collocation_defect.pdf",
+    "reliability_raw/data/collocation_defect_audit.csv",
+    "reliability_raw/figures/collocation_defect_audit.png",
+    "reliability_raw/figures/collocation_defect_audit.pdf",
+)
+
+HEATMAP_ARTIFACTS = (
+    "figures/fig_app_05_global_launch_cost.png",
+    "figures/fig_app_05_global_launch_cost.pdf",
+    "data/global_launch_cost_latitude_sweep.csv",
 )
 
 
@@ -150,20 +169,6 @@ def _format_ratio_from_value(value):
         return "0"
     return f"1/{(1.0 / float(value)):.3f}"
 
-
-def _ellipsoidal_altitude_m(position_vector, env_cfg):
-    r = np.asarray(position_vector, dtype=float)
-    r_sq = float(np.dot(r, r))
-    r_mag = np.sqrt(max(r_sq, 1e-16))
-    r_eq = float(env_cfg.earth_radius_equator)
-    r_pol = r_eq * (1.0 - float(env_cfg.earth_flattening))
-    rho_sq = float(r[0] ** 2 + r[1] ** 2)
-    z_sq = float(r[2] ** 2)
-    denom = np.sqrt((r_pol**2) * rho_sq + (r_eq**2) * z_sq + 1e-16)
-    r_local = (r_eq * r_pol * r_mag) / denom
-    return r_mag - r_local
-
-
 def _flatten_optimal_trajectory(opt_res):
     t_parts = []
     x_parts = []
@@ -219,7 +224,8 @@ def _compute_nominal_timeseries(sim_res, env, veh, cfg):
     v_hist = y[3:6, :]
     mass_hist = y[6, :]
 
-    alt_km = np.zeros_like(t)
+    spherical_height_km = np.zeros_like(t)
+    ellipsoidal_altitude_km = np.zeros_like(t)
     vel_m_s = np.zeros_like(t)
     q_kpa = np.zeros_like(t)
     g_load = np.zeros_like(t)
@@ -234,7 +240,8 @@ def _compute_nominal_timeseries(sim_res, env, veh, cfg):
         v_rel = v_i - env_state["wind_velocity"]
         v_rel_mag = np.linalg.norm(v_rel)
         q_pa = 0.5 * env_state["density"] * v_rel_mag**2
-        alt_km[i] = _ellipsoidal_altitude_m(r_i, env.config) / 1000.0
+        spherical_height_km[i] = spherical_altitude_m(r_i, env.config) / 1000.0
+        ellipsoidal_altitude_km[i] = ellipsoidal_altitude_m(r_i, env.config) / 1000.0
         vel_m_s[i] = v_mag
         q_kpa[i] = q_pa / 1000.0
         mach[i] = v_rel_mag / max(env_state["speed_of_sound"], 1.0)
@@ -252,7 +259,8 @@ def _compute_nominal_timeseries(sim_res, env, veh, cfg):
     downrange_km = _compute_downrange_km(r_hist, env.config, t)
     return {
         "t_s": t,
-        "altitude_km": alt_km,
+        "spherical_height_km": spherical_height_km,
+        "ellipsoidal_altitude_km": ellipsoidal_altitude_km,
         "velocity_m_s": vel_m_s,
         "mass_kg": mass_hist,
         "dynamic_pressure_kpa": q_kpa,
@@ -344,7 +352,7 @@ def _summarize_integrator(rows):
     ordered = sorted(rows, key=lambda row: float(row["rtol"]), reverse=True)
     rtol = np.array([float(row["rtol"]) for row in ordered], dtype=float)
     atol = np.array([float(row["atol"]) for row in ordered], dtype=float)
-    alt = np.array([float(row["final_altitude_m"]) for row in ordered], dtype=float)
+    alt = np.array([float(row["final_spherical_height_m"]) for row in ordered], dtype=float)
     vel = np.array([float(row["final_velocity_m_s"]) for row in ordered], dtype=float)
     radial = np.array([float(row["radial_velocity_m_s"]) for row in ordered], dtype=float)
     raw_ok = np.array([bool(int(row["raw_path_ok"])) for row in ordered], dtype=bool)
@@ -406,11 +414,12 @@ class PaperPackBuilder:
         self.data_dir = self.output_dir / "data"
         self.notes_dir = self.output_dir / "notes"
         self.raw_reliability_dir = self.output_dir / "reliability_raw"
-        self.generated_heatmap = False
+        self.has_heatmap_outputs = False
 
     def build(self):
         _setup_plot_style()
         self._ensure_dirs()
+        self._cleanup_stale_outputs()
 
         cfg = copy.deepcopy(StarshipBlock2)
         env_cfg = copy.deepcopy(EARTH_CONFIG)
@@ -440,9 +449,13 @@ class PaperPackBuilder:
         self._render_appendix_figures(cfg, env_cfg, opt_res, sim_res, timeseries, reliability_dir)
 
         if not self.args.skip_heatmap:
-            self.generated_heatmap = self._build_launch_cost_heatmap()
+            self.has_heatmap_outputs = self._build_launch_cost_heatmap()
         else:
-            print("[PaperPack] Skipping global launch-cost heatmap.")
+            self.has_heatmap_outputs = self._heatmap_artifacts_exist()
+            if self.has_heatmap_outputs:
+                print("[PaperPack] Skipping global launch-cost heatmap recompute; keeping existing heatmap artifacts.")
+            else:
+                print("[PaperPack] Skipping global launch-cost heatmap; no existing heatmap artifacts found.")
         self._write_notes()
 
         print(f"[PaperPack] Completed: {self.output_dir}")
@@ -450,6 +463,15 @@ class PaperPackBuilder:
     def _ensure_dirs(self):
         for path in (self.figure_dir, self.table_dir, self.data_dir, self.notes_dir):
             path.mkdir(parents=True, exist_ok=True)
+
+    def _cleanup_stale_outputs(self):
+        for rel_path in STALE_PAPER_PACK_ARTIFACTS:
+            path = self.output_dir / rel_path
+            if path.exists():
+                path.unlink()
+
+    def _heatmap_artifacts_exist(self):
+        return all((self.output_dir / rel_path).exists() for rel_path in HEATMAP_ARTIFACTS)
 
     def _prepare_reliability(self, opt_res):
         if self.args.reliability_dir:
@@ -472,10 +494,18 @@ class PaperPackBuilder:
 
     def _write_time_history_csv(self, opt_res, env_cfg, timeseries):
         t_opt, x_opt = _flatten_optimal_trajectory(opt_res)
-        opt_alt_km = np.array([_ellipsoidal_altitude_m(x_opt[0:3, idx], env_cfg) / 1000.0 for idx in range(x_opt.shape[1])], dtype=float)
+        opt_spherical_height_km = np.array(
+            [spherical_altitude_m(x_opt[0:3, idx], env_cfg) / 1000.0 for idx in range(x_opt.shape[1])],
+            dtype=float,
+        )
+        opt_ellipsoidal_altitude_km = np.array(
+            [ellipsoidal_altitude_m(x_opt[0:3, idx], env_cfg) / 1000.0 for idx in range(x_opt.shape[1])],
+            dtype=float,
+        )
         opt_mass_kg = x_opt[6, :]
         sim_t = timeseries["t_s"]
-        opt_alt_interp = np.interp(sim_t, t_opt, opt_alt_km)
+        opt_spherical_height_interp = np.interp(sim_t, t_opt, opt_spherical_height_km)
+        opt_ellipsoidal_altitude_interp = np.interp(sim_t, t_opt, opt_ellipsoidal_altitude_km)
         opt_mass_interp = np.interp(sim_t, t_opt, opt_mass_kg)
 
         rows = []
@@ -483,8 +513,10 @@ class PaperPackBuilder:
             rows.append(
                 (
                     _fmt_float(t_val, 6),
-                    _fmt_float(opt_alt_interp[idx], 6),
-                    _fmt_float(timeseries["altitude_km"][idx], 6),
+                    _fmt_float(opt_spherical_height_interp[idx], 6),
+                    _fmt_float(timeseries["spherical_height_km"][idx], 6),
+                    _fmt_float(opt_ellipsoidal_altitude_interp[idx], 6),
+                    _fmt_float(timeseries["ellipsoidal_altitude_km"][idx], 6),
                     _fmt_float(timeseries["velocity_m_s"][idx], 6),
                     _fmt_float(opt_mass_interp[idx], 6),
                     _fmt_float(timeseries["mass_kg"][idx], 6),
@@ -499,8 +531,10 @@ class PaperPackBuilder:
             self.data_dir / "nominal_time_history.csv",
             [
                 "time_s",
-                "optimizer_altitude_km",
-                "simulation_altitude_km",
+                "optimizer_spherical_height_km",
+                "simulation_spherical_height_km",
+                "optimizer_ellipsoidal_altitude_km",
+                "simulation_ellipsoidal_altitude_km",
                 "simulation_velocity_m_s",
                 "optimizer_mass_kg",
                 "simulation_mass_kg",
@@ -515,7 +549,7 @@ class PaperPackBuilder:
     def _write_paper_tables(self, cfg, env_cfg, env, veh, opt_res, sim_res, reliability_dir):
         run_metadata = _read_key_value_csv(reliability_dir / "data" / "run_metadata.csv")
         grid_rows = _read_csv_rows(reliability_dir / "data" / "grid_independence.csv")
-        defect_rows = _read_csv_rows(reliability_dir / "data" / "collocation_defect_audit.csv")
+        replay_rows = _read_csv_rows(reliability_dir / "data" / "interval_replay_audit.csv")
         integ_rows = _read_csv_rows(reliability_dir / "data" / "integrator_tolerance.csv")
 
         suite = ReliabilitySuite(output_dir=self.output_dir / "_tmp_suite", save_figures=False, show_plots=False, analysis_profile="course_core")
@@ -526,13 +560,13 @@ class PaperPackBuilder:
         grid_summary = _summarize_grid(grid_rows)
         integ_summary = _summarize_integrator(integ_rows)
 
-        max_rel_defect = max(float(row["max_relative_defect"]) for row in defect_rows)
-        max_pos_defect = max(float(row["position_defect_m"]) for row in defect_rows)
+        max_rel_defect = max(float(row["max_relative_error"]) for row in replay_rows)
+        max_pos_defect = max(float(row["end_position_error_m"]) for row in replay_rows)
 
         nominal_rows = [
-            ("Target altitude", _fmt_float(cfg.target_altitude / 1000.0, 3), "km", "Configured circular target"),
-            ("Effective target inclination", _fmt_float(_effective_target_inclination_deg(cfg, env_cfg), 3), "deg", "Defaults to |launch latitude|"),
-            ("Nodes per powered phase", str(cfg.num_nodes), "-", "Direct-collocation grid"),
+            ("Target spherical height", _fmt_float(cfg.target_altitude / 1000.0, 3), "km", "Optimizer enforces norm(r) = R_eq + target"),
+            ("Effective target inclination", _fmt_float(_effective_target_inclination_deg(cfg, env_cfg), 3), "deg", "Defaults to absolute launch latitude"),
+            ("Nodes per powered phase", str(cfg.num_nodes), "-", "Node-based RK4 direct transcription grid"),
             ("Booster burn time", _fmt_float(float(opt_res["T1"]), 3), "s", "Optimized"),
             ("Ship burn time", _fmt_float(float(opt_res["T3"]), 3), "s", "Optimized"),
             ("Final mass", _fmt_float(float(opt_res["X3"][6, -1]), 3), "kg", "Optimizer result"),
@@ -542,7 +576,8 @@ class PaperPackBuilder:
                 "kg",
                 "Final mass above dry+payload",
             ),
-            ("Final altitude error", _fmt_float(float(terminal["alt_err_m"]), 3), "m", "Forward replay"),
+            ("Final spherical-height error", _fmt_float(float(terminal["spherical_height_err_m"]), 3), "m", "Forward replay against the optimizer target"),
+            ("Final ellipsoidal altitude", _fmt_float(float(terminal["ellipsoidal_altitude_m"]) / 1000.0, 3), "km", "Ground-referenced diagnostic only"),
             ("Final velocity error", _fmt_float(float(terminal["vel_err_m_s"]), 3), "m/s", "Forward replay"),
             ("Final radial velocity", _fmt_float(float(terminal["radial_velocity_m_s"]), 3), "m/s", "Forward replay"),
             ("Inclination error", _fmt_float(float(terminal["inclination_err_deg"]), 4), "deg", "Forward replay"),
@@ -555,8 +590,8 @@ class PaperPackBuilder:
         verification_rows = [
             ("Raw max-Q compliant", str(int(path_diag["q_ok"])), "-", "Forward replay without slack"),
             ("Raw max-g compliant", str(int(path_diag["g_ok"])), "-", "Forward replay without slack"),
-            ("Selected raw-valid grid", str(grid_summary["selected_raw_node"]), "nodes", "Stable converged tail"),
-            ("Selected slack-valid grid", str(grid_summary["selected_slack_node"]), "nodes", "Stable converged tail"),
+            ("Coarsest raw-valid grid", str(grid_summary["selected_raw_node"]), "nodes", "All finer grids stay raw-valid and within 100 kg of N=140"),
+            ("Coarsest slack-valid grid", str(grid_summary["selected_slack_node"]), "nodes", "All finer grids stay slack-valid and within 100 kg of N=140"),
             (
                 "Coarsest converged replay tolerance",
                 "nan" if integ_summary["selected_idx"] is None else f"{integ_summary['rtol'][integ_summary['selected_idx']]:.0e}",
@@ -572,8 +607,8 @@ class PaperPackBuilder:
             ("Max position drift", _fmt_float(float(drift["max_pos_m"]), 4), "m", "Optimizer vs replay"),
             ("Max velocity drift", _fmt_float(float(drift["max_vel_m_s"]), 6), "m/s", "Optimizer vs replay"),
             ("Max mass drift", _fmt_float(float(drift["max_mass_kg"]), 6), "kg", "Optimizer vs replay"),
-            ("Max collocation relative defect", _fmt_float(max_rel_defect, 3), "-", "All intervals"),
-            ("Max collocation position defect", _fmt_float(max_pos_defect, 3), "m", "All intervals"),
+            ("Max interval replay relative error", _fmt_float(max_rel_defect, 3), "-", "All intervals"),
+            ("Max interval replay position error", _fmt_float(max_pos_defect, 3), "m", "Independent DOP853 interval replay"),
             ("Reliability profile", run_metadata.get("analysis_profile", "unknown"), "-", "Raw evidence bundle"),
         ]
 
@@ -609,7 +644,7 @@ class PaperPackBuilder:
                 "Orbit target",
                 _fmt_float(cfg.target_altitude / 1000.0, 3),
                 "km",
-                "Circular target; inclination defaults to |launch latitude| when unspecified",
+                "Target spherical height above R_eq; inclination defaults to absolute launch latitude when unspecified",
             ),
             (
                 "Objective",
@@ -625,7 +660,7 @@ class PaperPackBuilder:
             ),
             (
                 "Path constraints",
-                "Altitude, max-Q, max-g, mass, throttle",
+                "Ellipsoidal ground clearance, max-Q, max-g, mass, throttle",
                 "-",
                 f"Published limits: {cfg.max_q_limit/1000.0:.1f} kPa and {cfg.max_g_load:.1f} g",
             ),
@@ -669,7 +704,10 @@ class PaperPackBuilder:
 
     def _render_main_figures(self, cfg, env_cfg, opt_res, sim_res, timeseries, reliability_dir):
         t_opt, x_opt = _flatten_optimal_trajectory(opt_res)
-        opt_alt_km = np.array([_ellipsoidal_altitude_m(x_opt[0:3, idx], env_cfg) / 1000.0 for idx in range(x_opt.shape[1])], dtype=float)
+        opt_ellipsoidal_altitude_km = np.array(
+            [ellipsoidal_altitude_m(x_opt[0:3, idx], env_cfg) / 1000.0 for idx in range(x_opt.shape[1])],
+            dtype=float,
+        )
         opt_mass_t = x_opt[6, :]
 
         t_sim = timeseries["t_s"]
@@ -678,18 +716,17 @@ class PaperPackBuilder:
 
         fig, axes = plt.subplots(2, 2, figsize=(7.2, 6.6), layout="constrained")
         ax = axes[0, 0]
-        ax.plot(t_opt, opt_alt_km, linestyle="--", color="0.35", label="Optimization nodes")
-        ax.plot(t_sim, timeseries["altitude_km"], color="tab:blue", label="Forward replay")
-        ax.axhline(cfg.target_altitude / 1000.0, color="tab:orange", linestyle=":", label="Target altitude")
+        ax.plot(t_opt, opt_ellipsoidal_altitude_km, linestyle="--", color="0.35", label="Optimization trajectory")
+        ax.plot(t_sim, timeseries["ellipsoidal_altitude_km"], color="tab:blue", label="Forward replay")
         ax.axvline(stage_time, color="0.55", linestyle=":", linewidth=1.0)
         ax.annotate("Staging", (stage_time, 0.98), xycoords=("data", "axes fraction"), xytext=(4, -4), textcoords="offset points", fontsize=8, color="0.35", va="top")
-        ax.set_ylabel("Altitude (km)")
+        ax.set_ylabel("Ellipsoidal altitude (km)")
         ax.legend(loc="best")
 
         ax = axes[0, 1]
         ax.plot(t_sim, timeseries["velocity_m_s"], color="tab:green", label="Forward replay")
         ax.axhline(
-            np.sqrt(env_cfg.earth_mu / (env_cfg.earth_radius_equator + cfg.target_altitude)),
+            circular_target_speed_m_s(cfg.target_altitude, env_cfg),
             color="tab:orange",
             linestyle=":",
             label="Circular-orbit speed",
@@ -707,7 +744,7 @@ class PaperPackBuilder:
         ax.legend(loc="best")
 
         ax = axes[1, 1]
-        ax.plot(timeseries["downrange_km"], timeseries["altitude_km"], color="tab:blue", linewidth=2.0)
+        ax.plot(timeseries["downrange_km"], timeseries["ellipsoidal_altitude_km"], color="tab:blue", linewidth=2.0)
         stage_idx = int(np.abs(t_sim - stage_time).argmin())
         event_specs = [
             ("Launch", 0, "tab:green", (6, -10)),
@@ -717,7 +754,7 @@ class PaperPackBuilder:
         ]
         for label, idx, color, offset in event_specs:
             x_event = float(timeseries["downrange_km"][idx])
-            y_event = float(timeseries["altitude_km"][idx])
+            y_event = float(timeseries["ellipsoidal_altitude_km"][idx])
             ax.scatter([x_event], [y_event], color=color, s=20, zorder=3)
             ax.annotate(
                 label,
@@ -728,7 +765,7 @@ class PaperPackBuilder:
                 color="0.2" if color == "black" else color,
             )
         ax.set_xlabel("Downrange (km)")
-        ax.set_ylabel("Altitude (km)")
+        ax.set_ylabel("Ellipsoidal altitude (km)")
         _save_figure(fig, self.figure_dir / "fig_main_01_nominal_profile")
 
         fig, axes = plt.subplots(3, 1, figsize=(7.2, 6.8), sharex=True, layout="constrained")
@@ -759,7 +796,7 @@ class PaperPackBuilder:
         self._render_drift(reliability_dir / "data" / "drift_phase_metrics.csv", self.figure_dir / "fig_main_05_replay_drift")
 
     def _render_appendix_figures(self, cfg, env_cfg, opt_res, sim_res, timeseries, reliability_dir):
-        self._render_collocation_defect(reliability_dir / "data" / "collocation_defect_audit.csv", self.figure_dir / "fig_app_01_collocation_defect")
+        self._render_interval_replay_audit(reliability_dir / "data" / "interval_replay_audit.csv", self.figure_dir / "fig_app_01_interval_replay_audit")
         self._render_smooth_order(
             reliability_dir / "data" / "smooth_integrator_benchmark.csv",
             reliability_dir / "data" / "smooth_integrator_benchmark_fit.csv",
@@ -842,13 +879,13 @@ class PaperPackBuilder:
         fig, axes = plt.subplots(3, 1, figsize=(7.0, 7.1), sharex=True, layout="constrained")
 
         panels = [
-            (pos, 2000.0, "tab:blue", "Position drift (m)"),
-            (vel, 30.0, "tab:green", "Velocity drift (m/s)"),
-            (mass, 500.0, "tab:purple", "Mass drift (kg)"),
+            (pos / 2000.0, "tab:blue", "Position drift / threshold"),
+            (vel / 30.0, "tab:green", "Velocity drift / threshold"),
+            (mass / 500.0, "tab:purple", "Mass drift / threshold"),
         ]
-        for ax, (vals, threshold, color, ylabel) in zip(axes, panels):
+        for ax, (vals, color, ylabel) in zip(axes, panels):
             ax.bar(x, np.maximum(vals, 1e-12), color=color, alpha=0.82)
-            ax.axhline(threshold, color="tab:orange", linestyle="--", label="Threshold")
+            ax.axhline(1.0, color="tab:orange", linestyle="--", label="Acceptance threshold")
             ax.set_yscale("log")
             ax.set_ylabel(ylabel)
             ax.legend(loc="best")
@@ -856,10 +893,10 @@ class PaperPackBuilder:
         axes[-1].set_xlabel("Mission phase")
         _save_figure(fig, stem)
 
-    def _render_collocation_defect(self, csv_path, stem):
+    def _render_interval_replay_audit(self, csv_path, stem):
         rows = _read_csv_rows(csv_path)
-        pos = np.array([float(row["position_defect_m"]) for row in rows], dtype=float)
-        rel = np.array([float(row["max_relative_defect"]) for row in rows], dtype=float)
+        pos = np.array([float(row["end_position_error_m"]) for row in rows], dtype=float)
+        rel = np.array([float(row["max_relative_error"]) for row in rows], dtype=float)
         phase = np.array([row["phase"] for row in rows])
 
         global_idx = np.arange(len(rows))
@@ -869,14 +906,14 @@ class PaperPackBuilder:
         fig, axes = plt.subplots(2, 1, figsize=(7.2, 6.4), sharex=True, layout="constrained")
         axes[0].semilogy(global_idx[boost_mask], np.maximum(pos[boost_mask], 1e-18), color="tab:blue", label="Boost")
         axes[0].semilogy(global_idx[ship_mask], np.maximum(pos[ship_mask], 1e-18), color="tab:orange", label="Ship")
-        axes[0].set_ylabel("Position defect (m)")
+        axes[0].set_ylabel("End-position error (m)")
         axes[0].legend(loc="best")
 
         axes[1].semilogy(global_idx[boost_mask], np.maximum(rel[boost_mask], 1e-18), color="tab:blue", label="Boost")
         axes[1].semilogy(global_idx[ship_mask], np.maximum(rel[ship_mask], 1e-18), color="tab:orange", label="Ship")
-        axes[1].axhline(1e-4, color="tab:orange", linestyle="--", label="Pass threshold")
+        axes[1].axhline(1e-6, color="tab:orange", linestyle="--", label="Reference threshold")
         axes[1].set_xlabel("Global interval index")
-        axes[1].set_ylabel("Max relative defect (-)")
+        axes[1].set_ylabel("Max relative error (-)")
         axes[1].legend(loc="best")
         _save_figure(fig, stem)
 
@@ -1067,7 +1104,7 @@ class PaperPackBuilder:
         appendix_figures = [
             stem
             for stem in APPENDIX_FIGURES
-            if stem != "fig_app_05_global_launch_cost" or self.generated_heatmap
+            if stem != "fig_app_05_global_launch_cost" or self.has_heatmap_outputs
         ]
         manifest_lines = [
             "# Final Paper Pack",

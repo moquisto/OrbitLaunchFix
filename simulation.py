@@ -5,18 +5,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
-
-def _ellipsoidal_altitude_m(position_vector, env_cfg):
-    r = np.asarray(position_vector, dtype=float)
-    r_sq = float(np.dot(r, r))
-    r_mag = np.sqrt(max(r_sq, 1e-16))
-    r_eq = float(env_cfg.earth_radius_equator)
-    r_pol = r_eq * (1.0 - float(env_cfg.earth_flattening))
-    rho_sq = float(r[0] ** 2 + r[1] ** 2)
-    z_sq = float(r[2] ** 2)
-    denom = np.sqrt((r_pol**2) * rho_sq + (r_eq**2) * z_sq + 1e-16)
-    r_local = (r_eq * r_pol * r_mag) / denom
-    return r_mag - r_local
+from trajectory_metrics import ellipsoidal_altitude_m
 
 def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
     """
@@ -175,8 +164,8 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         print("[Simulation] ERROR: Integrator failed in Phase 1.")
     elif phase1_ground_impact:
         print("[Simulation] ERROR: Ground impact detected in Phase 1. Aborting remaining phases.")
-    alt_1 = _ellipsoidal_altitude_m(res1.y[0:3, -1], vehicle.env.config) / 1000.0
-    print(f"[Simulation] Phase 1 End: Alt={alt_1:.1f}km, Vel={np.linalg.norm(res1.y[3:6, -1]):.1f}m/s")
+    alt_1 = ellipsoidal_altitude_m(res1.y[0:3, -1], vehicle.env.config) / 1000.0
+    print(f"[Simulation] Phase 1 End: Ellipsoid alt={alt_1:.1f}km, Vel={np.linalg.norm(res1.y[3:6, -1]):.1f}m/s")
 
     # --- DEBUG: CHECK DRIFT PHASE 1 ---
     if "X1" in optimization_result:
@@ -276,8 +265,8 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
     elif phase3_depletion:
         print("[Simulation] INFO: Phase 3 terminated on propellant depletion event.")
     
-    alt_3 = _ellipsoidal_altitude_m(res3.y[0:3, -1], vehicle.env.config) / 1000.0
-    print(f"[Simulation] Phase 3 End: Alt={alt_3:.1f}km, Vel={np.linalg.norm(res3.y[3:6, -1]):.1f}m/s")
+    alt_3 = ellipsoidal_altitude_m(res3.y[0:3, -1], vehicle.env.config) / 1000.0
+    print(f"[Simulation] Phase 3 End: Ellipsoid alt={alt_3:.1f}km, Vel={np.linalg.norm(res3.y[3:6, -1]):.1f}m/s")
 
     # --- DEBUG: CHECK DRIFT PHASE 3 ---
     if "X3" in optimization_result:

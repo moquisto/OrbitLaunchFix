@@ -89,7 +89,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
         'gamma': [], 'energy': [], 'heating': [], 'tw': [], 'g_load': [],
         'pitch': [],
         'downrange': [],
-        'drag': [], 'thrust': []
+        'drag': [], 'thrust': [], 'weight': []
     }
     
     R_eq = environment.config.earth_radius_equator
@@ -238,6 +238,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
             mass_i = y_sim[6, i]
             weight = mass_i * np.linalg.norm(env_state['gravity'])
             sim_metrics['tw'].append(thrust_force / max(weight, 1e-9))
+            sim_metrics['weight'].append(weight / 1000.0)
 
             # Drag Force
             cd_table = stage.aero.mach_cd_table
@@ -275,7 +276,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     
     lns1 = ax1.plot(t_opt, alt_opt / 1000.0, 'k--', label='Optimizer', alpha=0.7)
     lns2 = ax1.plot(t_sim, np.array(sim_metrics['alt']) / 1000.0, 'b-', label='Simulation')
-    ax1.set_ylabel('Altitude (km)')
+    ax1.set_ylabel('Spherical height (km)')
     ax1.grid(True)
     ax1.set_title('Altitude & Velocity')
     
@@ -325,7 +326,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     cbar = plt.colorbar(sc, ax=ax4)
     cbar.set_label('AoA (deg)')
     ax4.set_xlabel('Downrange (km)')
-    ax4.set_ylabel('Altitude (km)')
+    ax4.set_ylabel('Spherical height (km)')
     ax4.grid(True)
     
     # WINDOW 2: DYNAMICS
@@ -416,7 +417,7 @@ def plot_mission(optimization_data, simulation_data, environment, config=None):
     # Clip data to avoid log(0) errors during coast phases
     thrust_plot = np.maximum(sim_metrics['thrust'], 1e-3)
     drag_plot = np.maximum(sim_metrics['drag'], 1e-3)
-    weight_plot = y_sim[6, :] * environment.config.g0 / 1000.0
+    weight_plot = np.maximum(sim_metrics['weight'], 1e-3)
     
     ax3_2.plot(t_sim, thrust_plot, 'b-', label='Thrust')
     ax3_2.plot(t_sim, drag_plot, 'r-', label='Drag')
