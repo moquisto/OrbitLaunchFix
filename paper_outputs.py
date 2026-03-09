@@ -13,8 +13,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib import cm
 from matplotlib.colors import Normalize
-from matplotlib.lines import Line2D
-from matplotlib.patches import Circle
 from scipy.integrate import solve_ivp
 
 from config import EARTH_CONFIG, StarshipBlock2
@@ -128,19 +126,6 @@ def _save_figure(fig, stem):
     fig.savefig(stem.with_suffix(".png"), dpi=300, bbox_inches="tight")
     fig.savefig(stem.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
-
-
-def _phase_segments(phases):
-    segments = []
-    if len(phases) == 0:
-        return segments
-
-    start = 0
-    for idx in range(1, len(phases) + 1):
-        if idx == len(phases) or phases[idx] != phases[start]:
-            segments.append((str(phases[start]), start, idx))
-            start = idx
-    return segments
 
 
 def _fmt_float(value, digits=3):
@@ -416,8 +401,6 @@ def _summarize_integrator(rows):
         "dynamic_pressure_drift_pa": d_q,
         "g_load_drift": d_g,
         "selected_idx": selected_idx,
-        "reference_idx": len(rtol) - 1,
-        "reference_rtol": float(rtol[-1]),
         "thresholds": thresholds,
     }
 
@@ -863,62 +846,26 @@ class PaperPackBuilder:
         rows = _read_csv_rows(csv_path)
         summary = _summarize_integrator(rows)
         rtol = summary["rtol"]
-        reference_idx = int(summary["reference_idx"])
-        plot_mask = np.arange(len(rtol)) != reference_idx
-        op_rtol = 1e-9
-        selected_idx = summary["selected_idx"]
-        converged_rtol = float(rtol[selected_idx]) if selected_idx is not None else None
 
-        fig, axes = plt.subplots(3, 1, figsize=(7.2, 7.6), sharex=True, layout="constrained")
-        panels = [
-            ("altitude_drift_m", "o", "tab:blue", "Altitude drift (m)", summary["thresholds"]["altitude_m"]),
-            ("velocity_drift_m_s", "s", "tab:orange", "Velocity drift (m/s)", summary["thresholds"]["velocity_m_s"]),
-            ("radial_velocity_drift_m_s", "^", "tab:green", "Radial velocity drift (m/s)", summary["thresholds"]["radial_velocity_m_s"]),
-        ]
-
-        for ax, (field, marker, color, ylabel, threshold) in zip(axes, panels):
-            ax.loglog(
-                rtol[plot_mask],
-                np.maximum(summary[field][plot_mask], 1e-12),
-                marker=marker,
-                color=color,
-                label="Drift vs reference",
-            )
-            ax.axhline(threshold, color="tab:red", linestyle="--", label="Criterion")
-            if converged_rtol is not None:
-                ax.axvline(converged_rtol, color="0.35", linestyle=":", linewidth=1.1, label="Coarsest converged")
-            ax.axvline(op_rtol, color="tab:purple", linestyle="-.", linewidth=1.1, label="Operating tolerance")
-            ax.set_ylabel(ylabel)
-            ax.grid(True, which="both", ls="-", alpha=0.25)
-
-        axes[0].text(
-            0.02,
-            0.96,
-            f"Reference baseline {summary['reference_rtol']:.0e} omitted from curve",
-            transform=axes[0].transAxes,
-            ha="left",
-            va="top",
-            bbox={"facecolor": "white", "alpha": 0.82, "edgecolor": "0.7"},
-        )
+        fig, axes = plt.subplots(3, 1, figsize=(7.2, 7.4), sharex=True, layout="constrained")
+        axes[0].loglog(rtol, np.maximum(summary["altitude_drift_m"], 1e-12), marker="o", color="tab:blue", label="Altitude drift")
+        axes[0].axhline(summary["thresholds"]["altitude_m"], color="tab:orange", linestyle="--", label="Criterion")
+        axes[0].set_ylabel("Altitude drift (m)")
         axes[0].legend(loc="best")
 
+        axes[1].loglog(rtol, np.maximum(summary["velocity_drift_m_s"], 1e-12), marker="s", color="tab:orange", label="Velocity drift")
+        axes[1].axhline(summary["thresholds"]["velocity_m_s"], color="tab:red", linestyle="--", label="Criterion")
+        axes[1].set_ylabel("Velocity drift (m/s)")
+        axes[1].legend(loc="best")
+
+        axes[2].loglog(rtol, np.maximum(summary["radial_velocity_drift_m_s"], 1e-12), marker="^", color="tab:green", label="Radial velocity drift")
+        axes[2].axhline(summary["thresholds"]["radial_velocity_m_s"], color="tab:red", linestyle="--", label="Criterion")
         axes[2].set_xlabel("Integrator relative tolerance (rtol)")
+        axes[2].set_ylabel("Radial velocity drift (m/s)")
+        axes[2].legend(loc="best")
 
         for ax in axes:
             ax.invert_xaxis()
-
-        if converged_rtol is not None:
-            ax = axes[0]
-            ax.text(
-                0.98,
-                0.96,
-                f"Converged by {converged_rtol:.0e}\nNominal replay {op_rtol:.0e}",
-                transform=ax.transAxes,
-                ha="right",
-                va="top",
-                bbox={"facecolor": "white", "alpha": 0.82, "edgecolor": "0.7"},
-            )
-
         _save_figure(fig, stem)
 
     def _render_drift(self, csv_path, stem):
@@ -950,26 +897,20 @@ class PaperPackBuilder:
         rows = _read_csv_rows(csv_path)
         pos = np.array([float(row["end_position_error_m"]) for row in rows], dtype=float)
         rel = np.array([float(row["max_relative_error"]) for row in rows], dtype=float)
-        phases = [str(row["phase"]) for row in rows]
-        phase_segments = _phase_segments(phases)
-        colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-        seen_labels = set()
+        phase = np.array([row["phase"] for row in rows])
+
+        global_idx = np.arange(len(rows))
+        boost_mask = phase == "boost"
+        ship_mask = phase == "ship"
 
         fig, axes = plt.subplots(2, 1, figsize=(7.2, 6.4), sharex=True, layout="constrained")
-        for idx, (phase_name, start, end) in enumerate(phase_segments):
-            segment_idx = np.arange(start, end)
-            label = phase_name.title() if phase_name not in seen_labels else "_nolegend_"
-            color = colors[idx % len(colors)]
-            axes[0].semilogy(segment_idx, np.maximum(pos[start:end], 1e-18), color=color, label=label)
-            axes[1].semilogy(segment_idx, np.maximum(rel[start:end], 1e-18), color=color, label=label)
-            seen_labels.add(phase_name)
-            if end < len(rows):
-                for ax in axes:
-                    ax.axvline(end - 0.5, color="0.5", linestyle="--", linewidth=0.8, alpha=0.6)
-
+        axes[0].semilogy(global_idx[boost_mask], np.maximum(pos[boost_mask], 1e-18), color="tab:blue", label="Boost")
+        axes[0].semilogy(global_idx[ship_mask], np.maximum(pos[ship_mask], 1e-18), color="tab:orange", label="Ship")
         axes[0].set_ylabel("End-position error (m)")
         axes[0].legend(loc="best")
 
+        axes[1].semilogy(global_idx[boost_mask], np.maximum(rel[boost_mask], 1e-18), color="tab:blue", label="Boost")
+        axes[1].semilogy(global_idx[ship_mask], np.maximum(rel[ship_mask], 1e-18), color="tab:orange", label="Ship")
         axes[1].axhline(1e-6, color="tab:orange", linestyle="--", label="Reference threshold")
         axes[1].set_xlabel("Global interval index")
         axes[1].set_ylabel("Max relative error (-)")
@@ -1020,95 +961,34 @@ class PaperPackBuilder:
     def _render_3d_trajectory(self, env_cfg, state_hist, stem):
         r_hist = state_hist[0:3, :]
         orbit_hist = _compute_orbit_projection(state_hist, env_cfg)
-        r_final = state_hist[0:3, -1]
-        v_final = state_hist[3:6, -1]
         r_eq = env_cfg.earth_radius_equator
         r_pol = r_eq * (1.0 - env_cfg.earth_flattening)
 
-        fig = plt.figure(figsize=(8.6, 4.9), layout="constrained")
-        gs = fig.add_gridspec(1, 2, width_ratios=[1.05, 1.0])
-        ax = fig.add_subplot(gs[0, 0], projection="3d")
-        ax2 = fig.add_subplot(gs[0, 1])
+        fig = plt.figure(figsize=(7.0, 7.0), layout="constrained")
+        ax = fig.add_subplot(111, projection="3d")
 
         u = np.linspace(0.0, 2.0 * np.pi, 30)
         v = np.linspace(0.0, np.pi, 30)
         x_earth = r_eq * np.outer(np.cos(u), np.sin(v))
         y_earth = r_eq * np.outer(np.sin(u), np.sin(v))
         z_earth = r_pol * np.outer(np.ones_like(u), np.cos(v))
-        ax.plot_surface(x_earth, y_earth, z_earth, color="0.88", alpha=0.08, linewidth=0.0, shade=False)
-        ax.plot_wireframe(x_earth, y_earth, z_earth, color="0.75", alpha=0.18, linewidth=0.4)
+        ax.plot_wireframe(x_earth, y_earth, z_earth, color="0.75", alpha=0.28, linewidth=0.5)
 
-        ax.plot(r_hist[0, :], r_hist[1, :], r_hist[2, :], color="tab:red", linewidth=2.2, label="Flight path")
+        ax.plot(r_hist[0, :], r_hist[1, :], r_hist[2, :], color="tab:red", label="Flight path")
         if orbit_hist is not None:
-            ax.plot(
-                orbit_hist[0, :],
-                orbit_hist[1, :],
-                orbit_hist[2, :],
-                linestyle="--",
-                color="0.25",
-                linewidth=1.6,
-                label="Projected orbit",
-            )
-        ax.scatter(r_hist[0, 0], r_hist[1, 0], r_hist[2, 0], color="tab:green", s=28, label="Launch")
-        ax.scatter(r_hist[0, -1], r_hist[1, -1], r_hist[2, -1], color="black", marker="x", s=38, label="Injection")
+            ax.plot(orbit_hist[0, :], orbit_hist[1, :], orbit_hist[2, :], linestyle="--", color="0.25", label="Projected orbit")
+        ax.scatter(r_hist[0, 0], r_hist[1, 0], r_hist[2, 0], color="tab:green", s=26, label="Launch")
+        ax.scatter(r_hist[0, -1], r_hist[1, -1], r_hist[2, -1], color="black", marker="x", s=34, label="Injection")
 
-        orbit_radii = [np.linalg.norm(r_hist, axis=0)]
-        if orbit_hist is not None:
-            orbit_radii.append(np.linalg.norm(orbit_hist[0:3, :], axis=0))
-        global_lim = max(float(np.nanmax(vals)) for vals in orbit_radii + [np.array([r_eq], dtype=float)]) * 1.08
-        ax.set_xlim(-global_lim, global_lim)
-        ax.set_ylim(-global_lim, global_lim)
-        ax.set_zlim(-global_lim, global_lim)
+        max_val = max(np.max(np.abs(r_hist)), r_eq) * 1.05
+        ax.set_xlim(-max_val, max_val)
+        ax.set_ylim(-max_val, max_val)
+        ax.set_zlim(-max_val, max_val)
         ax.set_box_aspect((1, 1, 1))
-        ax.set_proj_type("ortho")
-        ax.view_init(elev=24, azim=-58)
-        ax.grid(False)
-        tick_vals = np.array([-r_eq, 0.0, r_eq], dtype=float)
-        ax.set_xticks(tick_vals)
-        ax.set_yticks(tick_vals)
-        ax.set_zticks(tick_vals)
-        ax.set_xlabel("X [m]", labelpad=4)
-        ax.set_ylabel("Y [m]", labelpad=4)
-        ax.set_zlabel("")
-        ax.tick_params(axis="both", which="major", pad=1, labelsize=8)
-        ax.xaxis.pane.set_alpha(0.0)
-        ax.yaxis.pane.set_alpha(0.0)
-        ax.zaxis.pane.set_alpha(0.0)
-
-        h_vec = np.cross(r_final, v_final)
-        h_hat = h_vec / max(np.linalg.norm(h_vec), 1e-12)
-        e1 = r_final / max(np.linalg.norm(r_final), 1e-12)
-        e2 = np.cross(h_hat, e1)
-        basis = np.vstack([e1, e2, h_hat])
-
-        traj_plane = basis @ r_hist
-        orbit_plane = basis @ orbit_hist[0:3, :] if orbit_hist is not None else None
-
-        earth_disk = Circle((0.0, 0.0), r_eq, facecolor="0.94", edgecolor="0.75", linewidth=1.0)
-        ax2.add_patch(earth_disk)
-        if orbit_plane is not None:
-            ax2.plot(orbit_plane[0, :], orbit_plane[1, :], linestyle="--", color="0.25", linewidth=1.6)
-        ax2.plot(traj_plane[0, :], traj_plane[1, :], color="tab:red", linewidth=2.2)
-        ax2.scatter(traj_plane[0, 0], traj_plane[1, 0], color="tab:green", s=28)
-        ax2.scatter(traj_plane[0, -1], traj_plane[1, -1], color="black", marker="x", s=38)
-        ax2.set_aspect("equal", adjustable="box")
-        plane_radius = np.max(np.linalg.norm(traj_plane[0:2, :], axis=0))
-        if orbit_plane is not None:
-            plane_radius = max(float(plane_radius), float(np.max(np.linalg.norm(orbit_plane[0:2, :], axis=0))))
-        plane_lim = plane_radius * 1.16
-        ax2.set_xlim(-plane_lim, plane_lim)
-        ax2.set_ylim(-plane_lim, plane_lim)
-        ax2.grid(True, alpha=0.22)
-        ax2.set_xlabel("Orbit-plane axis 1 [m]")
-        ax2.set_ylabel("Orbit-plane axis 2 [m]")
-
-        legend_handles = [
-            Line2D([0], [0], color="tab:red", linewidth=2.2, label="Flight path"),
-            Line2D([0], [0], color="0.25", linestyle="--", linewidth=1.6, label="Projected orbit"),
-            Line2D([0], [0], color="tab:green", marker="o", linestyle="None", markersize=5.5, label="Launch"),
-            Line2D([0], [0], color="black", marker="x", linestyle="None", markersize=6.5, label="Injection"),
-        ]
-        fig.legend(handles=legend_handles, loc="upper center", ncol=4, frameon=True, bbox_to_anchor=(0.52, 0.99))
+        ax.set_xlabel("X (ECI) [m]")
+        ax.set_ylabel("Y (ECI) [m]")
+        ax.set_zlabel("Z (ECI) [m]")
+        ax.legend(loc="upper left")
         _save_figure(fig, stem)
 
     def _build_launch_cost_heatmap(self):
