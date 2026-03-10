@@ -1,0 +1,229 @@
+Course-to-Test Alignment Audit
+Updated: 2026-03-10
+
+Purpose
+Review the current reliability suite against the actual course material and the current repository implementation.
+This file replaces the older Markdown note and is intended to be the up-to-date plain-text reference.
+
+1. Bottom line
+
+The previous audit was broadly on the right track, but it was not fully up to date with the current repo state.
+
+As of 2026-03-10:
+- The default reliability toggle set in `orbit_launch/config.py` and the `course_core` profile in `analysis_tools/relabilityanalysis.py` are identical.
+- Six analyses are enabled in both places:
+  `grid_independence`, `interval_replay_audit`, `theoretical_efficiency`,
+  `integrator_tolerance`, `smooth_integrator_benchmark`, `drift`.
+- Of those six, four are directly supported by the course material as taught or graded:
+  `grid_independence`, `integrator_tolerance`, `smooth_integrator_benchmark`, `drift`.
+- Two are useful and defensible, but they are better described as verification/context extensions than strict course-taught requirements:
+  `interval_replay_audit`, `theoretical_efficiency`.
+- The paper-output pipeline currently depends on all six enabled analyses, so any future attempt to make the run strictly course-only would also require changes in `analysis_tools/paper_outputs.py`.
+
+2. What the course explicitly teaches and rewards
+
+Project 1: integrators, time-step dependence, accuracy, stability
+- The assignment explicitly asks students to compare Euler-Cromer, velocity Verlet, and RK4, compare against an exact solution, and study time-step dependence.
+- It also explicitly asks about long-time behavior and why RK4 can be problematic in physical simulation despite higher order.
+- Sources:
+  - `tmp/reference_text/Assignments1.txt.clean:8-18`
+  - `tmp/reference_text/Lecture1.txt.clean:31-37`
+  - `tmp/reference_text/Feedback1.txt.clean:31-42`
+
+Project 2: statistical accuracy, standard error, equilibration, sensitivity to initial conditions
+- The assignment explicitly asks for standard-error estimation, the number of simulations needed to hit a target error, equilibration length, and dependence on initial conditions.
+- The feedback reinforces that accuracy and equilibration must be analyzed together.
+- Sources:
+  - `tmp/reference_text/Assignments2-1.txt.clean:54-59`
+  - `tmp/reference_text/Feedback2.txt.clean:35-56`
+
+Project 3: Monte Carlo error estimation and MD drift monitoring
+- The Monte Carlo assignment asks for standard error, comparison against the observed statistical error, and acceptance-rate behavior.
+- The MD assignment explicitly asks students to study integration quality by monitoring energy drift as the time step changes.
+- Sources:
+  - `tmp/reference_text/Assignments3.txt.clean:20-35`
+  - `tmp/reference_text/Assignments3.txt.clean:39-44`
+  - `tmp/reference_text/Feedback3.txt.clean:8-21`
+
+Project 4: grid refinement, convergence, method comparison, initial-guess sensitivity
+- The Laplace assignment explicitly asks for accuracy at a target error, then asks students to halve the grid size and compare behavior.
+- It also explicitly asks about the effect of a poor initial guess and whether the final result is independent of that guess.
+- A later task asks students to compare random-walk and relaxation methods and assess convergence with sample count.
+- Sources:
+  - `tmp/reference_text/Electrostatics.txt.clean:723-735`
+  - `tmp/reference_text/Electrostatics.txt.clean:819-825`
+
+Final project instructions
+- The final-project instructions explicitly require at least one parameter study.
+- They also explicitly require that the accuracy of numerical solutions be investigated by varying the resolution.
+- Source:
+  - `tmp/reference_text/Instructions 2025.txt.clean:34-39`
+
+Final grading guidance
+- The grading criteria explicitly reward discretization/accuracy work, relevant method or parameter comparisons, clear plots, and the absence of conclusion-affecting mistakes.
+- Source:
+  - `REFERENCE/Final Rapport/_extracted_text/grading criteria.txt:5-29`
+
+3. Current implementation state in this repository
+
+Default toggles in `orbit_launch/config.py`
+- Source: `orbit_launch/config.py:164-180`
+- Enabled by default:
+  `grid_independence`
+  `interval_replay_audit`
+  `theoretical_efficiency`
+  `integrator_tolerance`
+  `smooth_integrator_benchmark`
+  `drift`
+- Disabled by default:
+  `randomized_multistart`
+  `monte_carlo_precision_target`
+  `q2_uncertainty_budget`
+  `bifurcation_2d_map`
+  `model_limitations`
+  `q7_conclusion_support`
+
+`course_core` profile in `analysis_tools/relabilityanalysis.py`
+- Source: `analysis_tools/relabilityanalysis.py:81-96`
+- The `course_core` profile currently turns on and off the exact same set as the default config toggle object.
+- That means the code does not currently distinguish between "default paper run" and "strictly course-only run".
+
+Paper-pack dependency in `analysis_tools/paper_outputs.py`
+- Sources:
+  - `analysis_tools/paper_outputs.py:61-70`
+  - `analysis_tools/paper_outputs.py:795-806`
+- The paper pack requires reliability data files from:
+  `grid_independence`
+  `integrator_tolerance`
+  `drift`
+  `interval_replay_audit`
+  `smooth_integrator_benchmark`
+  `theoretical_efficiency`
+- Figure placement in the current paper pack:
+  Main body:
+    `grid_independence`
+    `integrator_tolerance`
+    `drift`
+  Appendix:
+    `interval_replay_audit`
+    `smooth_integrator_benchmark`
+    `theoretical_efficiency`
+
+4. Alignment verdict for each reliability test
+
+`grid_independence`
+- Current status: ON by default, ON in `course_core`, required by paper pack, main-body figure.
+- Alignment: direct and strong.
+- Why: Project 4 and the final instructions explicitly require refinement/resolution checks and target-accuracy reasoning.
+- Verdict: keep in the main report body.
+
+`integrator_tolerance`
+- Current status: ON by default, ON in `course_core`, required by paper pack, main-body figure.
+- Alignment: direct and strong.
+- Why: Project 1 and Project 3 both emphasize time-step dependence, numerical accuracy, and integration-quality checks.
+- Verdict: keep in the main report body.
+
+`smooth_integrator_benchmark`
+- Current status: ON by default, ON in `course_core`, required by paper pack, appendix figure.
+- Alignment: direct, but supporting rather than central.
+- Why: Project 1 explicitly compares integrators and discusses order/long-time behavior. This benchmark is a cleaner formal version of that same idea.
+- Verdict: keep, but appendix placement is appropriate.
+
+`drift`
+- Current status: ON by default, ON in `course_core`, required by paper pack, main-body figure.
+- Alignment: direct enough to be course-aligned.
+- Why: Project 3 explicitly asks for drift monitoring as the time step varies. The repo's drift metric is not energy drift, but it is still a numerical consistency/drift check between optimizer output and replayed dynamics.
+- Verdict: keep in the main report body, but describe it as a consistency/drift check, not as a direct copy of the Project 3 task.
+
+`interval_replay_audit`
+- Current status: ON by default, ON in `course_core`, required by paper pack, appendix figure.
+- Alignment: defensible verification extension, not a direct course requirement.
+- Why: Reintegrating each interval independently with DOP853 is a good independent verification idea, but this exact method is not explicitly taught in the course material.
+- Code note: the interval replay audit uses DOP853 (`analysis_tools/relabilityanalysis.py:627`).
+- Verdict: keep as appendix verification evidence, but do not overclaim that it is a core taught course method.
+
+`theoretical_efficiency`
+- Current status: ON by default, ON in `course_core`, required by paper pack, appendix figure.
+- Alignment: contextual engineering check, not direct reliability evidence from the course.
+- Why: It provides an idealized delta-v/fuel-use plausibility benchmark, but it is not a discretization, convergence, or statistical-accuracy test.
+- Code note: the implementation itself already warns that this is an idealized contextual benchmark, not a strict lower bound on fuel burned (`analysis_tools/relabilityanalysis.py:2359-2384`).
+- Verdict: keep only as short appendix context.
+
+`monte_carlo_precision_target`
+- Current status: OFF by default, OFF in `course_core`.
+- Alignment: course-aligned in a general sense.
+- Why: Project 2 and Project 3 clearly teach standard error, repeated sampling, and convergence with more samples.
+- Limitation: for this repo's current deterministic open-loop orbit argument, the uncertainty model can easily become a separate study instead of strengthening the main claim.
+- Verdict: keep available in code, but use only if the report explicitly includes an uncertainty section.
+
+`q2_uncertainty_budget`
+- Current status: OFF by default, OFF in `course_core`.
+- Alignment: partially course-aligned, but still supplementary here.
+- Why: parameter variation is aligned with the final instructions, but this analysis is broader and easier to over-interpret than the direct numerical-verification chain.
+- Verdict: keep available in code, but not in the default paper bundle.
+
+`randomized_multistart`
+- Current status: OFF by default, OFF in `course_core`.
+- Alignment: weak as a direct course mapping.
+- Why: it is an optimizer robustness study, not a taught numerical-accuracy requirement from the course projects.
+- Verdict: supplementary only.
+
+`bifurcation_2d_map`
+- Current status: OFF by default, OFF in `course_core`.
+- Alignment: weak-to-moderate.
+- Why: the final instructions require at least one parameter study, so the general idea is fine, but a 2D feasibility map is not part of the core course reliability logic.
+- Verdict: supplementary only.
+
+`model_limitations`
+- Current status: OFF by default, OFF in `course_core`.
+- Alignment: not a numerical test.
+- Why: this is useful report text, not reliability evidence.
+- Verdict: discuss in the paper narrative, not as part of the core reliability run.
+
+`q7_conclusion_support`
+- Current status: OFF by default, OFF in `course_core`.
+- Alignment: not a numerical test.
+- Why: it is a synthesis/reporting helper rather than an independent validation method.
+- Verdict: leave off and write the synthesis directly in the report.
+
+5. Recommended interpretation for the report
+
+Strict course-aligned main evidence:
+- `grid_independence`
+- `integrator_tolerance`
+- `drift`
+
+Strong supporting appendix evidence that still fits the course spirit:
+- `smooth_integrator_benchmark`
+- `interval_replay_audit`
+
+Context-only appendix evidence:
+- `theoretical_efficiency`
+
+Optional supplementary studies, only if the report explicitly wants them:
+- `monte_carlo_precision_target`
+- `q2_uncertainty_budget`
+- `randomized_multistart`
+- `bifurcation_2d_map`
+
+6. Corrections from the previous version
+
+- Converted the document from Markdown to plain text.
+- Updated the review date to 2026-03-10.
+- Corrected the grading-criteria source path to `REFERENCE/Final Rapport/_extracted_text/grading criteria.txt`.
+- Added the final-project instruction source that explicitly requires parameter studies and resolution checks.
+- Clarified that the current default toggle set and the `course_core` profile are the same.
+- Clarified that the paper pack currently requires six enabled analyses, even though only four of them are directly course-taught reliability checks.
+
+7. Final conclusion
+
+The current reliability story is mostly aligned with the course, but it should be described carefully:
+
+- Direct course-core evidence:
+  `grid_independence`, `integrator_tolerance`, `smooth_integrator_benchmark`, `drift`
+- Useful but not strictly course-core:
+  `interval_replay_audit`, `theoretical_efficiency`
+- Sensible supplementary extensions left off by default:
+  `monte_carlo_precision_target`, `q2_uncertainty_budget`, `randomized_multistart`, `bifurcation_2d_map`
+
+So the alignment is now up to date and detailed in this file, but the repo implementation still uses a slightly broader "paper-safe bundle" than a strict course-only interpretation.

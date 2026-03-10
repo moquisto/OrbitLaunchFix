@@ -1,2 +1,0 @@
-n,success_rate,wilson_low_95,wilson_high_95,ci_half_width_95,relative_half_width,target_half_width,target_relative_half_width,orbit_error_p50,orbit_error_p90,orbit_error_p95,orbit_feasible_fraction_error_leq_1
-4,1,0.510099979596,1,0.244950010202,0.244950010202,0.5,1,0,0,0,1

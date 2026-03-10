@@ -1,0 +1,6 @@
+trial,label,time_scale,position_noise_sigma,velocity_noise_sigma,mass_noise_sigma,throttle_noise_sigma,direction_noise_sigma_deg,solver_success,mission_success,terminal_strict_success,path_ok,q_ok,g_ok,status,final_mass_kg,final_mass_scored_kg,final_mass_gap_to_best_kg,runtime_s
+1,nominal,1,0,0,0,0,0,1,1,1,1,1,1,MISSION_OK,316255.886069,316255.886069,2.02442170121e-05,66.2783610821
+2,time_minus,0.9925,-0.0025,-0.0025,-0.0015,0.003,0.35,1,1,1,1,1,1,MISSION_OK,316255.886084,316255.886084,5.85254747421e-06,126.426567793
+3,time_plus,1.0075,0.0025,0.0025,0.0015,-0.003,-0.35,1,1,1,1,1,1,MISSION_OK,316255.886085,316255.886085,5.21534821019e-06,203.842869997
+4,state_minus,1,-0.005,-0.005,-0.003,-0.002,0.5,0,0,0,0,0,0,SOLVE_FAIL,nan,nan,nan,6193.47011304
+5,state_plus,1,0.005,0.005,0.003,0.002,-0.5,1,1,1,1,1,1,MISSION_OK,316255.88609,316255.88609,0,1544.06411862

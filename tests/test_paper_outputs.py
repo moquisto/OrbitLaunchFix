@@ -3,7 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
-from paper_outputs import HEATMAP_ARTIFACTS, PaperPackBuilder, _summarize_integrator
+from analysis_tools.paper_outputs import HEATMAP_ARTIFACTS, PaperPackBuilder, _summarize_integrator
 
 
 class PaperOutputSummaryTests(unittest.TestCase):

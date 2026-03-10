@@ -47,15 +47,17 @@ The project follows an explicit workflow:
 
 | Path | Purpose |
 | --- | --- |
-| `config.py` | Single source of truth for vehicle, environment, sequence, and reliability toggles |
-| `environment.py` | Atmosphere/gravity/wind model with symbolic + compiled numeric parity |
-| `vehicle.py` | Full equations of motion and aerodynamic/propulsion force model |
-| `guidance.py` | Warm-start trajectory generator for the NLP |
-| `main.py` | Optimization orchestrator and default end-to-end mission run |
-| `simulation.py` | Forward simulation verifier (`solve_ivp`) using optimized controls |
-| `analysis.py` | Mission plots and comparison dashboards |
-| `relabilityanalysis.py` | Reliability suite with figure/CSV export and CLI flags |
-| `testplot.py` | Global latitude-dependent launch cost heatmap utility |
+| `orbit_launch/config.py` | Single source of truth for vehicle, environment, sequence, and reliability toggles |
+| `orbit_launch/environment.py` | Atmosphere/gravity/wind model with symbolic + compiled numeric parity |
+| `orbit_launch/vehicle.py` | Full equations of motion and aerodynamic/propulsion force model |
+| `orbit_launch/guidance.py` | Warm-start trajectory generator for the NLP |
+| `orbit_launch/main.py` | Optimization orchestrator and default end-to-end mission run |
+| `orbit_launch/simulation.py` | Forward simulation verifier (`solve_ivp`) using optimized controls |
+| `orbit_launch/analysis.py` | Mission plots and comparison dashboards |
+| `analysis_tools/relabilityanalysis.py` | Reliability suite with figure/CSV export and CLI flags |
+| `analysis_tools/paper_outputs.py` | Paper-pack and report-output builder |
+| `analysis_tools/testplot.py` | Global latitude-dependent launch cost heatmap utility |
+| `analysis_tools/warm_start_multiseed.py` | Standalone warm-start multiseed analysis runner |
 | `reliability_outputs/` | Timestamped output folders from reliability runs |
 | `REFERENCE/` | Course/project reference material |
 
@@ -82,7 +84,7 @@ pip install numpy scipy matplotlib casadi ussa1976
 ### 1. Run the full optimize -> simulate -> plot flow
 
 ```bash
-python main.py
+python3 -m orbit_launch.main
 ```
 
 What this does:
@@ -96,10 +98,10 @@ What this does:
 ### 2. Run reliability suite (report evidence pipeline)
 
 ```bash
-python relabilityanalysis.py --no-show
+python3 -m analysis_tools.relabilityanalysis --no-show
 ```
 
-Important: the filename is `relabilityanalysis.py` (missing the second `i`) in this repository.
+Important: the module/file is still named `relabilityanalysis.py` (missing the second `i`) inside `analysis_tools/`.
 
 Default behavior:
 
@@ -123,7 +125,7 @@ CLI options:
 Example reproducible run:
 
 ```bash
-python relabilityanalysis.py \
+python3 -m analysis_tools.relabilityanalysis \
   --seed 1337 \
   --mc-samples 300 \
   --no-show \
@@ -133,12 +135,12 @@ python relabilityanalysis.py \
 ### 3. Run global launch heatmap utility
 
 ```bash
-python testplot.py
+python3 -m analysis_tools.testplot
 ```
 
 This performs a latitude sweep and renders a 3D globe-style fuel-cost heatmap.
 
-## Configuration Guide (`config.py`)
+## Configuration Guide (`orbit_launch/config.py`)
 
 Edit `StarshipBlock2`, `EARTH_CONFIG`, and `RELIABILITY_ANALYSIS_TOGGLES` directly.
 
@@ -206,7 +208,7 @@ The reliability suite is structured to support question-driven reporting:
 
 ## Expected Outputs
 
-### `main.py`
+### `orbit_launch/main.py`
 
 - Terminal diagnostics for optimization and simulation phases.
 - Fuel-margin summary at final state.
@@ -216,7 +218,7 @@ The reliability suite is structured to support question-driven reporting:
   - Controls and loads (throttle, G-load, forces, thrust vector, envelope)
   - 3D trajectory with projected orbit
 
-### `relabilityanalysis.py`
+### `analysis_tools/relabilityanalysis.py`
 
 - Timestamped output directory containing:
   - `data/*.csv` for numerical evidence tables
@@ -227,12 +229,12 @@ The reliability suite is structured to support question-driven reporting:
 - **Optimization fails to converge**
   - Increase `max_iter`.
   - Reduce problem stiffness temporarily (e.g., fewer `num_nodes`) to localize issues.
-  - Keep warm start enabled (`guidance.py`) and verify reasonable initial trajectory.
+  - Keep warm start enabled (`orbit_launch/guidance.py`) and verify reasonable initial trajectory.
 
 - **Simulation drifts from optimizer trajectory**
   - Increase `num_nodes` in the direct-transcription grid.
   - Tighten simulation tolerances in `run_simulation(..., rtol, atol)`.
-  - Inspect drift diagnostics printed by `main.py`/`debug.py`.
+  - Inspect drift diagnostics printed by `orbit_launch/main.py` and `orbit_launch/debug.py`.
 
 - **Very slow reliability runs**
   - Use `--no-show`.
@@ -253,6 +255,6 @@ The reliability suite is structured to support question-driven reporting:
 
 This repository appears structured for simulation/modeling coursework and report-backed engineering argumentation. It is most useful when run as:
 
-1. Baseline optimization/simulation (`main.py`)
-2. Reliability evidence generation (`relabilityanalysis.py`)
-3. Comparative scenario sweeps (`testplot.py` and config edits)
+1. Baseline optimization/simulation (`orbit_launch/main.py`)
+2. Reliability evidence generation (`analysis_tools/relabilityanalysis.py`)
+3. Comparative scenario sweeps (`analysis_tools/testplot.py` and config edits)

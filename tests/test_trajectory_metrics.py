@@ -3,9 +3,9 @@ import unittest
 
 import numpy as np
 
-from config import EARTH_CONFIG, StarshipBlock2
-from relabilityanalysis import evaluate_terminal_state
-from trajectory_metrics import (
+from orbit_launch.config import EARTH_CONFIG, StarshipBlock2
+from analysis_tools.relabilityanalysis import evaluate_terminal_state
+from orbit_launch.trajectory_metrics import (
     circular_target_speed_m_s,
     ellipsoidal_altitude_m,
     spherical_altitude_m,

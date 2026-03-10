@@ -6,16 +6,16 @@ from pathlib import Path
 
 import numpy as np
 
-from config import EARTH_CONFIG, StarshipBlock2
-from environment import Environment
-from main import solve_optimal_trajectory
-from relabilityanalysis import (
+from orbit_launch.config import EARTH_CONFIG, StarshipBlock2
+from orbit_launch.environment import Environment
+from orbit_launch.main import solve_optimal_trajectory
+from analysis_tools.relabilityanalysis import (
     ReliabilitySuite,
     _run_interval_replay_phase_worker,
     evaluate_terminal_state,
 )
-from simulation import run_simulation
-from vehicle import Vehicle
+from orbit_launch.simulation import run_simulation
+from orbit_launch.vehicle import Vehicle
 
 
 class NominalRegressionTests(unittest.TestCase):
