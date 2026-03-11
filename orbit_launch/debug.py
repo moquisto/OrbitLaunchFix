@@ -294,14 +294,24 @@ def check_variable_scaling(sol, vars_dict):
                 # Throttle (Row 0)
                 th_vals = val[0, :]
                 th_min, th_max, th_mean = np.min(th_vals), np.max(th_vals), np.mean(th_vals)
-                status_th = f"{Style.GREEN}OK{Style.RESET}" # Throttle is 0-1 by definition, usually fine
+                if th_min < -1.0e-6 or th_max > 1.0 + 1.0e-6:
+                    status_th = f"{Style.RED}FAIL{Style.RESET}"
+                elif 0.0 <= th_mean <= 1.0:
+                    status_th = f"{Style.GREEN}OK{Style.RESET}"
+                else:
+                    status_th = f"{Style.YELLOW}WARN{Style.RESET}"
                 print(f"{name:<10} | {'Throttle':<10} | [{th_min:.4f}, {th_max:.4f}]   | {th_mean:<8.4f} | {status_th:<6}")
                 
                 # Direction (Rows 1-3)
                 # Should be unit vectors, so norm should be ~1.0
                 dir_vals = np.linalg.norm(val[1:, :], axis=0)
                 d_min, d_max, d_mean = np.min(dir_vals), np.max(dir_vals), np.mean(dir_vals)
-                status_d = f"{Style.GREEN}OK{Style.RESET}" if 0.9 <= d_mean <= 1.1 else f"{Style.YELLOW}WARN{Style.RESET}"
+                if d_min < 0.5 or d_max > 1.5:
+                    status_d = f"{Style.RED}FAIL{Style.RESET}"
+                elif 0.9 <= d_min and d_max <= 1.1 and 0.9 <= d_mean <= 1.1:
+                    status_d = f"{Style.GREEN}OK{Style.RESET}"
+                else:
+                    status_d = f"{Style.YELLOW}WARN{Style.RESET}"
                 print(f"{'':<10} | {'Direction':<10} | [{d_min:.4f}, {d_max:.4f}]   | {d_mean:<8.4f} | {status_d:<6}")
                 continue
             

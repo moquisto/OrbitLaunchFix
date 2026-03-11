@@ -10,8 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
-from analysis_tools.relabilityanalysis import ReliabilitySuite
-from analysis_tools.warm_start_multiseed import WarmStartMultiseedAnalyzer, WarmStartSeedFactory
+from analysis_tools.relabilityanalysis import ReliabilitySuite, WarmStartMultiseedAnalyzer, WarmStartSeedFactory
 
 
 def _make_cfg():
@@ -122,6 +121,77 @@ class WarmStartSeedFactoryTests(unittest.TestCase):
             self.assertTrue(np.all(variant.guess[key] <= 1.0))
         self.assertGreaterEqual(variant.guess["T1"], self.cfg.sequence.min_stage_1_burn)
         self.assertGreaterEqual(variant.guess["T3"], self.cfg.sequence.min_stage_2_burn)
+        self.assertTrue(np.isnan(variant.params.as_dict()["direction_sigma_deg"]))
+        self.assertAlmostEqual(variant.params.as_dict()["direction_component_sigma"], 0.01)
+
+    def test_seed_display_labels_are_paper_friendly(self):
+        labels = ["nominal", "time_minus", "time_plus", "state_minus", "state_plus", "rand_05", "rand_06"]
+
+        display = WarmStartMultiseedAnalyzer._seed_display_labels(labels)
+        breaks = WarmStartMultiseedAnalyzer._seed_group_break_indices(labels)
+
+        self.assertEqual(
+            display,
+            ["Nominal", "Timing -", "Timing +", "Lateral -", "Lateral +", "Random 1", "Random 2"],
+        )
+        self.assertEqual(breaks, [1, 5])
+
+    def test_structured_variants_report_explicit_t2_scale(self):
+        variants = self.factory.build_structured_variants(self.base_guess, self.cfg)
+
+        self.assertEqual(variants[0].params.as_dict()["t2_scale"], 0.995)
+        self.assertEqual(variants[1].params.as_dict()["t2_scale"], 1.005)
+        self.assertEqual(variants[2].params.as_dict()["t2_scale"], 1.0)
+        self.assertEqual(variants[3].params.as_dict()["t2_scale"], 1.0)
+
+    def test_apply_throttle_bias_uses_available_headroom_and_floor_margin(self):
+        throttle = np.array([0.4, 0.6, 0.8], dtype=float)
+
+        plus = self.factory.apply_throttle_bias(throttle, self.cfg.sequence.min_throttle, 0.5)
+        minus = self.factory.apply_throttle_bias(throttle, self.cfg.sequence.min_throttle, -0.5)
+
+        np.testing.assert_allclose(plus, np.array([0.4, 0.7, 0.9]))
+        np.testing.assert_allclose(minus, np.array([0.4, 0.5, 0.5]))
+
+    def test_structured_seed_defaults_are_orthogonal_under_replay(self):
+        time_minus = next(spec for spec in self.factory.structured_specs if spec.label == "time_minus")
+        time_plus = next(spec for spec in self.factory.structured_specs if spec.label == "time_plus")
+        state_minus = next(spec for spec in self.factory.structured_specs if spec.label == "state_minus")
+        state_plus = next(spec for spec in self.factory.structured_specs if spec.label == "state_plus")
+
+        self.assertEqual(time_minus.throttle_sigma, 0.0)
+        self.assertEqual(time_plus.throttle_sigma, 0.0)
+        self.assertEqual(state_minus.throttle_sigma, 0.0)
+        self.assertEqual(state_plus.throttle_sigma, 0.0)
+        self.assertEqual(time_minus.direction_axis, (0.0, 0.0, 1.0))
+        self.assertEqual(time_plus.direction_axis, (0.0, 0.0, 1.0))
+        self.assertEqual(state_minus.direction_axis, (0.0, 0.0, 1.0))
+        self.assertEqual(state_plus.direction_axis, (0.0, 0.0, 1.0))
+
+    def test_state_rebuilder_callback_replaces_state_histories(self):
+        rng = np.random.default_rng(321)
+        sentinel = np.full_like(self.base_guess["X1"], 42.0)
+
+        def rebuilder(guess):
+            rebuilt = dict(guess)
+            rebuilt["X1"] = sentinel.copy()
+            rebuilt["X2"] = sentinel.copy()
+            rebuilt["X3"] = sentinel.copy()
+            return rebuilt
+
+        variant = self.factory.build_randomized_variant(
+            self.base_guess,
+            self.cfg,
+            rng,
+            "rand_05",
+            state_rebuilder=rebuilder,
+        )
+
+        for key in ("X1", "X2", "X3"):
+            np.testing.assert_allclose(variant.guess[key], sentinel)
+        for key in ("TD1", "TD3"):
+            norms = np.linalg.norm(variant.guess[key], axis=0)
+            np.testing.assert_allclose(norms, np.ones_like(norms), atol=1.0e-10)
 
 
 class WarmStartMultiseedDelegationTests(unittest.TestCase):
@@ -196,6 +266,29 @@ class WarmStartMultiseedLoggingTests(unittest.TestCase):
             self.assertIn("native stdout line", log_text)
             self.assertIn("native stderr line", log_text)
 
+    def test_multiple_trial_logs_are_created_sequentially(self):
+        with TemporaryDirectory() as tmpdir:
+            suite = SimpleNamespace(output_dir=Path(tmpdir))
+            analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+
+            labels = ["nominal", "time_minus", "time_plus", "state_minus", "state_plus", "rand_05"]
+            for idx, label in enumerate(labels):
+                with analyzer._tee_trial_output(analyzer._trial_log_path(idx, label)):
+                    print(f"log for {label}")
+
+            created = sorted(p.name for p in (Path(tmpdir) / "logs").glob("*.log"))
+            self.assertEqual(
+                created,
+                [
+                    "01_nominal.log",
+                    "02_time_minus.log",
+                    "03_time_plus.log",
+                    "04_state_minus.log",
+                    "05_state_plus.log",
+                    "06_rand_05.log",
+                ],
+            )
+
     def test_insertion_zoom_window_uses_terminal_segment_of_profiles(self):
         suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
         analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
@@ -240,6 +333,135 @@ class WarmStartMultiseedLoggingTests(unittest.TestCase):
                 "rand_09",
             ],
         )
+
+
+class WarmStartMultiseedHelperTests(unittest.TestCase):
+    def test_solver_return_status_classification_preserves_failure_modes(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+
+        self.assertEqual(analyzer._classify_solver_return_status("Solve_Succeeded"), "SOLVE_OK")
+        self.assertEqual(analyzer._classify_solver_return_status("Restoration_Failed"), "RESTORATION_FAIL")
+        self.assertEqual(analyzer._classify_solver_return_status("Maximum_Iterations_Exceeded"), "MAX_ITER")
+        self.assertEqual(analyzer._classify_solver_return_status("NonIpopt_Exception_Thrown"), "INTERRUPTED")
+        self.assertEqual(analyzer._classify_solver_return_status(""), "SOLVE_FAIL")
+
+    def test_terminal_criteria_ratio_uses_worst_normalized_component(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+
+        ratio = analyzer._terminal_criteria_ratio(
+            {
+                "alt_err_m": 2500.0,
+                "vel_err_m_s": -120.0,
+                "radial_velocity_m_s": 1.0,
+                "inclination_err_deg": 0.1,
+            }
+        )
+
+        self.assertAlmostEqual(ratio, 1.2)
+
+    def test_realized_seed_metrics_report_scales_and_zero_delta_for_nominal(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+        guess = _make_guess()
+
+        metrics = analyzer._compute_realized_seed_metrics(guess, guess)
+
+        self.assertAlmostEqual(metrics["realized_t1_scale"], 1.0)
+        self.assertAlmostEqual(metrics["realized_t2_scale"], 1.0)
+        self.assertAlmostEqual(metrics["realized_t3_scale"], 1.0)
+        self.assertAlmostEqual(metrics["realized_position_rms_m"], 0.0)
+        self.assertAlmostEqual(metrics["realized_velocity_rms_m_s"], 0.0)
+        self.assertAlmostEqual(metrics["realized_mass_rms_kg"], 0.0)
+        self.assertAlmostEqual(metrics["realized_throttle_rms_abs"], 0.0)
+        self.assertAlmostEqual(metrics["realized_direction_rms_deg"], 0.0)
+
+    def test_configured_seed_metadata_zeroes_state_perturbations_when_rebuilt(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+        params = {
+            "pos_sigma": 0.01,
+            "vel_sigma": 0.02,
+            "mass_sigma": 0.03,
+            "throttle_sigma": 0.04,
+            "direction_sigma_deg": -0.35,
+            "direction_component_sigma": np.nan,
+        }
+
+        metadata = analyzer._configured_seed_metadata("state_plus", params, rebuild_states=True)
+
+        self.assertEqual(metadata["seed_family"], "structured")
+        self.assertEqual(metadata["state_rebuild_applied"], 1)
+        self.assertEqual(metadata["configured_position_perturbation"], 0.0)
+        self.assertEqual(metadata["configured_velocity_perturbation"], 0.0)
+        self.assertEqual(metadata["configured_mass_perturbation"], 0.0)
+        self.assertAlmostEqual(metadata["configured_direction_perturbation_deg"], -0.35)
+        self.assertAlmostEqual(metadata["configured_direction_rms_deg_est"], 0.35)
+
+    def test_nominal_configured_seed_metadata_does_not_fake_state_rebuild(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+        params = {
+            "pos_sigma": 0.0,
+            "vel_sigma": 0.0,
+            "mass_sigma": 0.0,
+            "throttle_sigma": 0.0,
+            "direction_sigma_deg": 0.0,
+            "direction_component_sigma": 0.0,
+        }
+
+        metadata = analyzer._configured_seed_metadata("nominal", params, rebuild_states=False)
+
+        self.assertEqual(metadata["seed_family"], "nominal")
+        self.assertEqual(metadata["perturbation_semantics"], "none")
+        self.assertEqual(metadata["state_rebuild_applied"], 0)
+        self.assertEqual(metadata["configured_direction_rms_deg_est"], 0.0)
+
+    def test_configured_seed_metadata_reports_random_direction_component_sigma(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+        params = {
+            "pos_sigma": 0.01,
+            "vel_sigma": 0.01,
+            "mass_sigma": 0.01,
+            "throttle_sigma": 0.01,
+            "direction_sigma_deg": np.nan,
+            "direction_component_sigma": 0.01,
+        }
+
+        metadata = analyzer._configured_seed_metadata("rand_05", params, rebuild_states=True)
+
+        self.assertEqual(metadata["seed_family"], "randomized")
+        self.assertTrue(np.isnan(metadata["configured_direction_perturbation_deg"]))
+        self.assertAlmostEqual(metadata["configured_direction_component_sigma"], 0.01)
+        self.assertAlmostEqual(
+            metadata["configured_direction_rms_deg_est"],
+            analyzer._direction_component_sigma_to_rms_deg(0.01),
+        )
+
+    def test_spread_candidate_indices_only_include_non_reference_raw_passes(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+
+        indices = analyzer._spread_candidate_indices(0, [0, 2, 4])
+
+        self.assertEqual(indices, {2, 4})
+
+    def test_runtime_summary_medians_split_non_raw_from_true_failures(self):
+        suite = SimpleNamespace(output_dir=Path("tmp/test_logs"))
+        analyzer = WarmStartMultiseedAnalyzer(suite, lambda *_args, **_kwargs: {})
+        rows = [
+            {"runtime_s": 10.0, "mission_success": 1, "mission_success_slack": 1},
+            {"runtime_s": 20.0, "mission_success": 0, "mission_success_slack": 1},
+            {"runtime_s": 40.0, "mission_success": 0, "mission_success_slack": 0},
+        ]
+
+        medians = analyzer._runtime_summary_medians(rows)
+
+        self.assertAlmostEqual(medians["median_success_runtime_s"], 10.0)
+        self.assertAlmostEqual(medians["median_non_raw_runtime_s"], 30.0)
+        self.assertAlmostEqual(medians["median_failure_runtime_s"], 40.0)
 
 
 if __name__ == "__main__":

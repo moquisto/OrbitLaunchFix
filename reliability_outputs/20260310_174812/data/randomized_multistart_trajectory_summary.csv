@@ -1,8 +1,0 @@
-metric,value
-reference_label,nominal
-solver_rate,0.8
-mission_success_rate,0.8
-mass_spread_kg,2.02442170121e-05
-max_position_separation_km,0.0119923424501
-max_altitude_delta_km,0.00293130578473
-max_velocity_delta_m_s,0.049663942561

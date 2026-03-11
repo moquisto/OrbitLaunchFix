@@ -52,7 +52,7 @@ class EnvConfig:
     # Wind Model
     use_wind_model: bool = False 
     
-    # Monte Carlo Dispersion Factor (Default 1.0)
+    # Scalar atmosphere-density scaling factor (Default 1.0)
     density_multiplier: float = 1.0
     
     # --- Atmosphere Constants ---
@@ -167,18 +167,10 @@ class ReliabilityAnalysisToggles:
     interval_replay_audit: bool = True
     theoretical_efficiency: bool = True
     integrator_tolerance: bool = True
-    # Supplementary uncertainty studies kept available but disabled for the final-report default run.
-    monte_carlo_precision_target: bool = False
-    q2_uncertainty_budget: bool = False
     # Foundational numerical-method check from course integrator material.
     smooth_integrator_benchmark: bool = True
-    # Optional extension: deterministic 2D sensitivity map (off by default).
-    bifurcation_2d_map: bool = False
     # Course-aligned "drift" consistency check (kept on).
     drift: bool = True
-    # Optional reporting aids (off by default; conclusions should be written in paper text).
-    model_limitations: bool = False
-    q7_conclusion_support: bool = False
 
 # --- SpaceX Starship Block 2 Configuration ---
 StarshipBlock2 = TwoStageRocketConfig(

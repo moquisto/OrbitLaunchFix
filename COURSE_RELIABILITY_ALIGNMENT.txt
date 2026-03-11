@@ -77,11 +77,6 @@ Default toggles in `orbit_launch/config.py`
   `drift`
 - Disabled by default:
   `randomized_multistart`
-  `monte_carlo_precision_target`
-  `q2_uncertainty_budget`
-  `bifurcation_2d_map`
-  `model_limitations`
-  `q7_conclusion_support`
 
 `course_core` profile in `analysis_tools/relabilityanalysis.py`
 - Source: `analysis_tools/relabilityanalysis.py:81-96`
@@ -149,18 +144,7 @@ Paper-pack dependency in `analysis_tools/paper_outputs.py`
 - Code note: the implementation itself already warns that this is an idealized contextual benchmark, not a strict lower bound on fuel burned (`analysis_tools/relabilityanalysis.py:2359-2384`).
 - Verdict: keep only as short appendix context.
 
-`monte_carlo_precision_target`
-- Current status: OFF by default, OFF in `course_core`.
-- Alignment: course-aligned in a general sense.
-- Why: Project 2 and Project 3 clearly teach standard error, repeated sampling, and convergence with more samples.
-- Limitation: for this repo's current deterministic open-loop orbit argument, the uncertainty model can easily become a separate study instead of strengthening the main claim.
-- Verdict: keep available in code, but use only if the report explicitly includes an uncertainty section.
 
-`q2_uncertainty_budget`
-- Current status: OFF by default, OFF in `course_core`.
-- Alignment: partially course-aligned, but still supplementary here.
-- Why: parameter variation is aligned with the final instructions, but this analysis is broader and easier to over-interpret than the direct numerical-verification chain.
-- Verdict: keep available in code, but not in the default paper bundle.
 
 `randomized_multistart`
 - Current status: OFF by default, OFF in `course_core`.
@@ -168,23 +152,8 @@ Paper-pack dependency in `analysis_tools/paper_outputs.py`
 - Why: it is an optimizer robustness study, not a taught numerical-accuracy requirement from the course projects.
 - Verdict: supplementary only.
 
-`bifurcation_2d_map`
-- Current status: OFF by default, OFF in `course_core`.
-- Alignment: weak-to-moderate.
-- Why: the final instructions require at least one parameter study, so the general idea is fine, but a 2D feasibility map is not part of the core course reliability logic.
-- Verdict: supplementary only.
 
-`model_limitations`
-- Current status: OFF by default, OFF in `course_core`.
-- Alignment: not a numerical test.
-- Why: this is useful report text, not reliability evidence.
-- Verdict: discuss in the paper narrative, not as part of the core reliability run.
 
-`q7_conclusion_support`
-- Current status: OFF by default, OFF in `course_core`.
-- Alignment: not a numerical test.
-- Why: it is a synthesis/reporting helper rather than an independent validation method.
-- Verdict: leave off and write the synthesis directly in the report.
 
 5. Recommended interpretation for the report
 
@@ -201,10 +170,7 @@ Context-only appendix evidence:
 - `theoretical_efficiency`
 
 Optional supplementary studies, only if the report explicitly wants them:
-- `monte_carlo_precision_target`
-- `q2_uncertainty_budget`
 - `randomized_multistart`
-- `bifurcation_2d_map`
 
 6. Corrections from the previous version
 
@@ -224,6 +190,6 @@ The current reliability story is mostly aligned with the course, but it should b
 - Useful but not strictly course-core:
   `interval_replay_audit`, `theoretical_efficiency`
 - Sensible supplementary extensions left off by default:
-  `monte_carlo_precision_target`, `q2_uncertainty_budget`, `randomized_multistart`, `bifurcation_2d_map`
+  `randomized_multistart`
 
 So the alignment is now up to date and detailed in this file, but the repo implementation still uses a slightly broader "paper-safe bundle" than a strict course-only interpretation.

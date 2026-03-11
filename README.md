@@ -40,8 +40,7 @@ The project follows an explicit workflow:
 - **Reliability/validation model**
   - Core course-aligned checks: grid independence, interval replay audit, theoretical efficiency
   - Integrator convergence, drift, and method-order checks
-  - Monte Carlo uncertainty and precision targeting
-  - Optional extensions: randomized multistart, 2D sensitivity map, model-limitations summary, Q7 synthesis support
+  - Optional extension: randomized multistart warm-start robustness
 
 ## Repository Structure
 
@@ -54,10 +53,8 @@ The project follows an explicit workflow:
 | `orbit_launch/main.py` | Optimization orchestrator and default end-to-end mission run |
 | `orbit_launch/simulation.py` | Forward simulation verifier (`solve_ivp`) using optimized controls |
 | `orbit_launch/analysis.py` | Mission plots and comparison dashboards |
-| `analysis_tools/relabilityanalysis.py` | Reliability suite with figure/CSV export and CLI flags |
+| `analysis_tools/relabilityanalysis.py` | Reliability suite with figure/CSV export, warm-start multiseed, and global launch-cost CLI entry points |
 | `analysis_tools/paper_outputs.py` | Paper-pack and report-output builder |
-| `analysis_tools/testplot.py` | Global latitude-dependent launch cost heatmap utility |
-| `analysis_tools/warm_start_multiseed.py` | Standalone warm-start multiseed analysis runner |
 | `reliability_outputs/` | Timestamped output folders from reliability runs |
 | `REFERENCE/` | Course/project reference material |
 
@@ -115,8 +112,7 @@ CLI options:
 
 ```text
 --output-dir <path>   Custom output directory
---seed <int>          RNG seed for reproducible Monte Carlo analyses
---mc-samples <int>    Monte Carlo sample count (default: 200)
+--seed <int>          RNG seed for reproducible stochastic analyses
 --max-workers <int>   Maximum parallel workers (use 1 for serial mode)
 --no-show             Do not open interactive plot windows
 --no-save             Do not save figures/CSV outputs
@@ -127,18 +123,44 @@ Example reproducible run:
 ```bash
 python3 -m analysis_tools.relabilityanalysis \
   --seed 1337 \
-  --mc-samples 300 \
   --no-show \
   --output-dir reliability_outputs/baseline_seed1337
 ```
 
-### 3. Run global launch heatmap utility
+### 3. Run a single analysis directly
 
 ```bash
-python3 -m analysis_tools.testplot
+python3 -m analysis_tools.relabilityanalysis --analysis global-launch-cost
 ```
 
 This performs a latitude sweep and renders a 3D globe-style fuel-cost heatmap.
+
+Warm-start multiseed only:
+
+```bash
+python3 -m analysis_tools.relabilityanalysis --analysis warm-start-multiseed --trials 10
+```
+
+### 4. Build the final paper output pack
+
+```bash
+python3 -m analysis_tools.paper_outputs \
+  --reliability-dir reliability_outputs/<timestamp> \
+  --skip-heatmap
+```
+
+You can also launch the script directly from the repository root:
+
+```bash
+python3 analysis_tools/paper_outputs.py \
+  --reliability-dir reliability_outputs/<timestamp> \
+  --skip-heatmap
+```
+
+Notes:
+
+- Omit `--reliability-dir` to rerun the course-core reliability sweep before packaging figures/tables.
+- Omit `--skip-heatmap` if you want to regenerate the expensive global launch-cost appendix figure.
 
 ## Configuration Guide (`orbit_launch/config.py`)
 
@@ -159,7 +181,7 @@ Edit `StarshipBlock2`, `EARTH_CONFIG`, and `RELIABILITY_ANALYSIS_TOGGLES` direct
 ### Environment switches
 
 - `use_j2_perturbation`
-- `density_multiplier` (used in uncertainty studies)
+- `density_multiplier` (used for environment sweeps and sensitivity experiments)
 - `launch_latitude`, `launch_longitude`, `initial_rotation` (directly affect launch geometry and inertial alignment)
 
 Note: `EnvConfig.use_wind_model` exists in config but is not currently used as an active runtime toggle.
@@ -177,12 +199,7 @@ Default enabled:
 - `drift`
 
 Default disabled:
-- `monte_carlo_precision_target`
-- `q2_uncertainty_budget`
 - `randomized_multistart`
-- `bifurcation_2d_map`
-- `model_limitations`
-- `q7_conclusion_support`
 
 ## Model and Assumptions
 
@@ -200,11 +217,8 @@ Treat conclusions as valid within this modeling envelope, not as flight-certifie
 The reliability suite is structured to support question-driven reporting:
 
 - **Q1** credible optimum: grid independence, interval replay audit, theoretical efficiency; multistart robustness is available as an optional extension.
-- **Q2** uncertainty/accuracy: integrator sensitivity, Monte Carlo precision, uncertainty budget.
+- **Q2** uncertainty/accuracy: integrator sensitivity.
 - **Q3** code reliability: optimizer-vs-simulator drift and benchmark checks.
-- **Q5** cliff-edge behavior: optional 2D sensitivity/feasibility mapping.
-- **Q6** model limitations: optional validity/limitation documentation.
-- **Q7** engineering conclusion support: optional cross-test evidence synthesis.
 
 ## Expected Outputs
 
@@ -238,7 +252,6 @@ The reliability suite is structured to support question-driven reporting:
 
 - **Very slow reliability runs**
   - Use `--no-show`.
-  - Lower `--mc-samples` for exploratory passes.
   - Disable selected blocks via `RELIABILITY_ANALYSIS_TOGGLES`.
 
 - **Dependency/build issues**
@@ -257,4 +270,4 @@ This repository appears structured for simulation/modeling coursework and report
 
 1. Baseline optimization/simulation (`orbit_launch/main.py`)
 2. Reliability evidence generation (`analysis_tools/relabilityanalysis.py`)
-3. Comparative scenario sweeps (`analysis_tools/testplot.py` and config edits)
+3. Comparative scenario sweeps (`analysis_tools/relabilityanalysis.py --analysis global-launch-cost` and config edits)

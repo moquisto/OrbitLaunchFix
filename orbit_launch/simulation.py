@@ -8,7 +8,7 @@ from scipy.interpolate import interp1d
 
 from .trajectory_metrics import ellipsoidal_altitude_m
 
-def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
+def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12, return_phase_results=False):
     """
     Verifies the optimization result using forward integration.
     """
@@ -77,7 +77,7 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         u_coast[1:, :] = v_dir
         return u_coast
 
-    def assemble_output(results_list, termination=None):
+    def assemble_output(results_list, termination=None, phase_results=None):
         t_full = np.concatenate([res.t for res in results_list])
         y_full = np.concatenate([res.y for res in results_list], axis=1)
 
@@ -99,6 +99,14 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         }
         if termination is not None:
             out["termination"] = termination
+        if return_phase_results and phase_results is not None:
+            out["phase_results"] = {
+                str(entry["phase"]): {
+                    "t": np.array(entry["t"], copy=True),
+                    "y": np.array(entry["y"], copy=True),
+                }
+                for entry in phase_results
+            }
         return out
 
     # --- 3. DEFINE DYNAMICS WRAPPER ---
@@ -182,9 +190,12 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         u_meco = U1[:, -1]
         vehicle.diagnose_forces(res1.y[:, -1], u_meco[0], u_meco[1:], res1.t[-1], "boost")
 
+    phase_results = [{"phase": "boost", "t": res1.t, "y": res1.y}]
+
     if phase1_ground_impact:
         return assemble_output(
             [res1],
+            phase_results=phase_results,
             termination={
                 "reason": "ground_impact",
                 "phase": "boost",
@@ -210,11 +221,13 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
             method='RK45'
         )
         results_list.append(res2)
+        phase_results.append({"phase": "coast", "t": res2.t, "y": res2.y})
         coast_ground_impact = len(res2.t_events) > 0 and len(res2.t_events[0]) > 0
         if coast_ground_impact:
             print("[Simulation] ERROR: Ground impact detected during coast. Aborting Stage 2 burn.")
             return assemble_output(
                 results_list,
+                phase_results=phase_results,
                 termination={
                     "reason": "ground_impact",
                     "phase": "coast",
@@ -255,6 +268,7 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         method='RK45'
     )
     results_list.append(res3)
+    phase_results.append({"phase": "ship", "t": res3.t, "y": res3.y})
     
     steps_3 = len(res3.t)
     print(f"  > Integrator: {steps_3} steps, Success={res3.success}, Msg='{res3.message}'")
@@ -292,4 +306,4 @@ def run_simulation(optimization_result, vehicle, config, rtol=1e-9, atol=1e-12):
         termination = {"reason": "planned_end", "phase": "ship", "time_s": float(res3.t[-1])}
 
     # --- 9. CONSOLIDATE RESULTS ---
-    return assemble_output(results_list, termination=termination)
+    return assemble_output(results_list, termination=termination, phase_results=phase_results)

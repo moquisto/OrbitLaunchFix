@@ -4,11 +4,18 @@
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib import cm
+from matplotlib.colors import Normalize
 import copy
 import time
 import contextlib
+from collections import Counter
+from dataclasses import dataclass
+import io
 import os
 import sys
+import threading
+import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from scipy.interpolate import interp1d
 from scipy.integrate import solve_ivp
@@ -18,9 +25,14 @@ from datetime import datetime
 import argparse
 import platform
 from matplotlib.ticker import StrMethodFormatter
+from typing import Any
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 # Project Imports
 from orbit_launch.config import StarshipBlock2, EARTH_CONFIG, RELIABILITY_ANALYSIS_TOGGLES
+from orbit_launch import debug, guidance
 from orbit_launch.vehicle import Vehicle
 from orbit_launch.environment import Environment
 from orbit_launch.main import (
@@ -35,12 +47,6 @@ from orbit_launch.trajectory_metrics import (
     spherical_altitude_m,
     target_orbit_radius_m,
 )
-from orbit_launch import debug
-
-try:
-    from .warm_start_multiseed import WarmStartMultiseedAnalyzer
-except ImportError:
-    from warm_start_multiseed import WarmStartMultiseedAnalyzer
 
 # --- Helper to suppress output during batch runs ---
 @contextlib.contextmanager
@@ -48,20 +54,6 @@ def suppress_stdout():
     with open(os.devnull, 'w') as fnull:
         with contextlib.redirect_stdout(fnull):
             yield
-
-
-
-def wilson_interval(successes, n, z=1.96):
-    """Wilson score confidence interval for a binomial proportion."""
-    if n <= 0:
-        return 0.0, 0.0
-    p_hat = successes / n
-    z2 = z * z
-    denom = 1.0 + z2 / n
-    center = (p_hat + z2 / (2.0 * n)) / denom
-    half = z * np.sqrt((p_hat * (1.0 - p_hat) + z2 / (4.0 * n)) / n) / denom
-    return max(0.0, center - half), min(1.0, center + half)
-
 
 # Centralized strict terminal tolerances used by all reliability analyses.
 # Chosen to be tighter than before while still allowing realistic numerical/model scatter.
@@ -86,17 +78,2303 @@ def apply_analysis_profile(toggles, profile):
         toggles.interval_replay_audit = True
         toggles.theoretical_efficiency = True
         toggles.integrator_tolerance = True
-        toggles.monte_carlo_precision_target = False
-        toggles.q2_uncertainty_budget = False
         toggles.smooth_integrator_benchmark = True
-        toggles.bifurcation_2d_map = False
         toggles.drift = True
-        toggles.model_limitations = False
-        toggles.q7_conclusion_support = False
     return toggles
 
 
 
+
+class TeeStream:
+    def __init__(self, *targets):
+        self.targets = targets
+
+    def write(self, data):
+        for target in self.targets:
+            target.write(data)
+        return len(data)
+
+    def flush(self):
+        for target in self.targets:
+            target.flush()
+
+    def isatty(self):
+        return any(getattr(target, "isatty", lambda: False)() for target in self.targets)
+
+
+class BinaryLogTextStream:
+    def __init__(self, binary_target, write_lock):
+        self.binary_target = binary_target
+        self.write_lock = write_lock
+
+    def write(self, data):
+        if not data:
+            return 0
+        if isinstance(data, bytes):
+            text = data.decode("utf-8", errors="replace")
+            chunk = data
+        else:
+            text = str(data)
+            chunk = text.encode("utf-8", errors="replace")
+        with self.write_lock:
+            self.binary_target.write(chunk)
+            self.binary_target.flush()
+        return len(text)
+
+    def flush(self):
+        with self.write_lock:
+            self.binary_target.flush()
+
+
+def _stream_fileno(stream):
+    fileno = getattr(stream, "fileno", None)
+    if fileno is None:
+        return None
+    try:
+        return int(fileno())
+    except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
+        return None
+
+
+@dataclass(frozen=True)
+class SeedParams:
+    time_scale: float
+    t2_scale: float
+    pos_sigma: float
+    vel_sigma: float
+    mass_sigma: float
+    throttle_sigma: float
+    direction_sigma_deg: float
+    direction_component_sigma: float = np.nan
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "time_scale": float(self.time_scale),
+            "t2_scale": float(self.t2_scale),
+            "pos_sigma": float(self.pos_sigma),
+            "vel_sigma": float(self.vel_sigma),
+            "mass_sigma": float(self.mass_sigma),
+            "throttle_sigma": float(self.throttle_sigma),
+            "direction_sigma_deg": float(self.direction_sigma_deg),
+            "direction_component_sigma": float(self.direction_component_sigma),
+        }
+
+
+@dataclass(frozen=True)
+class StructuredSeedSpec:
+    label: str
+    time_scale: float
+    t2_scale: float
+    pos_sigma: float
+    vel_sigma: float
+    mass_sigma: float
+    throttle_sigma: float
+    direction_sigma_deg: float
+    direction_axis: tuple[float, float, float]
+
+
+@dataclass
+class SeedVariant:
+    label: str
+    guess: dict[str, Any]
+    params: SeedParams
+
+
+MIN_WARM_START_TRIALS = 5
+DEFAULT_WARM_START_TRIALS = 10
+
+
+# Keep the deterministic replay-compatible seeds orthogonal:
+# time_* vary phase timing, state_* vary lateral thrust direction.
+DEFAULT_STRUCTURED_SEED_SPECS = (
+    StructuredSeedSpec(
+        label="time_minus",
+        time_scale=0.9925,
+        t2_scale=0.9950,
+        pos_sigma=-0.0025,
+        vel_sigma=-0.0025,
+        mass_sigma=-0.0015,
+        throttle_sigma=0.0,
+        direction_sigma_deg=0.35,
+        direction_axis=(0.0, 0.0, 1.0),
+    ),
+    StructuredSeedSpec(
+        label="time_plus",
+        time_scale=1.0075,
+        t2_scale=1.0050,
+        pos_sigma=0.0025,
+        vel_sigma=0.0025,
+        mass_sigma=0.0015,
+        throttle_sigma=0.0,
+        direction_sigma_deg=-0.35,
+        direction_axis=(0.0, 0.0, 1.0),
+    ),
+    StructuredSeedSpec(
+        label="state_minus",
+        time_scale=1.0000,
+        t2_scale=1.0000,
+        pos_sigma=-0.0050,
+        vel_sigma=-0.0050,
+        mass_sigma=-0.0030,
+        throttle_sigma=0.0,
+        direction_sigma_deg=0.35,
+        direction_axis=(0.0, 0.0, 1.0),
+    ),
+    StructuredSeedSpec(
+        label="state_plus",
+        time_scale=1.0000,
+        t2_scale=1.0000,
+        pos_sigma=0.0050,
+        vel_sigma=0.0050,
+        mass_sigma=0.0030,
+        throttle_sigma=0.0,
+        direction_sigma_deg=-0.35,
+        direction_axis=(0.0, 0.0, 1.0),
+    ),
+)
+
+
+class WarmStartSeedFactory:
+    def __init__(self, structured_specs=DEFAULT_STRUCTURED_SEED_SPECS):
+        self.structured_specs = tuple(structured_specs)
+
+    @staticmethod
+    def normalize_direction_history(td):
+        arr = np.array(td, dtype=float, copy=True)
+        if arr.ndim != 2 or arr.shape[0] != 3:
+            return arr
+        norms = np.linalg.norm(arr, axis=0)
+        good = norms > 1.0e-12
+        if np.any(good):
+            arr[:, good] = arr[:, good] / norms[good]
+        if np.any(~good):
+            arr[:, ~good] = np.array([[1.0], [0.0], [0.0]])
+        return arr
+
+    @staticmethod
+    def perturb_state_history(X, rng, pos_sigma, vel_sigma, mass_sigma):
+        arr = np.array(X, dtype=float, copy=True)
+        if arr.ndim != 2 or arr.shape[0] < 7 or arr.shape[1] < 1:
+            return arr
+
+        def apply_rowwise_relative_jitter(row_slice, sigma):
+            for j in range(row_slice.start, row_slice.stop):
+                row = np.array(arr[j, :], dtype=float, copy=True)
+                noise = rng.uniform(-sigma, sigma, size=row.shape)
+                pert = row * (1.0 + noise)
+                near_zero = np.abs(row) <= 1.0e-12
+                if np.any(near_zero):
+                    ref_scale = float(np.nanmedian(np.abs(row)))
+                    if not np.isfinite(ref_scale) or ref_scale <= 0.0:
+                        ref_scale = float(np.nanmax(np.abs(row)))
+                    if not np.isfinite(ref_scale) or ref_scale <= 0.0:
+                        ref_scale = 1.0
+                    pert[near_zero] = row[near_zero] + noise[near_zero] * ref_scale
+                arr[j, :] = pert
+
+        apply_rowwise_relative_jitter(slice(0, 3), pos_sigma)
+        apply_rowwise_relative_jitter(slice(3, 6), vel_sigma)
+        apply_rowwise_relative_jitter(slice(6, 7), mass_sigma)
+        arr[:, 0] = X[:, 0]
+        arr[6, :] = np.minimum.accumulate(arr[6, :])
+        arr[6, :] = np.clip(arr[6, :], 1.0e3, None)
+        return arr
+
+    @staticmethod
+    def apply_relative_state_bias(X, pos_bias, vel_bias, mass_bias):
+        arr = np.array(X, dtype=float, copy=True)
+        if arr.ndim != 2 or arr.shape[0] < 7 or arr.shape[1] < 1:
+            return arr
+
+        weights = np.linspace(0.0, 1.0, arr.shape[1])
+
+        def apply_rowwise_bias(row_slice, rel_bias):
+            if abs(float(rel_bias)) <= 1.0e-12:
+                return
+            for j in range(row_slice.start, row_slice.stop):
+                row = np.array(arr[j, :], dtype=float, copy=True)
+                pert = row * (1.0 + rel_bias * weights)
+                near_zero = np.abs(row) <= 1.0e-12
+                if np.any(near_zero):
+                    ref_scale = float(np.nanmedian(np.abs(row)))
+                    if not np.isfinite(ref_scale) or ref_scale <= 0.0:
+                        ref_scale = float(np.nanmax(np.abs(row)))
+                    if not np.isfinite(ref_scale) or ref_scale <= 0.0:
+                        ref_scale = 1.0
+                    pert[near_zero] = row[near_zero] + rel_bias * weights[near_zero] * ref_scale
+                arr[j, :] = pert
+
+        apply_rowwise_bias(slice(0, 3), pos_bias)
+        apply_rowwise_bias(slice(3, 6), vel_bias)
+        apply_rowwise_bias(slice(6, 7), mass_bias)
+        arr[:, 0] = X[:, 0]
+        arr[6, :] = np.minimum.accumulate(arr[6, :])
+        arr[6, :] = np.clip(arr[6, :], 1.0e3, None)
+        return arr
+
+    @staticmethod
+    def apply_throttle_bias(throttle_history, min_throttle, rel_bias):
+        arr = np.array(throttle_history, dtype=float, copy=True)
+        if arr.ndim != 1 or arr.shape[0] < 1 or abs(float(rel_bias)) <= 1.0e-12:
+            return np.clip(arr, min_throttle, 1.0)
+        weights = np.linspace(0.0, 1.0, arr.shape[0])
+        if rel_bias > 0.0:
+            # Apply positive bias against the remaining headroom instead of
+            # multiplying and clipping, which otherwise collapses the "plus"
+            # seeds into no-ops once nominal throttle is already near 1.0.
+            arr += rel_bias * weights * np.maximum(0.0, 1.0 - arr)
+        else:
+            arr += rel_bias * weights * np.maximum(0.0, arr - min_throttle)
+        return np.clip(arr, min_throttle, 1.0)
+
+    @staticmethod
+    def orthogonal_unit_vector(direction, axis_seed):
+        d = np.array(direction, dtype=float, copy=True).reshape(-1)
+        if d.shape[0] != 3:
+            raise ValueError("Direction vector must have three components.")
+        d_norm = np.linalg.norm(d)
+        if d_norm <= 1.0e-12:
+            return np.array([0.0, 1.0, 0.0])
+        d = d / d_norm
+
+        axis = np.array(axis_seed, dtype=float, copy=True).reshape(-1)
+        if axis.shape[0] != 3 or np.linalg.norm(axis) <= 1.0e-12:
+            axis = np.array([0.0, 0.0, 1.0])
+        axis = axis / np.linalg.norm(axis)
+
+        ortho = axis - np.dot(axis, d) * d
+        ortho_norm = np.linalg.norm(ortho)
+        if ortho_norm <= 1.0e-12:
+            fallback = np.array([1.0, 0.0, 0.0])
+            if abs(np.dot(fallback, d)) > 0.9:
+                fallback = np.array([0.0, 1.0, 0.0])
+            ortho = fallback - np.dot(fallback, d) * d
+            ortho_norm = np.linalg.norm(ortho)
+        if ortho_norm <= 1.0e-12:
+            return np.array([0.0, 1.0, 0.0])
+        return ortho / ortho_norm
+
+    def apply_direction_bias(self, direction_history, bias_deg, axis_seed):
+        arr = self.normalize_direction_history(direction_history)
+        if arr.ndim != 2 or arr.shape[0] != 3 or arr.shape[1] < 1 or abs(float(bias_deg)) <= 1.0e-12:
+            return arr
+
+        angles = np.radians(bias_deg) * np.linspace(0.0, 1.0, arr.shape[1])
+        for k in range(arr.shape[1]):
+            ang = float(angles[k])
+            if abs(ang) <= 1.0e-12:
+                continue
+            d = arr[:, k]
+            tilt = self.orthogonal_unit_vector(d, axis_seed)
+            arr[:, k] = np.cos(ang) * d + np.sin(ang) * tilt
+        return self.normalize_direction_history(arr)
+
+    @staticmethod
+    def _rebuild_state_histories(guess, state_rebuilder):
+        if state_rebuilder is None:
+            return guess
+        try:
+            rebuilt = state_rebuilder(copy.deepcopy(guess))
+        except Exception:
+            return guess
+        if not isinstance(rebuilt, dict):
+            return guess
+        for key in ("X1", "X2", "X3"):
+            if key in rebuilt:
+                guess[key] = rebuilt[key]
+        return guess
+
+    def build_structured_variants(self, base_guess, cfg, state_rebuilder=None):
+        if not isinstance(base_guess, dict):
+            raise ValueError("Initial guess must be a dict.")
+
+        variants = []
+        for spec in self.structured_specs:
+            guess = copy.deepcopy(base_guess)
+
+            t1 = float(guess.get("T1", cfg.sequence.min_stage_1_burn))
+            t3 = float(guess.get("T3", cfg.sequence.min_stage_2_burn))
+            guess["T1"] = max(cfg.sequence.min_stage_1_burn, t1 * float(spec.time_scale))
+            guess["T3"] = max(cfg.sequence.min_stage_2_burn, t3 * float(spec.time_scale))
+            t2_scale = 1.0
+            if guess.get("T2", None) is not None:
+                guess["T2"] = max(0.0, float(guess["T2"]) * float(spec.t2_scale))
+                t2_scale = float(spec.t2_scale)
+
+            if state_rebuilder is None:
+                for key in ("X1", "X2", "X3"):
+                    val = guess.get(key, None)
+                    if val is None:
+                        continue
+                    guess[key] = self.apply_relative_state_bias(
+                        val,
+                        pos_bias=spec.pos_sigma,
+                        vel_bias=spec.vel_sigma,
+                        mass_bias=spec.mass_sigma,
+                    )
+
+            for key in ("TH1", "TH3"):
+                val = guess.get(key, None)
+                if val is None:
+                    continue
+                guess[key] = self.apply_throttle_bias(val, cfg.sequence.min_throttle, spec.throttle_sigma)
+
+            for key in ("TD1", "TD3"):
+                val = guess.get(key, None)
+                if val is None:
+                    continue
+                guess[key] = self.apply_direction_bias(val, spec.direction_sigma_deg, spec.direction_axis)
+
+            guess = self._rebuild_state_histories(guess, state_rebuilder)
+
+            variants.append(
+                SeedVariant(
+                    label=str(spec.label),
+                    guess=guess,
+                    params=SeedParams(
+                        time_scale=spec.time_scale,
+                        t2_scale=t2_scale,
+                        pos_sigma=spec.pos_sigma,
+                        vel_sigma=spec.vel_sigma,
+                        mass_sigma=spec.mass_sigma,
+                        throttle_sigma=spec.throttle_sigma,
+                        direction_sigma_deg=spec.direction_sigma_deg,
+                        direction_component_sigma=np.nan,
+                    ),
+                )
+            )
+        return variants
+
+    def build_randomized_variant(self, base_guess, cfg, rng, label, state_rebuilder=None):
+        if not isinstance(base_guess, dict):
+            raise ValueError("Initial guess must be a dict.")
+
+        guess = copy.deepcopy(base_guess)
+
+        frac = 0.01
+        time_scale = float(1.0 + rng.uniform(-frac, frac))
+        pos_sigma = float(frac)
+        vel_sigma = float(frac)
+        mass_sigma = float(frac)
+        throttle_sigma = float(frac)
+        direction_sigma = float(frac)
+
+        t1 = float(guess.get("T1", cfg.sequence.min_stage_1_burn))
+        t3 = float(guess.get("T3", cfg.sequence.min_stage_2_burn))
+        guess["T1"] = max(cfg.sequence.min_stage_1_burn, t1 * time_scale)
+        guess["T3"] = max(cfg.sequence.min_stage_2_burn, t3 * time_scale)
+        t2_scale = 1.0
+        if guess.get("T2", None) is not None:
+            t2_scale = float(1.0 + float(rng.uniform(-frac, frac)))
+            guess["T2"] = max(0.0, float(guess["T2"]) * t2_scale)
+
+        if state_rebuilder is None:
+            for key in ("X1", "X2", "X3"):
+                val = guess.get(key, None)
+                if val is not None:
+                    guess[key] = self.perturb_state_history(val, rng, pos_sigma, vel_sigma, mass_sigma)
+
+        for key in ("TH1", "TH3"):
+            val = guess.get(key, None)
+            if val is None:
+                continue
+            th = np.array(val, dtype=float, copy=True)
+            th *= 1.0 + rng.uniform(-throttle_sigma, throttle_sigma, size=th.shape)
+            guess[key] = np.clip(th, cfg.sequence.min_throttle, 1.0)
+
+        for key in ("TD1", "TD3"):
+            val = guess.get(key, None)
+            if val is None:
+                continue
+            td = np.array(val, dtype=float, copy=True)
+            td += rng.normal(0.0, direction_sigma, size=td.shape)
+            guess[key] = self.normalize_direction_history(td)
+
+        guess = self._rebuild_state_histories(guess, state_rebuilder)
+
+        return SeedVariant(
+            label=label,
+            guess=guess,
+            params=SeedParams(
+                time_scale=time_scale,
+                t2_scale=t2_scale,
+                pos_sigma=pos_sigma,
+                vel_sigma=vel_sigma,
+                mass_sigma=mass_sigma,
+                throttle_sigma=throttle_sigma,
+                direction_sigma_deg=np.nan,
+                direction_component_sigma=direction_sigma,
+            ),
+        )
+
+    def build_trial_variants(self, base_guess, cfg, rng, n_trials, state_rebuilder=None):
+        n_use = max(MIN_WARM_START_TRIALS, int(n_trials))
+        variants = [
+            SeedVariant(
+                label="nominal",
+                guess=copy.deepcopy(base_guess),
+                params=SeedParams(1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            )
+        ]
+        structured = self.build_structured_variants(base_guess, cfg, state_rebuilder=state_rebuilder)
+        variants.extend(structured[: max(0, n_use - 1)])
+
+        next_index = len(variants)
+        while len(variants) < n_use:
+            label = f"rand_{next_index:02d}"
+            variants.append(self.build_randomized_variant(base_guess, cfg, rng, label, state_rebuilder=state_rebuilder))
+            next_index += 1
+        return variants[:n_use]
+
+
+class WarmStartMultiseedAnalyzer:
+    def __init__(self, suite, evaluate_terminal_state_fn, seed_factory=None):
+        self.suite = suite
+        self.evaluate_terminal_state = evaluate_terminal_state_fn
+        self.seed_factory = seed_factory or WarmStartSeedFactory()
+        self.logs_dir = Path(self.suite.output_dir) / "logs"
+
+    @staticmethod
+    def _resample_series(x_raw, y_raw, x_new):
+        x = np.asarray(x_raw, dtype=float).reshape(-1)
+        y = np.asarray(y_raw, dtype=float).reshape(-1)
+        x_new_arr = np.asarray(x_new, dtype=float).reshape(-1)
+        mask = np.isfinite(x) & np.isfinite(y)
+        if np.count_nonzero(mask) <= 0:
+            return np.full_like(x_new_arr, np.nan, dtype=float)
+        x = x[mask]
+        y = y[mask]
+        order = np.argsort(x)
+        x = x[order]
+        y = y[order]
+        x_unique, unique_idx = np.unique(x, return_index=True)
+        y_unique = y[unique_idx]
+        if len(x_unique) <= 1 or np.allclose(x_unique, x_unique[0]):
+            return np.full_like(x_new_arr, float(y_unique[0]), dtype=float)
+        return np.interp(x_new_arr, x_unique, y_unique)
+
+    @staticmethod
+    def _resample_state_history(t_raw, y_raw, t_grid):
+        t = np.asarray(t_raw, dtype=float).reshape(-1)
+        y = np.asarray(y_raw, dtype=float)
+        t_new = np.asarray(t_grid, dtype=float).reshape(-1)
+        if t.ndim != 1 or y.ndim != 2 or y.shape[1] != len(t) or len(t) < 1:
+            return None
+        mask = np.isfinite(t) & np.all(np.isfinite(y), axis=0)
+        if np.count_nonzero(mask) <= 0:
+            return None
+        t = t[mask]
+        y = y[:, mask]
+        order = np.argsort(t)
+        t = t[order]
+        y = y[:, order]
+        t_unique, unique_idx = np.unique(t, return_index=True)
+        y_unique = y[:, unique_idx]
+        if len(t_unique) <= 1 or np.allclose(t_unique, t_unique[0]):
+            return np.repeat(y_unique[:, -1][:, None], len(t_new), axis=1)
+        t_eval = np.clip(t_new, float(t_unique[0]), float(t_unique[-1]))
+        return np.vstack([np.interp(t_eval, t_unique, y_unique[row, :]) for row in range(y_unique.shape[0])])
+
+    @staticmethod
+    def _compute_downrange_km(r_hist, env_cfg, t_hist):
+        omega_e = env_cfg.earth_omega_vector[2]
+        r_ecef_0 = None
+        out = []
+        for idx, t_val in enumerate(t_hist):
+            r_eci = r_hist[:, idx]
+            theta = omega_e * t_val + env_cfg.initial_rotation
+            cos_t = np.cos(theta)
+            sin_t = np.sin(theta)
+            x_ecef = cos_t * r_eci[0] + sin_t * r_eci[1]
+            y_ecef = -sin_t * r_eci[0] + cos_t * r_eci[1]
+            z_ecef = r_eci[2]
+            r_ecef = np.array([x_ecef, y_ecef, z_ecef], dtype=float)
+            if r_ecef_0 is None:
+                r_ecef_0 = r_ecef
+            denom = np.linalg.norm(r_ecef_0) * np.linalg.norm(r_ecef)
+            dot_val = np.dot(r_ecef_0, r_ecef) / max(denom, 1.0e-12)
+            angle = np.arccos(np.clip(dot_val, -1.0, 1.0))
+            out.append(angle * env_cfg.earth_radius_equator / 1000.0)
+        return np.array(out, dtype=float)
+
+    def _build_trajectory_profile(self, sim_res, env_cfg, n_samples=301):
+        if not isinstance(sim_res, dict):
+            return None
+        t = np.asarray(sim_res.get("t", None), dtype=float)
+        y = np.asarray(sim_res.get("y", None), dtype=float)
+        if t.ndim != 1 or y.ndim != 2 or len(t) < 1 or y.shape[0] < 7 or y.shape[1] != len(t):
+            return None
+        if not np.all(np.isfinite(t)) or not np.all(np.isfinite(y)):
+            return None
+
+        progress_grid = np.linspace(0.0, 1.0, max(2, int(n_samples)))
+        if len(t) == 1 or float(t[-1]) <= float(t[0]) + 1.0e-12:
+            progress_raw = np.zeros_like(t)
+        else:
+            progress_raw = (t - float(t[0])) / max(float(t[-1] - t[0]), 1.0e-12)
+
+        r_hist = y[0:3, :]
+        speed_raw = np.linalg.norm(y[3:6, :], axis=0)
+        mass_raw = y[6, :]
+        altitude_raw = np.array(
+            [ellipsoidal_altitude_m(r_hist[:, i], env_cfg) / 1000.0 for i in range(r_hist.shape[1])],
+            dtype=float,
+        )
+        downrange_raw = self._compute_downrange_km(r_hist, env_cfg, t)
+
+        return {
+            "progress": progress_grid,
+            "time_s": self._resample_series(progress_raw, t, progress_grid),
+            "downrange_km": self._resample_series(progress_raw, downrange_raw, progress_grid),
+            "ellipsoidal_altitude_km": self._resample_series(progress_raw, altitude_raw, progress_grid),
+            "velocity_m_s": self._resample_series(progress_raw, speed_raw, progress_grid),
+            "mass_kg": self._resample_series(progress_raw, mass_raw, progress_grid),
+            "x_m": self._resample_series(progress_raw, r_hist[0, :], progress_grid),
+            "y_m": self._resample_series(progress_raw, r_hist[1, :], progress_grid),
+            "z_m": self._resample_series(progress_raw, r_hist[2, :], progress_grid),
+        }
+
+    def _rebuild_guess_states(self, guess, cfg, env_cfg):
+        try:
+            with suppress_stdout():
+                env = Environment(copy.deepcopy(env_cfg))
+                veh = Vehicle(cfg, env)
+                sim_input = {
+                    "T1": float(guess["T1"]),
+                    "T2": float(guess.get("T2", 0.0)),
+                    "T3": float(guess["T3"]),
+                    "U1": np.vstack([np.atleast_2d(np.asarray(guess["TH1"], dtype=float)), np.asarray(guess["TD1"], dtype=float)]),
+                    "U3": np.vstack([np.atleast_2d(np.asarray(guess["TH3"], dtype=float)), np.asarray(guess["TD3"], dtype=float)]),
+                }
+                sim_res = run_simulation(sim_input, veh, cfg, rtol=1e-6, atol=1e-8, return_phase_results=True)
+            phase_results = sim_res.get("phase_results", None)
+            if not isinstance(phase_results, dict):
+                return None
+
+            rebuilt = copy.deepcopy(guess)
+            n1 = int(np.asarray(guess["TH1"]).shape[0])
+            boost = phase_results.get("boost", None)
+            if not isinstance(boost, dict):
+                return None
+            x1 = self._resample_state_history(boost.get("t", []), boost.get("y", []), np.linspace(0.0, float(guess["T1"]), n1 + 1))
+            if x1 is None:
+                return None
+            rebuilt["X1"] = x1
+
+            use_coast = float(guess.get("T2", 0.0)) > 1.0e-4 and guess.get("X2", None) is not None
+            t_start_ship = float(guess["T1"])
+            if use_coast:
+                coast = phase_results.get("coast", None)
+                if not isinstance(coast, dict):
+                    return None
+                n2 = int(np.asarray(guess["X2"]).shape[1] - 1)
+                t_end_coast = float(guess["T1"] + guess["T2"])
+                x2 = self._resample_state_history(coast.get("t", []), coast.get("y", []), np.linspace(float(guess["T1"]), t_end_coast, n2 + 1))
+                if x2 is None:
+                    return None
+                rebuilt["X2"] = x2
+                t_start_ship = t_end_coast
+
+            ship = phase_results.get("ship", None)
+            if not isinstance(ship, dict):
+                return None
+            n3 = int(np.asarray(guess["TH3"]).shape[0])
+            x3 = self._resample_state_history(ship.get("t", []), ship.get("y", []), np.linspace(t_start_ship, t_start_ship + float(guess["T3"]), n3 + 1))
+            if x3 is None:
+                return None
+            rebuilt["X3"] = x3
+            return rebuilt
+        except Exception:
+            return None
+
+    @staticmethod
+    def _empty_result(trial_index, label, params, status, runtime_s=np.nan):
+        return {
+            "trial_index": int(trial_index),
+            "label": str(label),
+            "params": params.as_dict() if isinstance(params, SeedParams) else dict(params),
+            "solver_success": 0,
+            "mission_success": 0,
+            "mission_success_slack": 0,
+            "terminal_strict_success": 0,
+            "path_ok": 0,
+            "q_ok": 0,
+            "g_ok": 0,
+            "raw_path_ok": 0,
+            "raw_q_ok": 0,
+            "raw_g_ok": 0,
+            "status": str(status),
+            "final_mass_kg": np.nan,
+            "runtime_s": float(runtime_s) if np.isfinite(runtime_s) else np.nan,
+            "solver_status_class": str(status),
+            "solver_return_status": "",
+            "solver_iter_count": np.nan,
+            "log_path": "",
+            "log_available": 0,
+            "trajectory_available": 0,
+            "terminal_status": "",
+            "terminal_valid": 0,
+            "alt_err_m": np.nan,
+            "vel_err_m_s": np.nan,
+            "radial_velocity_m_s": np.nan,
+            "inclination_err_deg": np.nan,
+            "fuel_margin_kg": np.nan,
+            "terminal_criteria_ratio": np.nan,
+            "max_q_pa": np.nan,
+            "max_g": np.nan,
+            "q_margin_pa": np.nan,
+            "g_margin": np.nan,
+            "q_utilization": np.nan,
+            "g_utilization": np.nan,
+            "path_utilization_ratio": np.nan,
+            "trajectory_profile": None,
+        }
+
+    def _build_nominal_guidance_guess(self):
+        try:
+            cfg = copy.deepcopy(self.suite.base_config)
+            env_cfg = copy.deepcopy(self.suite.base_env_config)
+            env = Environment(env_cfg)
+            veh = Vehicle(cfg, env)
+            with suppress_stdout():
+                return guidance.get_initial_guess(cfg, veh, env, num_nodes=cfg.num_nodes)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _print_progress(label, done, total, prefix="  "):
+        total_i = max(1, int(total))
+        done_i = min(max(0, int(done)), total_i)
+        width = 22
+        filled = int(round(width * done_i / total_i))
+        bar = "#" * filled + "-" * (width - filled)
+        print(f"{prefix}{label}: [{bar}] {done_i}/{total_i}")
+
+    @staticmethod
+    def _compute_insertion_zoom_window(trajectory_profiles, progress_threshold=0.85):
+        x_segments = []
+        y_segments = []
+        for profile in trajectory_profiles:
+            if not isinstance(profile, dict):
+                continue
+            progress = np.asarray(profile.get("progress", []), dtype=float)
+            downrange_km = np.asarray(profile.get("downrange_km", []), dtype=float)
+            altitude_km = np.asarray(profile.get("ellipsoidal_altitude_km", []), dtype=float)
+            if progress.ndim != 1 or downrange_km.ndim != 1 or altitude_km.ndim != 1:
+                continue
+            if len(progress) != len(downrange_km) or len(progress) != len(altitude_km):
+                continue
+            mask = (
+                np.isfinite(progress)
+                & np.isfinite(downrange_km)
+                & np.isfinite(altitude_km)
+                & (progress >= float(progress_threshold))
+            )
+            if np.count_nonzero(mask) < 2:
+                continue
+            x_segments.append(downrange_km[mask])
+            y_segments.append(altitude_km[mask])
+
+        if not x_segments or not y_segments:
+            return None
+
+        x_all = np.concatenate(x_segments)
+        y_all = np.concatenate(y_segments)
+        if x_all.size < 2 or y_all.size < 2:
+            return None
+
+        x_min = float(np.nanmin(x_all))
+        x_max = float(np.nanmax(x_all))
+        y_min = float(np.nanmin(y_all))
+        y_max = float(np.nanmax(y_all))
+        if not all(np.isfinite(v) for v in (x_min, x_max, y_min, y_max)):
+            return None
+
+        x_pad = max(2.0, 0.08 * max(x_max - x_min, 1.0))
+        y_pad = max(2.0, 0.12 * max(y_max - y_min, 1.0))
+        return (
+            (x_min - x_pad, x_max + x_pad),
+            (max(0.0, y_min - y_pad), y_max + y_pad),
+        )
+
+    @staticmethod
+    def _classify_solver_return_status(return_status):
+        status = str(return_status or "").strip()
+        if not status:
+            return "SOLVE_FAIL"
+        mapping = {
+            "Solve_Succeeded": "SOLVE_OK",
+            "Solved_To_Acceptable_Level": "SOLVE_OK",
+            "Restoration_Failed": "RESTORATION_FAIL",
+            "Maximum_Iterations_Exceeded": "MAX_ITER",
+            "Maximum_CpuTime_Exceeded": "MAX_CPU",
+            "Infeasible_Problem_Detected": "INFEASIBLE",
+            "Search_Direction_Becomes_Too_Small": "SEARCH_SMALL",
+            "Diverging_Iterates": "DIVERGING",
+            "Invalid_Number_Detected": "INVALID_NUM",
+            "NonIpopt_Exception_Thrown": "INTERRUPTED",
+            "User_Requested_Stop": "INTERRUPTED",
+            "Feasible_Point_Found": "FEASIBLE_POINT",
+        }
+        if status in mapping:
+            return mapping[status]
+        safe = "".join(ch if ch.isalnum() else "_" for ch in status.upper())
+        safe = safe.strip("_")
+        return safe or "SOLVE_FAIL"
+
+    @staticmethod
+    def _terminal_criteria_ratio(terminal_metrics):
+        if not isinstance(terminal_metrics, dict):
+            return np.nan
+        ratios = []
+        checks = (
+            ("alt_err_m", 1.0),
+            ("vel_err_m_s", 1.0),
+            ("radial_velocity_m_s", 1.0),
+            ("inclination_err_deg", 1.0),
+        )
+        tolerances = {
+            "alt_err_m": 5.0e3,
+            "vel_err_m_s": 100.0,
+            "radial_velocity_m_s": 10.0,
+            "inclination_err_deg": 0.5,
+        }
+        for key, scale in checks:
+            val = float(terminal_metrics.get(key, np.nan))
+            tol = tolerances[key] * scale
+            if np.isfinite(val) and tol > 0.0:
+                ratios.append(abs(val) / tol)
+        return float(np.max(ratios)) if ratios else np.nan
+
+    @staticmethod
+    def _outcome_color(status):
+        palette = {
+            "MISSION_OK": "#2a9d8f",
+            "PASS_RAW": "#2a9d8f",
+            "PASS_SLACK": "#f4a261",
+            "PATH": "#e9c46a",
+            "PATH_FAIL": "#e76f51",
+            "MISSION_FAIL": "#f4a261",
+            "BAD_SOL": "#b56576",
+            "SIM_ERROR": "#7f5539",
+            "RESTORATION_FAIL": "#d62828",
+            "MAX_ITER": "#f77f00",
+            "MAX_CPU": "#bc6c25",
+            "INTERRUPTED": "#6c757d",
+            "INFEASIBLE": "#8e44ad",
+            "DIVERGING": "#577590",
+            "INVALID_NUM": "#6d597a",
+            "SEARCH_SMALL": "#adb5bd",
+            "FEASIBLE_POINT": "#90be6d",
+            "SOLVE_FAIL": "#9d4edd",
+            "SOLVE_ERR": "#495057",
+            "GUESS_FAIL": "#495057",
+            "INTERNAL_ERR": "#495057",
+        }
+        return palette.get(str(status), "#577590")
+
+    @staticmethod
+    def _status_display(status):
+        return str(status).replace("_", " ")
+
+    @staticmethod
+    def _format_summary_value(value, unit=""):
+        if not np.isfinite(value):
+            return f"n/a{unit}"
+        value_f = float(value)
+        abs_val = abs(value_f)
+        if abs_val == 0.0:
+            text = "0"
+        elif abs_val < 1.0e-2 or abs_val >= 1.0e4:
+            text = f"{value_f:.3e}"
+        else:
+            text = f"{value_f:.3f}"
+        return f"{text}{unit}"
+
+    @staticmethod
+    def _sanitize_label(label):
+        safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(label))
+        safe = safe.strip("_")
+        return safe or "trial"
+
+    def _trial_log_path(self, trial_index, label):
+        return self.logs_dir / f"{int(trial_index) + 1:02d}_{self._sanitize_label(label)}.log"
+
+    def _prepare_logs_dir(self):
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        for old_log in self.logs_dir.glob("*.log"):
+            try:
+                old_log.unlink()
+            except OSError:
+                pass
+
+    @staticmethod
+    def _write_text_file(path, text, mode="w"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, mode, encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+
+    @staticmethod
+    def _seed_family_for_label(label):
+        label_str = str(label)
+        if label_str == "nominal":
+            return "nominal"
+        if label_str.startswith("rand_"):
+            return "randomized"
+        return "structured"
+
+    def _seed_family(self, label):
+        return self._seed_family_for_label(label)
+
+    @classmethod
+    def _seed_display_labels(cls, labels):
+        structured_map = {
+            "nominal": "Nominal",
+            "time_minus": "Timing -",
+            "time_plus": "Timing +",
+            "state_minus": "Lateral -",
+            "state_plus": "Lateral +",
+        }
+        display = []
+        random_count = 0
+        for label in labels:
+            label_str = str(label)
+            if label_str in structured_map:
+                display.append(structured_map[label_str])
+                continue
+            if cls._seed_family_for_label(label_str) == "randomized":
+                random_count += 1
+                display.append(f"Random {random_count}")
+                continue
+            display.append(label_str.replace("_", " ").title())
+        return display
+
+    @classmethod
+    def _seed_group_break_indices(cls, labels):
+        families = [cls._seed_family_for_label(label) for label in labels]
+        return [
+            idx
+            for idx in range(1, len(families))
+            if families[idx] != families[idx - 1]
+        ]
+
+    def _perturbation_semantics(self, label, rebuild_states=False):
+        family = self._seed_family(label)
+        if family == "nominal":
+            return "none"
+        if family == "randomized":
+            if rebuild_states:
+                return "random_time_control_perturbation_with_state_rebuild"
+            return "random_state_control_perturbation"
+        if rebuild_states:
+            return "deterministic_time_direction_bias_with_state_rebuild"
+        return "deterministic_state_control_bias"
+
+    @staticmethod
+    def _direction_component_sigma_to_rms_deg(component_sigma):
+        sigma = float(component_sigma)
+        if not np.isfinite(sigma) or sigma < 0.0:
+            return np.nan
+        return float(np.degrees(np.sqrt(2.0) * sigma))
+
+    def _configured_seed_metadata(self, label, params, rebuild_states=False):
+        family = self._seed_family(label)
+        pos_sigma = float(params.get("pos_sigma", np.nan))
+        vel_sigma = float(params.get("vel_sigma", np.nan))
+        mass_sigma = float(params.get("mass_sigma", np.nan))
+        throttle_sigma = float(params.get("throttle_sigma", np.nan))
+        direction_bias_deg = float(params.get("direction_sigma_deg", np.nan))
+        direction_component_sigma = float(params.get("direction_component_sigma", np.nan))
+
+        if rebuild_states:
+            pos_sigma = 0.0
+            vel_sigma = 0.0
+            mass_sigma = 0.0
+
+        direction_rms_deg_est = np.nan
+        if family == "randomized":
+            direction_rms_deg_est = self._direction_component_sigma_to_rms_deg(direction_component_sigma)
+            direction_bias_deg = np.nan
+        elif np.isfinite(direction_bias_deg):
+            direction_rms_deg_est = abs(direction_bias_deg)
+
+        if family == "nominal":
+            direction_bias_deg = 0.0
+            direction_component_sigma = 0.0
+            if not np.isfinite(direction_rms_deg_est):
+                direction_rms_deg_est = 0.0
+
+        return {
+            "seed_family": family,
+            "perturbation_semantics": self._perturbation_semantics(label, rebuild_states=rebuild_states),
+            "state_rebuild_applied": int(bool(rebuild_states)),
+            "configured_position_perturbation": pos_sigma,
+            "configured_velocity_perturbation": vel_sigma,
+            "configured_mass_perturbation": mass_sigma,
+            "configured_throttle_perturbation": throttle_sigma,
+            "configured_direction_perturbation_deg": direction_bias_deg,
+            "configured_direction_component_sigma": direction_component_sigma,
+            "configured_direction_rms_deg_est": direction_rms_deg_est,
+        }
+
+    @staticmethod
+    def _spread_candidate_indices(reference_idx, raw_successful_profile_indices):
+        raw_idx = {int(idx) for idx in raw_successful_profile_indices}
+        if reference_idx is not None:
+            raw_idx.discard(int(reference_idx))
+        return raw_idx
+
+    @staticmethod
+    def _runtime_summary_medians(rows):
+        raw_pass = np.array(
+            [float(row["runtime_s"]) for row in rows if bool(row.get("mission_success", 0)) and np.isfinite(row.get("runtime_s", np.nan))],
+            dtype=float,
+        )
+        non_raw = np.array(
+            [float(row["runtime_s"]) for row in rows if (not bool(row.get("mission_success", 0))) and np.isfinite(row.get("runtime_s", np.nan))],
+            dtype=float,
+        )
+        failure = np.array(
+            [float(row["runtime_s"]) for row in rows if (not bool(row.get("mission_success_slack", 0))) and np.isfinite(row.get("runtime_s", np.nan))],
+            dtype=float,
+        )
+        return {
+            "median_success_runtime_s": float(np.nanmedian(raw_pass)) if raw_pass.size > 0 else np.nan,
+            "median_non_raw_runtime_s": float(np.nanmedian(non_raw)) if non_raw.size > 0 else np.nan,
+            "median_failure_runtime_s": float(np.nanmedian(failure)) if failure.size > 0 else np.nan,
+        }
+
+    def _write_trial_log_fallback(self, log_path, variant, result):
+        lines = [
+            "[Trial Log Recovery]",
+            f"trial={int(result.get('trial_index', -1)) + 1}",
+            f"label={variant.label}",
+            f"status={result.get('status', '')}",
+            f"solver_status_class={result.get('solver_status_class', '')}",
+            f"solver_return_status={result.get('solver_return_status', '')}",
+            f"solver_iter_count={result.get('solver_iter_count', np.nan)}",
+            f"runtime_s={result.get('runtime_s', np.nan)}",
+            f"trajectory_available={result.get('trajectory_available', 0)}",
+            "note=Full stdout/stderr trial log was unavailable; this recovery summary was written explicitly.",
+            "",
+        ]
+        self._write_text_file(log_path, "\n".join(lines), mode="w")
+
+    def _append_trial_log_footer(self, log_path, result):
+        lines = [
+            "",
+            "[Trial Summary]",
+            f"status={result.get('status', '')}",
+            f"solver_status_class={result.get('solver_status_class', '')}",
+            f"solver_return_status={result.get('solver_return_status', '')}",
+            f"solver_iter_count={result.get('solver_iter_count', np.nan)}",
+            f"runtime_s={result.get('runtime_s', np.nan)}",
+            f"mission_success_raw={result.get('mission_success', 0)}",
+            f"mission_success_slack={result.get('mission_success_slack', 0)}",
+            "",
+        ]
+        self._write_text_file(log_path, "\n".join(lines), mode="a")
+
+    @staticmethod
+    def _rms(values):
+        arr = np.asarray(values, dtype=float).reshape(-1)
+        arr = arr[np.isfinite(arr)]
+        if arr.size <= 0:
+            return np.nan
+        return float(np.sqrt(np.mean(np.square(arr))))
+
+    def _compute_realized_seed_metrics(self, base_guess, variant_guess):
+        out = {
+            "realized_t1_scale": np.nan,
+            "realized_t2_scale": np.nan,
+            "realized_t3_scale": np.nan,
+            "realized_position_rms_m": np.nan,
+            "realized_velocity_rms_m_s": np.nan,
+            "realized_mass_rms_kg": np.nan,
+            "realized_throttle_rms_abs": np.nan,
+            "realized_direction_rms_deg": np.nan,
+        }
+        if not isinstance(base_guess, dict) or not isinstance(variant_guess, dict):
+            return out
+
+        for key, out_key in (("T1", "realized_t1_scale"), ("T2", "realized_t2_scale"), ("T3", "realized_t3_scale")):
+            base_val = float(base_guess.get(key, np.nan))
+            var_val = float(variant_guess.get(key, np.nan))
+            if np.isfinite(base_val) and abs(base_val) > 1.0e-12 and np.isfinite(var_val):
+                out[out_key] = var_val / base_val
+
+        pos_norms = []
+        vel_norms = []
+        mass_deltas = []
+        for key in ("X1", "X2", "X3"):
+            base_hist_raw = base_guess.get(key, None)
+            var_hist_raw = variant_guess.get(key, None)
+            if base_hist_raw is None or var_hist_raw is None:
+                continue
+            base_hist = np.asarray(base_hist_raw, dtype=float)
+            var_hist = np.asarray(var_hist_raw, dtype=float)
+            if base_hist.ndim != 2 or var_hist.ndim != 2 or base_hist.shape != var_hist.shape or base_hist.shape[0] < 7:
+                continue
+            pos_norms.extend(np.linalg.norm(var_hist[0:3, :] - base_hist[0:3, :], axis=0).tolist())
+            vel_norms.extend(np.linalg.norm(var_hist[3:6, :] - base_hist[3:6, :], axis=0).tolist())
+            mass_deltas.extend(np.abs(var_hist[6, :] - base_hist[6, :]).tolist())
+
+        throttle_deltas = []
+        for key in ("TH1", "TH3"):
+            base_th_raw = base_guess.get(key, None)
+            var_th_raw = variant_guess.get(key, None)
+            if base_th_raw is None or var_th_raw is None:
+                continue
+            base_th = np.asarray(base_th_raw, dtype=float).reshape(-1)
+            var_th = np.asarray(var_th_raw, dtype=float).reshape(-1)
+            if base_th.ndim != 1 or var_th.ndim != 1 or base_th.shape != var_th.shape:
+                continue
+            throttle_deltas.extend(np.abs(var_th - base_th).tolist())
+
+        direction_angles_deg = []
+        for key in ("TD1", "TD3"):
+            base_td_raw = base_guess.get(key, None)
+            var_td_raw = variant_guess.get(key, None)
+            if base_td_raw is None or var_td_raw is None:
+                continue
+            base_td = np.asarray(base_td_raw, dtype=float)
+            var_td = np.asarray(var_td_raw, dtype=float)
+            if base_td.ndim != 2 or var_td.ndim != 2 or base_td.shape != var_td.shape or base_td.shape[0] != 3:
+                continue
+            base_norm = np.linalg.norm(base_td, axis=0)
+            var_norm = np.linalg.norm(var_td, axis=0)
+            good = (base_norm > 1.0e-12) & (var_norm > 1.0e-12)
+            if not np.any(good):
+                continue
+            dots = np.sum(base_td[:, good] * var_td[:, good], axis=0) / (base_norm[good] * var_norm[good])
+            angles = np.degrees(np.arccos(np.clip(dots, -1.0, 1.0)))
+            direction_angles_deg.extend(angles.tolist())
+
+        out["realized_position_rms_m"] = self._rms(pos_norms)
+        out["realized_velocity_rms_m_s"] = self._rms(vel_norms)
+        out["realized_mass_rms_kg"] = self._rms(mass_deltas)
+        out["realized_throttle_rms_abs"] = self._rms(throttle_deltas)
+        out["realized_direction_rms_deg"] = self._rms(direction_angles_deg)
+        return out
+
+    def _planned_labels(self, n_trials):
+        n_use = max(MIN_WARM_START_TRIALS, int(n_trials))
+        labels = ["nominal"]
+        labels.extend(spec.label for spec in self.seed_factory.structured_specs[: max(0, n_use - 1)])
+        next_index = len(labels)
+        while len(labels) < n_use:
+            labels.append(f"rand_{next_index:02d}")
+            next_index += 1
+        return labels
+
+    @contextlib.contextmanager
+    def _tee_trial_output(self, log_path):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        current_stdout = sys.stdout
+        current_stderr = sys.stderr
+        base_stdout = sys.__stdout__
+        base_stderr = sys.__stderr__
+        stdout_fd = _stream_fileno(base_stdout)
+        stderr_fd = _stream_fileno(base_stderr)
+        needs_python_tee = current_stdout is not base_stdout or current_stderr is not base_stderr
+
+        # If native file descriptors are unavailable, fall back to Python-level redirection only.
+        if stdout_fd is None or stderr_fd is None:
+            with open(log_path, "w", encoding="utf-8", buffering=1) as log_file:
+                tee_out = TeeStream(current_stdout, log_file)
+                tee_err = TeeStream(current_stderr, log_file)
+                with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
+                    yield
+            return
+
+        with open(log_path, "wb", buffering=0) as log_file:
+            write_lock = threading.Lock()
+            log_text = BinaryLogTextStream(log_file, write_lock)
+
+            def fanout(read_fd, mirror_fd):
+                try:
+                    while True:
+                        chunk = os.read(read_fd, 8192)
+                        if not chunk:
+                            break
+                        try:
+                            os.write(mirror_fd, chunk)
+                        except OSError:
+                            pass
+                        with write_lock:
+                            log_file.write(chunk)
+                            log_file.flush()
+                finally:
+                    try:
+                        os.close(read_fd)
+                    except OSError:
+                        pass
+
+            for stream in (current_stdout, current_stderr, base_stdout, base_stderr):
+                flush = getattr(stream, "flush", None)
+                if flush is None:
+                    continue
+                try:
+                    flush()
+                except Exception:
+                    pass
+            saved_stdout_fd = os.dup(stdout_fd)
+            saved_stderr_fd = os.dup(stderr_fd)
+            stdout_read_fd, stdout_write_fd = os.pipe()
+            stderr_read_fd, stderr_write_fd = os.pipe()
+            stdout_thread = threading.Thread(
+                target=fanout,
+                args=(stdout_read_fd, saved_stdout_fd),
+                daemon=True,
+            )
+            stderr_thread = threading.Thread(
+                target=fanout,
+                args=(stderr_read_fd, saved_stderr_fd),
+                daemon=True,
+            )
+            stdout_thread.start()
+            stderr_thread.start()
+            os.dup2(stdout_write_fd, stdout_fd)
+            os.dup2(stderr_write_fd, stderr_fd)
+            os.close(stdout_write_fd)
+            os.close(stderr_write_fd)
+
+            try:
+                if needs_python_tee:
+                    tee_out = TeeStream(current_stdout, log_text)
+                    tee_err = TeeStream(current_stderr, log_text)
+                    with contextlib.redirect_stdout(tee_out), contextlib.redirect_stderr(tee_err):
+                        yield
+                else:
+                    yield
+            finally:
+                try:
+                    for stream in (current_stdout, current_stderr, sys.stdout, sys.stderr):
+                        flush = getattr(stream, "flush", None)
+                        if flush is None:
+                            continue
+                        try:
+                            flush()
+                        except Exception:
+                            pass
+                finally:
+                    os.dup2(saved_stdout_fd, stdout_fd)
+                    os.dup2(saved_stderr_fd, stderr_fd)
+                    os.close(saved_stdout_fd)
+                    os.close(saved_stderr_fd)
+                    stdout_thread.join(timeout=2.0)
+                    stderr_thread.join(timeout=2.0)
+
+    def _run_trial(self, trial_index, variant):
+        cfg = copy.deepcopy(self.suite.base_config)
+        env_cfg = copy.deepcopy(self.suite.base_env_config)
+        t0 = time.time()
+        log_path = self._trial_log_path(trial_index, variant.label)
+
+        solver_ok = False
+        mission_ok = False
+        mission_ok_slack = False
+        terminal_strict_ok = False
+        path_ok = False
+        q_ok = False
+        g_ok = False
+        raw_path_ok = False
+        raw_q_ok = False
+        raw_g_ok = False
+        m_final = np.nan
+        status = "FAILED"
+        trajectory_profile = None
+        solver_status_class = "SOLVE_FAIL"
+        solver_return_status = ""
+        solver_iter_count = np.nan
+        terminal_status = ""
+        terminal_valid = False
+        alt_err_m = np.nan
+        vel_err_m_s = np.nan
+        radial_velocity_m_s = np.nan
+        inclination_err_deg = np.nan
+        fuel_margin_kg = np.nan
+        terminal_criteria_ratio = np.nan
+        max_q_pa = np.nan
+        max_g = np.nan
+        q_margin_pa = np.nan
+        g_margin = np.nan
+        q_utilization = np.nan
+        g_utilization = np.nan
+        path_utilization_ratio = np.nan
+
+        try:
+            self._write_text_file(
+                log_path,
+                "\n".join(
+                    [
+                        "[Trial Log Placeholder]",
+                        f"trial={int(trial_index) + 1}",
+                        f"label={variant.label}",
+                        "",
+                    ]
+                ),
+                mode="w",
+            )
+            with self._tee_trial_output(log_path):
+                print(f"[Trial Log] trial={int(trial_index) + 1} label={variant.label}")
+                print(f"[Trial Log] path={log_path}")
+                try:
+                    env = Environment(env_cfg)
+                    veh = Vehicle(cfg, env)
+                    opt_res = solve_optimal_trajectory(
+                        cfg,
+                        veh,
+                        env,
+                        initial_guess_override=variant.guess,
+                    )
+                    solver_ok = bool(opt_res.get("success", False))
+                    solver_return_status = str(opt_res.get("solver_return_status", ""))
+                    solver_status_class = self._classify_solver_return_status(solver_return_status)
+                    iter_count = opt_res.get("solver_iter_count", np.nan)
+                    try:
+                        solver_iter_count = int(iter_count)
+                    except Exception:
+                        solver_iter_count = np.nan
+                    X3 = opt_res.get("X3", None)
+                    if solver_ok and isinstance(X3, np.ndarray) and X3.ndim == 2 and X3.shape[0] >= 7 and X3.shape[1] >= 1:
+                        m_try = float(X3[6, -1])
+                        if np.isfinite(m_try) and m_try > 0.0:
+                            m_final = m_try
+
+                    if solver_ok and np.isfinite(m_final):
+                        try:
+                            sim_res = run_simulation(opt_res, veh, cfg, rtol=1e-9, atol=1e-12)
+                            trajectory_profile = self._build_trajectory_profile(sim_res, env_cfg)
+                            terminal = self.evaluate_terminal_state(sim_res, cfg, env_cfg)
+                            traj = self.suite._trajectory_diagnostics(sim_res, veh, cfg)
+                            path = self.suite._evaluate_path_compliance(
+                                traj,
+                                cfg,
+                                q_slack_pa=self.suite.path_q_slack_pa,
+                                g_slack=self.suite.path_g_slack,
+                            )
+                            path_raw = self.suite._evaluate_path_compliance(
+                                traj,
+                                cfg,
+                                q_slack_pa=0.0,
+                                g_slack=0.0,
+                            )
+                            terminal_status = str(terminal.get("status", ""))
+                            terminal_valid = bool(terminal.get("terminal_valid", False))
+                            alt_err_m = float(terminal.get("alt_err_m", np.nan))
+                            vel_err_m_s = float(terminal.get("vel_err_m_s", np.nan))
+                            radial_velocity_m_s = float(terminal.get("radial_velocity_m_s", np.nan))
+                            inclination_err_deg = float(terminal.get("inclination_err_deg", np.nan))
+                            fuel_margin_kg = float(terminal.get("fuel_margin_kg", np.nan))
+                            terminal_criteria_ratio = self._terminal_criteria_ratio(terminal)
+                            max_q_pa = float(path.get("max_q_pa", np.nan))
+                            max_g = float(path.get("max_g", np.nan))
+                            q_limit_pa = float(path.get("q_limit_pa", cfg.max_q_limit))
+                            g_limit = float(path.get("g_limit", cfg.max_g_load))
+                            if np.isfinite(max_q_pa):
+                                q_margin_pa = q_limit_pa - max_q_pa
+                            if np.isfinite(max_g):
+                                g_margin = g_limit - max_g
+                            if np.isfinite(max_q_pa) and np.isfinite(q_limit_pa) and q_limit_pa > 0.0:
+                                q_utilization = max_q_pa / q_limit_pa
+                            if np.isfinite(max_g) and np.isfinite(g_limit) and g_limit > 0.0:
+                                g_utilization = max_g / g_limit
+                            valid_path_util = [val for val in (q_utilization, g_utilization) if np.isfinite(val)]
+                            if valid_path_util:
+                                path_utilization_ratio = float(max(valid_path_util))
+                            terminal_strict_ok = bool(terminal.get("strict_ok", False))
+                            path_ok = bool(path.get("path_ok", False))
+                            q_ok = bool(path.get("q_ok", False))
+                            g_ok = bool(path.get("g_ok", False))
+                            raw_path_ok = bool(path_raw.get("path_ok", False))
+                            raw_q_ok = bool(path_raw.get("q_ok", False))
+                            raw_g_ok = bool(path_raw.get("g_ok", False))
+                            mission_ok = bool(terminal_strict_ok and raw_path_ok)
+                            mission_ok_slack = bool(terminal_strict_ok and path_ok)
+                            if mission_ok:
+                                status = "PASS_RAW"
+                            elif mission_ok_slack:
+                                status = "PASS_SLACK"
+                            elif terminal_strict_ok and not path_ok:
+                                status = "PATH_FAIL"
+                            elif not terminal_strict_ok:
+                                status = terminal.get("status", "MISS")
+                            else:
+                                status = "MISSION_FAIL"
+                        except Exception:
+                            traceback.print_exc()
+                            status = "SIM_ERROR"
+                    elif solver_ok:
+                        solver_ok = False
+                        status = "BAD_SOL"
+                    else:
+                        status = solver_status_class
+                except Exception:
+                    traceback.print_exc()
+                    status = "SOLVE_ERR"
+                    solver_status_class = "SOLVE_ERR"
+                print(f"[Trial Log] status={status}")
+        except Exception:
+            status = "SOLVE_ERR"
+            solver_status_class = "SOLVE_ERR"
+
+        result = {
+            "trial_index": int(trial_index),
+            "label": str(variant.label),
+            "params": variant.params.as_dict(),
+            "solver_success": int(solver_ok),
+            "mission_success": int(mission_ok),
+            "mission_success_slack": int(mission_ok_slack),
+            "terminal_strict_success": int(terminal_strict_ok),
+            "path_ok": int(path_ok),
+            "q_ok": int(q_ok),
+            "g_ok": int(g_ok),
+            "raw_path_ok": int(raw_path_ok),
+            "raw_q_ok": int(raw_q_ok),
+            "raw_g_ok": int(raw_g_ok),
+            "status": str(status),
+            "final_mass_kg": float(m_final) if np.isfinite(m_final) else np.nan,
+            "runtime_s": float(time.time() - t0),
+            "solver_status_class": str(solver_status_class),
+            "solver_return_status": solver_return_status,
+            "solver_iter_count": solver_iter_count,
+            "log_path": str(log_path),
+            "log_available": 0,
+            "trajectory_available": int(isinstance(trajectory_profile, dict)),
+            "terminal_status": str(terminal_status),
+            "terminal_valid": int(terminal_valid),
+            "alt_err_m": alt_err_m,
+            "vel_err_m_s": vel_err_m_s,
+            "radial_velocity_m_s": radial_velocity_m_s,
+            "inclination_err_deg": inclination_err_deg,
+            "fuel_margin_kg": fuel_margin_kg,
+            "terminal_criteria_ratio": terminal_criteria_ratio,
+            "max_q_pa": max_q_pa,
+            "max_g": max_g,
+            "q_margin_pa": q_margin_pa,
+            "g_margin": g_margin,
+            "q_utilization": q_utilization,
+            "g_utilization": g_utilization,
+            "path_utilization_ratio": path_utilization_ratio,
+            "trajectory_profile": trajectory_profile,
+        }
+        if not log_path.exists() or log_path.stat().st_size <= 0:
+            self._write_trial_log_fallback(log_path, variant, result)
+        self._append_trial_log_footer(log_path, result)
+        result["log_available"] = int(log_path.exists() and log_path.stat().st_size > 0)
+        return result
+
+    def analyze(self, n_trials=DEFAULT_WARM_START_TRIALS):
+        debug._print_sub_header("Warm-Start Multi-Seed Robustness")
+        n_use = max(MIN_WARM_START_TRIALS, int(n_trials))
+        rng = np.random.default_rng(self.suite.seed_sequence.spawn(1)[0])
+        planned_labels = self._planned_labels(n_use)
+        self._prepare_logs_dir()
+
+        rows = []
+        solver_success_flags = []
+        mission_success_flags = []
+        mission_success_slack_flags = []
+        masses_scored = []
+        runtimes = []
+        labels = []
+        trajectory_profiles = []
+        trial_results = {}
+        variants_by_index = {}
+
+        print(
+            f"{'Trial':<7} | {'Guess':<11} | {'Time x':<8} | {'Pos %':<7} | {'Vel %':<7} | "
+            f"{'Mass %':<8} | {'Throt %':<8} | {'Dir est':<10} | {'Solve':<5} | {'Mission':<7} | {'Status':<17} | "
+            f"{'Final Mass (kg)':<15} | {'Runtime (s)':<10}"
+        )
+        print("-" * 174)
+
+        self._print_progress("Warm-start setup", 0, 3)
+        print("  Building nominal guidance warm start...")
+        guidance_guess = self._build_nominal_guidance_guess()
+        self._print_progress("Warm-start setup", 1, 3)
+
+        structured_count = 0
+        variants = []
+        state_rebuilder_active = False
+        if guidance_guess is not None:
+            state_rebuilder = lambda guess: self._rebuild_guess_states(guess, self.suite.base_config, self.suite.base_env_config)
+            state_rebuilder_active = True
+            structured_count = min(len(self.seed_factory.structured_specs), max(0, n_use - 1))
+            variants = self.seed_factory.build_trial_variants(
+                guidance_guess,
+                self.suite.base_config,
+                rng,
+                n_use,
+                state_rebuilder=state_rebuilder,
+            )
+        print(f"  Prepared {structured_count + int(guidance_guess is not None)} deterministic seed(s).")
+        self._print_progress("Warm-start setup", 2, 3)
+
+        if guidance_guess is None:
+            for i in range(n_use):
+                label = planned_labels[i]
+                params = SeedParams(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan)
+                trial_results[i] = self._empty_result(i, label, params, "GUESS_FAIL", runtime_s=0.0)
+        else:
+            print(f"  Queued {len(variants)} trial(s) for evaluation.")
+        self._print_progress("Warm-start setup", 3, 3)
+
+        total_trials = len(variants)
+        for done_trials, variant in enumerate(variants, start=1):
+            variants_by_index[done_trials - 1] = variant
+            print(f"  [Run {done_trials}/{total_trials}] Starting: {variant.label}")
+            print(f"  [Run {done_trials}/{total_trials}] Log: {self._trial_log_path(done_trials - 1, variant.label)}")
+            result = self._run_trial(done_trials - 1, variant)
+            trial_results[done_trials - 1] = result
+            dt_trial = float(result["runtime_s"]) if np.isfinite(result["runtime_s"]) else np.nan
+            status_trial = str(result["status"])
+            if np.isfinite(dt_trial):
+                print(f"  [Run {done_trials}/{total_trials}] Finished: {variant.label} ({status_trial}, {dt_trial:.2f}s)")
+            else:
+                print(f"  [Run {done_trials}/{total_trials}] Finished: {variant.label} ({status_trial})")
+            self._print_progress("Multistart trials", done_trials, total_trials)
+
+        for i in range(n_use):
+            r = trial_results.get(i)
+            if r is None:
+                r = self._empty_result(
+                    i,
+                    planned_labels[i],
+                    SeedParams(np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan),
+                    "INTERNAL_ERR",
+                )
+
+            params = r["params"]
+            m_final = float(r["final_mass_kg"]) if np.isfinite(r["final_mass_kg"]) else np.nan
+            solver_ok = int(r["solver_success"])
+            mission_ok = int(r["mission_success"])
+            mission_ok_slack = int(r.get("mission_success_slack", 0))
+            terminal_strict_ok = int(r["terminal_strict_success"])
+            path_ok = int(r["path_ok"])
+            q_ok = int(r["q_ok"])
+            g_ok = int(r["g_ok"])
+            raw_path_ok = int(r.get("raw_path_ok", 0))
+            raw_q_ok = int(r.get("raw_q_ok", 0))
+            raw_g_ok = int(r.get("raw_g_ok", 0))
+            status = str(r["status"])
+            dt = float(r["runtime_s"]) if np.isfinite(r["runtime_s"]) else np.nan
+            label = str(r["label"])
+            trajectory_profiles.append(r.get("trajectory_profile", None))
+            variant = variants_by_index.get(i)
+            realized_metrics = self._compute_realized_seed_metrics(guidance_guess, variant.guess) if guidance_guess is not None and variant is not None else {}
+            variant_uses_state_rebuild = bool(state_rebuilder_active and label != "nominal")
+            configured_metrics = self._configured_seed_metadata(
+                label,
+                params,
+                rebuild_states=variant_uses_state_rebuild,
+            )
+            direction_display = configured_metrics["configured_direction_rms_deg_est"]
+
+            labels.append(label)
+            masses_scored.append(m_final if mission_ok and np.isfinite(m_final) else np.nan)
+            runtimes.append(dt)
+            solver_success_flags.append(solver_ok)
+            mission_success_flags.append(mission_ok)
+            mission_success_slack_flags.append(mission_ok_slack)
+
+            rows.append(
+                {
+                    "trial": i + 1,
+                    "label": label,
+                    "seed_family": configured_metrics["seed_family"],
+                    "perturbation_semantics": configured_metrics["perturbation_semantics"],
+                    "state_rebuild_applied": configured_metrics["state_rebuild_applied"],
+                    "time_scale": params["time_scale"],
+                    "t2_scale": params["t2_scale"],
+                    "configured_position_perturbation": configured_metrics["configured_position_perturbation"],
+                    "configured_velocity_perturbation": configured_metrics["configured_velocity_perturbation"],
+                    "configured_mass_perturbation": configured_metrics["configured_mass_perturbation"],
+                    "configured_throttle_perturbation": configured_metrics["configured_throttle_perturbation"],
+                    "configured_direction_perturbation_deg": configured_metrics["configured_direction_perturbation_deg"],
+                    "configured_direction_component_sigma": configured_metrics["configured_direction_component_sigma"],
+                    "configured_direction_rms_deg_est": configured_metrics["configured_direction_rms_deg_est"],
+                    "realized_t1_scale": realized_metrics.get("realized_t1_scale", np.nan),
+                    "realized_t2_scale": realized_metrics.get("realized_t2_scale", np.nan),
+                    "realized_t3_scale": realized_metrics.get("realized_t3_scale", np.nan),
+                    "realized_position_rms_m": realized_metrics.get("realized_position_rms_m", np.nan),
+                    "realized_velocity_rms_m_s": realized_metrics.get("realized_velocity_rms_m_s", np.nan),
+                    "realized_mass_rms_kg": realized_metrics.get("realized_mass_rms_kg", np.nan),
+                    "realized_throttle_rms_abs": realized_metrics.get("realized_throttle_rms_abs", np.nan),
+                    "realized_direction_rms_deg": realized_metrics.get("realized_direction_rms_deg", np.nan),
+                    "solver_success": solver_ok,
+                    "mission_success": mission_ok,
+                    "mission_success_slack": mission_ok_slack,
+                    "terminal_strict_success": terminal_strict_ok,
+                    "path_ok": path_ok,
+                    "q_ok": q_ok,
+                    "g_ok": g_ok,
+                    "raw_path_ok": raw_path_ok,
+                    "raw_q_ok": raw_q_ok,
+                    "raw_g_ok": raw_g_ok,
+                    "status": status,
+                    "solver_status_class": str(r.get("solver_status_class", "")),
+                    "final_mass_kg": m_final,
+                    "runtime_s": dt,
+                    "log_path": str(r.get("log_path", "")),
+                    "log_available": int(r.get("log_available", 0)),
+                    "solver_return_status": str(r.get("solver_return_status", "")),
+                    "solver_iter_count": r.get("solver_iter_count", np.nan),
+                    "trajectory_available": int(r.get("trajectory_available", 0)),
+                    "terminal_status": str(r.get("terminal_status", "")),
+                    "terminal_valid": int(r.get("terminal_valid", 0)),
+                    "alt_err_m": r.get("alt_err_m", np.nan),
+                    "vel_err_m_s": r.get("vel_err_m_s", np.nan),
+                    "radial_velocity_m_s": r.get("radial_velocity_m_s", np.nan),
+                    "inclination_err_deg": r.get("inclination_err_deg", np.nan),
+                    "fuel_margin_kg": r.get("fuel_margin_kg", np.nan),
+                    "terminal_criteria_ratio": r.get("terminal_criteria_ratio", np.nan),
+                    "max_q_pa": r.get("max_q_pa", np.nan),
+                    "max_g": r.get("max_g", np.nan),
+                    "q_margin_pa": r.get("q_margin_pa", np.nan),
+                    "g_margin": r.get("g_margin", np.nan),
+                    "q_utilization": r.get("q_utilization", np.nan),
+                    "g_utilization": r.get("g_utilization", np.nan),
+                    "path_utilization_ratio": r.get("path_utilization_ratio", np.nan),
+                }
+            )
+            print(
+                f"{i+1:<7} | {label:<11} | {params['time_scale']:<8.3f} | "
+                f"{100.0 * abs(configured_metrics['configured_position_perturbation']):<7.2f} | {100.0 * abs(configured_metrics['configured_velocity_perturbation']):<7.2f} | "
+                f"{100.0 * abs(configured_metrics['configured_mass_perturbation']):<8.2f} | {100.0 * abs(configured_metrics['configured_throttle_perturbation']):<8.2f} | "
+                f"{direction_display:<10.2f} | {solver_ok:<5d} | {mission_ok:<7d} | "
+                f"{status:<17} | {m_final:<15.2f} | {dt:<10.2f}"
+            )
+
+        solver_rate = float(np.mean(solver_success_flags)) if solver_success_flags else 0.0
+        success_rate = float(np.mean(mission_success_flags)) if mission_success_flags else 0.0
+        success_rate_slack = float(np.mean(mission_success_slack_flags)) if mission_success_slack_flags else 0.0
+        valid_masses = np.array([m for m in masses_scored if np.isfinite(m)], dtype=float)
+        if len(valid_masses) > 0:
+            best_mass = float(np.max(valid_masses))
+            mass_gap_kg = [(best_mass - m) if np.isfinite(m) else np.nan for m in masses_scored]
+        else:
+            best_mass = np.nan
+            mass_gap_kg = [np.nan for _ in masses_scored]
+        mass_spread = float(np.max(valid_masses) - np.min(valid_masses)) if len(valid_masses) > 1 else np.nan
+
+        print(f"\nSolver convergence rate: {solver_rate:.1%}")
+        print(f"Raw mission success rate: {success_rate:.1%}")
+        print(f"Slack-accepted mission success rate: {success_rate_slack:.1%}")
+        if np.isfinite(best_mass):
+            print(f"Best final mass among mission-valid runs: {best_mass:.3f} kg")
+        if np.isfinite(mass_spread):
+            print(f"Final-mass spread across mission-valid runs: {mass_spread:.3f} kg")
+        if success_rate >= 0.8 and (not np.isfinite(mass_spread) or mass_spread < 300.0):
+            print(f">>> {debug.Style.GREEN}PASS: Multi-start test supports robust local optimum.{debug.Style.RESET}")
+        else:
+            print(f">>> {debug.Style.YELLOW}WARN: Multi-start reveals convergence/objective sensitivity.{debug.Style.RESET}")
+
+        self.suite._save_table(
+            "randomized_multistart",
+            [
+                "trial",
+                "label",
+                "seed_family",
+                "perturbation_semantics",
+                "state_rebuild_applied",
+                "time_scale",
+                "t2_scale",
+                "configured_position_perturbation",
+                "configured_velocity_perturbation",
+                "configured_mass_perturbation",
+                "configured_throttle_perturbation",
+                "configured_direction_perturbation_deg",
+                "configured_direction_component_sigma",
+                "configured_direction_rms_deg_est",
+                "realized_t1_scale",
+                "realized_t2_scale",
+                "realized_t3_scale",
+                "realized_position_rms_m",
+                "realized_velocity_rms_m_s",
+                "realized_mass_rms_kg",
+                "realized_throttle_rms_abs",
+                "realized_direction_rms_deg",
+                "solver_success",
+                "mission_success",
+                "mission_success_slack",
+                "terminal_strict_success",
+                "path_ok",
+                "q_ok",
+                "g_ok",
+                "raw_path_ok",
+                "raw_q_ok",
+                "raw_g_ok",
+                "status",
+                "solver_status_class",
+                "trajectory_available",
+                "terminal_status",
+                "terminal_valid",
+                "alt_err_m",
+                "vel_err_m_s",
+                "radial_velocity_m_s",
+                "inclination_err_deg",
+                "fuel_margin_kg",
+                "terminal_criteria_ratio",
+                "final_mass_kg",
+                "final_mass_scored_kg",
+                "final_mass_gap_to_best_kg",
+                "max_q_pa",
+                "max_g",
+                "q_margin_pa",
+                "g_margin",
+                "q_utilization",
+                "g_utilization",
+                "path_utilization_ratio",
+                "runtime_s",
+                "log_path",
+                "log_available",
+                "solver_return_status",
+                "solver_iter_count",
+            ],
+            [
+                (
+                    rows[i]["trial"],
+                    rows[i]["label"],
+                    rows[i]["seed_family"],
+                    rows[i]["perturbation_semantics"],
+                    rows[i]["state_rebuild_applied"],
+                    rows[i]["time_scale"],
+                    rows[i]["t2_scale"],
+                    rows[i]["configured_position_perturbation"],
+                    rows[i]["configured_velocity_perturbation"],
+                    rows[i]["configured_mass_perturbation"],
+                    rows[i]["configured_throttle_perturbation"],
+                    rows[i]["configured_direction_perturbation_deg"],
+                    rows[i]["configured_direction_component_sigma"],
+                    rows[i]["configured_direction_rms_deg_est"],
+                    rows[i]["realized_t1_scale"],
+                    rows[i]["realized_t2_scale"],
+                    rows[i]["realized_t3_scale"],
+                    rows[i]["realized_position_rms_m"],
+                    rows[i]["realized_velocity_rms_m_s"],
+                    rows[i]["realized_mass_rms_kg"],
+                    rows[i]["realized_throttle_rms_abs"],
+                    rows[i]["realized_direction_rms_deg"],
+                    rows[i]["solver_success"],
+                    rows[i]["mission_success"],
+                    rows[i]["mission_success_slack"],
+                    rows[i]["terminal_strict_success"],
+                    rows[i]["path_ok"],
+                    rows[i]["q_ok"],
+                    rows[i]["g_ok"],
+                    rows[i]["raw_path_ok"],
+                    rows[i]["raw_q_ok"],
+                    rows[i]["raw_g_ok"],
+                    rows[i]["status"],
+                    rows[i]["solver_status_class"],
+                    rows[i]["trajectory_available"],
+                    rows[i]["terminal_status"],
+                    rows[i]["terminal_valid"],
+                    rows[i]["alt_err_m"],
+                    rows[i]["vel_err_m_s"],
+                    rows[i]["radial_velocity_m_s"],
+                    rows[i]["inclination_err_deg"],
+                    rows[i]["fuel_margin_kg"],
+                    rows[i]["terminal_criteria_ratio"],
+                    rows[i]["final_mass_kg"],
+                    masses_scored[i],
+                    mass_gap_kg[i],
+                    rows[i]["max_q_pa"],
+                    rows[i]["max_g"],
+                    rows[i]["q_margin_pa"],
+                    rows[i]["g_margin"],
+                    rows[i]["q_utilization"],
+                    rows[i]["g_utilization"],
+                    rows[i]["path_utilization_ratio"],
+                    rows[i]["runtime_s"],
+                    rows[i]["log_path"],
+                    rows[i]["log_available"],
+                    rows[i]["solver_return_status"],
+                    rows[i]["solver_iter_count"],
+                )
+                for i in range(len(rows))
+            ],
+        )
+
+        status_counts = Counter(str(row["status"]) for row in rows)
+        solver_status_counts = Counter(str(row["solver_status_class"]) for row in rows)
+        available_profile_indices = [i for i, profile in enumerate(trajectory_profiles) if isinstance(profile, dict)]
+        raw_successful_profile_indices = [i for i in available_profile_indices if bool(rows[i]["mission_success"])]
+        slack_successful_profile_indices = [i for i in available_profile_indices if bool(rows[i]["mission_success_slack"])]
+        slack_only_profile_indices = [i for i in slack_successful_profile_indices if not bool(rows[i]["mission_success"])]
+        omitted_replay_labels = [rows[i]["label"] for i in range(len(rows)) if i not in available_profile_indices]
+        omitted_success_envelope_labels = [rows[i]["label"] for i in range(len(rows)) if i not in raw_successful_profile_indices]
+
+        reference_idx = None
+        for candidate_idx in [0]:
+            if candidate_idx in raw_successful_profile_indices:
+                reference_idx = candidate_idx
+                break
+        if reference_idx is None and raw_successful_profile_indices:
+            reference_idx = raw_successful_profile_indices[0]
+        if reference_idx is None and 0 in available_profile_indices:
+            reference_idx = 0
+        if reference_idx is None and available_profile_indices:
+            reference_idx = available_profile_indices[0]
+
+        trajectory_rows = []
+        delta_rows = []
+        max_position_sep_km = np.nan
+        max_alt_delta_km = np.nan
+        max_vel_delta_m_s = np.nan
+        max_terminal_criteria_ratio = np.nan
+        max_path_utilization_ratio = np.nan
+        median_success_runtime_s = np.nan
+        median_non_raw_runtime_s = np.nan
+        median_failure_runtime_s = np.nan
+        reference_label = labels[reference_idx] if reference_idx is not None else "n/a"
+
+        if reference_idx is not None:
+            ref_profile = trajectory_profiles[reference_idx]
+            ref_alt = np.asarray(ref_profile["ellipsoidal_altitude_km"], dtype=float)
+            ref_downrange = np.asarray(ref_profile["downrange_km"], dtype=float)
+            ref_vel = np.asarray(ref_profile["velocity_m_s"], dtype=float)
+            ref_mass = np.asarray(ref_profile["mass_kg"], dtype=float)
+            ref_pos = np.vstack(
+                [
+                    np.asarray(ref_profile["x_m"], dtype=float),
+                    np.asarray(ref_profile["y_m"], dtype=float),
+                    np.asarray(ref_profile["z_m"], dtype=float),
+                ]
+            )
+        else:
+            ref_profile = None
+            ref_alt = np.array([], dtype=float)
+            ref_downrange = np.array([], dtype=float)
+            ref_vel = np.array([], dtype=float)
+            ref_mass = np.array([], dtype=float)
+            ref_pos = np.empty((3, 0), dtype=float)
+
+        max_position_candidates = []
+        max_alt_candidates = []
+        max_vel_candidates = []
+        raw_spread_candidate_indices = self._spread_candidate_indices(reference_idx, raw_successful_profile_indices)
+
+        for i, profile in enumerate(trajectory_profiles):
+            if not isinstance(profile, dict):
+                continue
+            progress = np.asarray(profile["progress"], dtype=float)
+            time_s = np.asarray(profile["time_s"], dtype=float)
+            downrange_km = np.asarray(profile["downrange_km"], dtype=float)
+            altitude_km = np.asarray(profile["ellipsoidal_altitude_km"], dtype=float)
+            velocity_m_s = np.asarray(profile["velocity_m_s"], dtype=float)
+            mass_kg = np.asarray(profile["mass_kg"], dtype=float)
+            x_m = np.asarray(profile["x_m"], dtype=float)
+            y_m = np.asarray(profile["y_m"], dtype=float)
+            z_m = np.asarray(profile["z_m"], dtype=float)
+
+            for k in range(len(progress)):
+                trajectory_rows.append(
+                    (
+                        rows[i]["trial"],
+                        rows[i]["label"],
+                        rows[i]["status"],
+                        rows[i]["solver_success"],
+                        rows[i]["mission_success"],
+                        rows[i]["mission_success_slack"],
+                        rows[i]["raw_path_ok"],
+                        rows[i]["path_ok"],
+                        progress[k],
+                        time_s[k],
+                        downrange_km[k],
+                        altitude_km[k],
+                        velocity_m_s[k],
+                        mass_kg[k],
+                        x_m[k],
+                        y_m[k],
+                        z_m[k],
+                    )
+                )
+
+            if ref_profile is None:
+                continue
+
+            delta_alt_km = altitude_km - ref_alt
+            delta_downrange_km = downrange_km - ref_downrange
+            delta_vel_m_s = velocity_m_s - ref_vel
+            delta_mass_kg = mass_kg - ref_mass
+            pos_sep_km = np.linalg.norm(np.vstack([x_m, y_m, z_m]) - ref_pos, axis=0) / 1000.0
+
+            if i in raw_spread_candidate_indices:
+                if np.any(np.isfinite(pos_sep_km)):
+                    max_position_candidates.append(float(np.nanmax(pos_sep_km)))
+                if np.any(np.isfinite(delta_alt_km)):
+                    max_alt_candidates.append(float(np.nanmax(np.abs(delta_alt_km))))
+                if np.any(np.isfinite(delta_vel_m_s)):
+                    max_vel_candidates.append(float(np.nanmax(np.abs(delta_vel_m_s))))
+
+            for k in range(len(progress)):
+                delta_rows.append(
+                    (
+                        rows[i]["trial"],
+                        rows[i]["label"],
+                        rows[i]["status"],
+                        rows[i]["solver_success"],
+                        rows[i]["mission_success"],
+                        rows[i]["mission_success_slack"],
+                        rows[i]["raw_path_ok"],
+                        rows[i]["path_ok"],
+                        progress[k],
+                        delta_downrange_km[k],
+                        delta_alt_km[k],
+                        delta_vel_m_s[k],
+                        delta_mass_kg[k],
+                        pos_sep_km[k],
+                    )
+                )
+
+        for i, profile in enumerate(trajectory_profiles):
+            if isinstance(profile, dict):
+                continue
+            trajectory_rows.append(
+                (
+                    rows[i]["trial"],
+                    rows[i]["label"],
+                    rows[i]["status"],
+                    rows[i]["solver_success"],
+                    rows[i]["mission_success"],
+                    rows[i]["mission_success_slack"],
+                    rows[i]["raw_path_ok"],
+                    rows[i]["path_ok"],
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                )
+            )
+            delta_rows.append(
+                (
+                    rows[i]["trial"],
+                    rows[i]["label"],
+                    rows[i]["status"],
+                    rows[i]["solver_success"],
+                    rows[i]["mission_success"],
+                    rows[i]["mission_success_slack"],
+                    rows[i]["raw_path_ok"],
+                    rows[i]["path_ok"],
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                    np.nan,
+                )
+            )
+
+        if max_position_candidates:
+            max_position_sep_km = float(np.nanmax(np.array(max_position_candidates, dtype=float)))
+        if max_alt_candidates:
+            max_alt_delta_km = float(np.nanmax(np.array(max_alt_candidates, dtype=float)))
+        if max_vel_candidates:
+            max_vel_delta_m_s = float(np.nanmax(np.array(max_vel_candidates, dtype=float)))
+
+        terminal_ratio_values = np.array(
+            [float(row.get("terminal_criteria_ratio", np.nan)) for row in rows if np.isfinite(row.get("terminal_criteria_ratio", np.nan))],
+            dtype=float,
+        )
+        if terminal_ratio_values.size > 0:
+            max_terminal_criteria_ratio = float(np.nanmax(terminal_ratio_values))
+
+        path_util_values = np.array(
+            [float(row.get("path_utilization_ratio", np.nan)) for row in rows if np.isfinite(row.get("path_utilization_ratio", np.nan))],
+            dtype=float,
+        )
+        if path_util_values.size > 0:
+            max_path_utilization_ratio = float(np.nanmax(path_util_values))
+
+        runtime_medians = self._runtime_summary_medians(rows)
+        median_success_runtime_s = float(runtime_medians["median_success_runtime_s"])
+        median_non_raw_runtime_s = float(runtime_medians["median_non_raw_runtime_s"])
+        median_failure_runtime_s = float(runtime_medians["median_failure_runtime_s"])
+
+        summary_rows = [
+            ("reference_label", reference_label),
+            ("solver_rate", solver_rate),
+            ("mission_success_rate_raw", success_rate),
+            ("mission_success_rate_slack", success_rate_slack),
+            ("log_available_count", int(sum(int(row.get("log_available", 0)) for row in rows))),
+            ("trajectory_available_count", len(available_profile_indices)),
+            ("successful_replay_count_raw", len(raw_successful_profile_indices)),
+            ("successful_replay_count_slack", len(slack_successful_profile_indices)),
+            ("slack_only_replay_count", len(slack_only_profile_indices)),
+            ("omitted_replay_labels", ",".join(omitted_replay_labels)),
+            ("omitted_success_envelope_labels", ",".join(omitted_success_envelope_labels)),
+            ("mass_spread_kg", mass_spread),
+            ("max_position_separation_km", max_position_sep_km),
+            ("max_altitude_delta_km", max_alt_delta_km),
+            ("max_velocity_delta_m_s", max_vel_delta_m_s),
+            ("max_terminal_criteria_ratio", max_terminal_criteria_ratio),
+            ("max_path_utilization_ratio", max_path_utilization_ratio),
+            ("median_success_runtime_s", median_success_runtime_s),
+            ("median_non_raw_runtime_s", median_non_raw_runtime_s),
+            ("median_failure_runtime_s", median_failure_runtime_s),
+        ]
+        summary_rows.extend(
+            (f"status_count_{status_key.lower()}", count)
+            for status_key, count in sorted(status_counts.items())
+        )
+        summary_rows.extend(
+            (f"solver_status_count_{status_key.lower()}", count)
+            for status_key, count in sorted(solver_status_counts.items())
+        )
+
+        if trajectory_rows:
+            self.suite._save_table(
+                "randomized_multistart_trajectories",
+                [
+                    "trial",
+                    "label",
+                    "status",
+                    "solver_success",
+                    "mission_success",
+                    "mission_success_slack",
+                    "raw_path_ok",
+                    "path_ok_slack",
+                    "progress",
+                    "time_s",
+                    "downrange_km",
+                    "ellipsoidal_altitude_km",
+                    "velocity_m_s",
+                    "mass_kg",
+                    "x_m",
+                    "y_m",
+                    "z_m",
+                ],
+                trajectory_rows,
+            )
+        if delta_rows:
+            self.suite._save_table(
+                "randomized_multistart_deltas",
+                [
+                    "trial",
+                    "label",
+                    "status",
+                    "solver_success",
+                    "mission_success",
+                    "mission_success_slack",
+                    "raw_path_ok",
+                    "path_ok_slack",
+                    "progress",
+                    "delta_downrange_km",
+                    "delta_altitude_km",
+                    "delta_velocity_m_s",
+                    "delta_mass_kg",
+                    "position_separation_km",
+                ],
+                delta_rows,
+            )
+        self.suite._save_table(
+            "randomized_multistart_trajectory_summary",
+            ["metric", "value"],
+            summary_rows,
+        )
+
+        if reference_idx is not None:
+            print(f"Reference trajectory for comparisons: {reference_label}")
+            if np.isfinite(max_position_sep_km):
+                print(f"Max position separation vs {reference_label}: {max_position_sep_km:.3f} km")
+            if np.isfinite(max_alt_delta_km):
+                print(f"Max altitude delta vs {reference_label}: {max_alt_delta_km:.3f} km")
+            if np.isfinite(max_vel_delta_m_s):
+                print(f"Max velocity delta vs {reference_label}: {max_vel_delta_m_s:.3f} m/s")
+
+        fig = plt.figure(figsize=(12.0, 8.4))
+        gs = fig.add_gridspec(3, 1, height_ratios=[1.35, 0.9, 1.0])
+        ax_status = fig.add_subplot(gs[0, 0])
+        ax_path = fig.add_subplot(gs[1, 0])
+        ax_terminal = fig.add_subplot(gs[2, 0], sharex=ax_path)
+
+        seed_positions = np.arange(len(rows), dtype=float)
+        raw_seed_labels = [str(row["label"]) for row in rows]
+        seed_labels = self._seed_display_labels(raw_seed_labels)
+        group_breaks = self._seed_group_break_indices(raw_seed_labels)
+        runtime_vals = np.array([float(row["runtime_s"]) if np.isfinite(row["runtime_s"]) else 0.0 for row in rows], dtype=float)
+        finite_runtime_vals = runtime_vals[np.isfinite(runtime_vals)]
+        max_runtime = float(np.nanmax(finite_runtime_vals)) if finite_runtime_vals.size > 0 else 1.0
+        if not np.isfinite(max_runtime) or max_runtime <= 0.0:
+            max_runtime = 1.0
+        runtime_pad = 0.06 * max_runtime
+        status_colors = [self._outcome_color(row["status"]) for row in rows]
+
+        ax_status.barh(seed_positions, runtime_vals, color=status_colors, edgecolor="0.25", linewidth=0.7, alpha=0.9)
+        ax_status.set_yticks(seed_positions)
+        ax_status.set_yticklabels(seed_labels)
+        ax_status.invert_yaxis()
+        ax_status.set_xlim(0.0, max_runtime * 1.35)
+        ax_status.set_xlabel("Trial runtime (s)")
+        ax_status.grid(True, axis="x", alpha=0.25)
+        ax_status.text(0.01, 0.98, "a)", transform=ax_status.transAxes, ha="left", va="top", fontsize=10, fontweight="bold", color="0.2")
+        for break_idx in group_breaks:
+            ax_status.axhline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
+
+        for i, row in enumerate(rows):
+            iter_info = row["solver_iter_count"]
+            status_label = self._status_display(row["status"])
+            if status_label == "PASS RAW" and np.isfinite(iter_info):
+                annotation = f"{int(iter_info)} it"
+            elif np.isfinite(iter_info):
+                annotation = f"{status_label} | {int(iter_info)} it"
+            else:
+                solver_note = str(row["solver_return_status"]).replace("_", " ").strip()
+                annotation = status_label if status_label else "n/a"
+                if solver_note:
+                    annotation += f" | {solver_note}"
+            x_text = runtime_vals[i] + runtime_pad
+            if not np.isfinite(x_text):
+                x_text = runtime_pad
+            ax_status.text(x_text, seed_positions[i], annotation, va="center", fontsize=8)
+
+        slack_only_count = int(sum(1 for row in rows if bool(row["mission_success_slack"]) and not bool(row["mission_success"])))
+        solver_fail_count = int(len(rows) - sum(solver_success_flags))
+        non_raw_labels = [str(row["label"]) for row in rows if str(row["status"]) != "PASS_RAW"]
+        non_raw_preview = ", ".join(non_raw_labels[:4]) if non_raw_labels else "none"
+        if len(non_raw_labels) > 4:
+            non_raw_preview += f", +{len(non_raw_labels) - 4} more"
+        q_max_kpa = np.array([float(row.get("max_q_pa", np.nan)) / 1000.0 for row in rows], dtype=float)
+        g_max_series = np.array([float(row.get("max_g", np.nan)) for row in rows], dtype=float)
+        alt_err_abs_m = np.abs(np.array([float(row.get("alt_err_m", np.nan)) for row in rows], dtype=float))
+        vel_err_abs_m_s = np.abs(np.array([float(row.get("vel_err_m_s", np.nan)) for row in rows], dtype=float))
+        q_max_summary = float(np.nanmax(q_max_kpa)) if np.any(np.isfinite(q_max_kpa)) else np.nan
+        g_max_summary = float(np.nanmax(g_max_series)) if np.any(np.isfinite(g_max_series)) else np.nan
+        alt_err_summary = float(np.nanmax(alt_err_abs_m)) if np.any(np.isfinite(alt_err_abs_m)) else np.nan
+        vel_err_summary = float(np.nanmax(vel_err_abs_m_s)) if np.any(np.isfinite(vel_err_abs_m_s)) else np.nan
+        count_lines = [
+            f"{self._status_display(status_key)}: {count}"
+            for status_key, count in sorted(status_counts.items(), key=lambda item: (-item[1], item[0]))
+        ]
+        count_lines.extend(
+            [
+                f"Raw pass: {sum(mission_success_flags)}/{n_use}",
+                f"Solver success: {sum(solver_success_flags)}/{n_use}",
+                f"Median raw-pass runtime: {self._format_summary_value(median_success_runtime_s, ' s')}",
+                f"Max Q: {self._format_summary_value(q_max_summary, ' kPa')}",
+                f"Max g: {self._format_summary_value(g_max_summary, ' g')}",
+                f"Max |alt err|: {self._format_summary_value(alt_err_summary, ' m')}",
+                f"Max |vel err|: {self._format_summary_value(vel_err_summary, ' m/s')}",
+                f"Mass spread: {self._format_summary_value(1000.0 * mass_spread if np.isfinite(mass_spread) else np.nan, ' g')}",
+            ]
+        )
+        ax_status.text(
+            0.98,
+            0.02,
+            "\n".join(count_lines),
+            transform=ax_status.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=8.5,
+            bbox=dict(facecolor="white", alpha=0.88, edgecolor="0.7"),
+        )
+
+        q_mask = np.isfinite(q_max_kpa)
+        g_mask = np.isfinite(g_max_series)
+
+        non_raw_indices = [i for i, row in enumerate(rows) if str(row["status"]) != "PASS_RAW"]
+        for idx in non_raw_indices:
+            ax_path.axvspan(idx - 0.45, idx + 0.45, color=status_colors[idx], alpha=0.08, lw=0)
+        for break_idx in group_breaks:
+            ax_path.axvline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
+        ax_path_g = ax_path.twinx()
+        ax_path_g.patch.set_alpha(0.0)
+        q_limit_line = ax_path.axhline(self.suite.base_config.max_q_limit / 1000.0, color="tab:blue", linestyle="--", linewidth=1.0, label="Max-Q limit")
+        g_limit_line = ax_path_g.axhline(self.suite.base_config.max_g_load, color="tab:orange", linestyle="--", linewidth=1.0, label="Max g limit")
+        q_handle = None
+        g_handle = None
+        if np.any(q_mask):
+            ax_path.plot(seed_positions[q_mask], q_max_kpa[q_mask], color="tab:blue", linewidth=1.0, zorder=1)
+            q_handle = ax_path.scatter(
+                seed_positions[q_mask],
+                q_max_kpa[q_mask],
+                color="tab:blue",
+                s=54,
+                edgecolors="0.2",
+                linewidths=0.6,
+                zorder=3,
+                label="Max Q",
+            )
+            q_candidates = [self.suite.base_config.max_q_limit / 1000.0]
+            q_candidates.extend(q_max_kpa[q_mask].tolist())
+            q_min = min(q_candidates)
+            q_max_val = max(q_candidates)
+            q_span = max(q_max_val - q_min, 0.15)
+            q_pad = max(0.08, 0.12 * q_span)
+            ax_path.set_ylim(max(0.0, q_min - q_pad), q_max_val + q_pad)
+        else:
+            ax_path.text(0.5, 0.5, "No replayed path metrics available.", transform=ax_path.transAxes, ha="center", va="center")
+        if np.any(g_mask):
+            ax_path_g.plot(seed_positions[g_mask], g_max_series[g_mask], color="tab:orange", linewidth=1.0, zorder=1)
+            g_handle = ax_path_g.scatter(
+                seed_positions[g_mask],
+                g_max_series[g_mask],
+                color="tab:orange",
+                marker="s",
+                s=50,
+                edgecolors="0.2",
+                linewidths=0.6,
+                zorder=3,
+                label="Max g",
+            )
+            g_candidates = [self.suite.base_config.max_g_load]
+            g_candidates.extend(g_max_series[g_mask].tolist())
+            g_min = min(g_candidates)
+            g_max_val = max(g_candidates)
+            g_span = max(g_max_val - g_min, 0.02)
+            g_pad = max(0.01, 0.12 * g_span)
+            ax_path_g.set_ylim(max(0.0, g_min - g_pad), g_max_val + g_pad)
+        else:
+            ax_path_g.set_ylim(0.0, max(1.0, self.suite.base_config.max_g_load * 1.1))
+
+        ax_path.set_ylabel("Max dynamic pressure (kPa)")
+        ax_path_g.set_ylabel("Max g-load (g)")
+        ax_path.grid(True, axis="y", alpha=0.3)
+        ax_path.text(0.01, 0.98, "b)", transform=ax_path.transAxes, ha="left", va="top", fontsize=10, fontweight="bold", color="0.2")
+        ax_path.tick_params(axis="x", labelbottom=False)
+        path_handles = []
+        path_labels = []
+        if q_handle is not None:
+            path_handles.extend([q_handle, q_limit_line])
+            path_labels.extend(["Max Q", "Max-Q limit"])
+        if g_handle is not None:
+            path_handles.extend([g_handle, g_limit_line])
+            path_labels.extend(["Max g", "Max g limit"])
+        if path_handles:
+            ax_path.legend(path_handles, path_labels, loc="upper left", fontsize=8)
+
+        alt_mask = np.isfinite(alt_err_abs_m)
+        vel_mask = np.isfinite(vel_err_abs_m_s)
+        ax_vel = ax_terminal.twinx()
+        ax_vel.patch.set_alpha(0.0)
+        for idx in non_raw_indices:
+            ax_terminal.axvspan(idx - 0.45, idx + 0.45, color=status_colors[idx], alpha=0.08, lw=0)
+        for break_idx in group_breaks:
+            ax_terminal.axvline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
+        alt_handle = None
+        vel_handle = None
+        alt_tol_line = None
+        vel_tol_line = None
+        if np.any(alt_mask):
+            ax_terminal.plot(seed_positions[alt_mask], alt_err_abs_m[alt_mask], color="tab:green", linewidth=1.0, zorder=1)
+            alt_handle = ax_terminal.scatter(
+                seed_positions[alt_mask],
+                alt_err_abs_m[alt_mask],
+                color="tab:green",
+                s=56,
+                edgecolors="0.2",
+                linewidths=0.6,
+                zorder=3,
+                label="|Altitude error|",
+            )
+            alt_candidates = alt_err_abs_m[alt_mask].tolist()
+            alt_max = max(alt_candidates)
+            alt_scale = max(alt_max, 1.0)
+            alt_span = max(alt_max - min(alt_candidates), 0.25 * alt_scale, 0.5)
+            alt_pad = max(0.05 * alt_scale, 0.12 * alt_span, 0.2)
+            alt_upper = alt_max + alt_pad
+            ax_terminal.set_ylim(0.0, alt_upper)
+            if TERMINAL_ALT_TOL_M <= alt_upper:
+                alt_tol_line = ax_terminal.axhline(
+                    TERMINAL_ALT_TOL_M,
+                    color="tab:green",
+                    linestyle="--",
+                    linewidth=1.0,
+                    label="Altitude tolerance",
+                )
+            else:
+                ax_terminal.text(
+                    0.98,
+                    0.92,
+                    f"Altitude tolerance: {TERMINAL_ALT_TOL_M:.0f} m (off-scale)",
+                    transform=ax_terminal.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=8,
+                    color="tab:green",
+                )
+        else:
+            ax_terminal.text(0.5, 0.5, "No replayed terminal metrics available.", transform=ax_terminal.transAxes, ha="center", va="center")
+        if np.any(vel_mask):
+            ax_vel.plot(seed_positions[vel_mask], vel_err_abs_m_s[vel_mask], color="tab:red", linewidth=1.0, zorder=1)
+            vel_handle = ax_vel.scatter(
+                seed_positions[vel_mask],
+                vel_err_abs_m_s[vel_mask],
+                color="tab:red",
+                marker="^",
+                s=56,
+                edgecolors="0.2",
+                linewidths=0.6,
+                zorder=3,
+                label="|Velocity error|",
+            )
+            vel_candidates = vel_err_abs_m_s[vel_mask].tolist()
+            vel_max = max(vel_candidates)
+            vel_scale = max(vel_max, 0.1)
+            vel_span = max(vel_max - min(vel_candidates), 0.25 * vel_scale, 0.02)
+            vel_pad = max(0.05 * vel_scale, 0.12 * vel_span, 0.01)
+            vel_upper = vel_max + vel_pad
+            ax_vel.set_ylim(0.0, vel_upper)
+            if TERMINAL_VEL_TOL_M_S <= vel_upper:
+                vel_tol_line = ax_vel.axhline(
+                    TERMINAL_VEL_TOL_M_S,
+                    color="tab:red",
+                    linestyle="--",
+                    linewidth=1.0,
+                    label="Velocity tolerance",
+                )
+            else:
+                ax_vel.text(
+                    0.98,
+                    0.82,
+                    f"Velocity tolerance: {TERMINAL_VEL_TOL_M_S:.1f} m/s (off-scale)",
+                    transform=ax_vel.transAxes,
+                    ha="right",
+                    va="top",
+                    fontsize=8,
+                    color="tab:red",
+                )
+        else:
+            ax_vel.set_ylim(0.0, max(1.0, TERMINAL_VEL_TOL_M_S * 1.1))
+
+        ax_terminal.set_ylabel("|Altitude error| (m)")
+        ax_vel.set_ylabel("|Velocity error| (m/s)")
+        ax_terminal.set_xlabel("Seed")
+        ax_terminal.set_xticks(seed_positions)
+        ax_terminal.set_xticklabels(seed_labels, rotation=35, ha="right")
+        ax_terminal.grid(True, axis="y", alpha=0.3)
+        ax_terminal.text(0.01, 0.98, "c)", transform=ax_terminal.transAxes, ha="left", va="top", fontsize=10, fontweight="bold", color="0.2")
+        handles = []
+        labels = []
+        if alt_handle is not None:
+            handles.append(alt_handle)
+            labels.append("|Altitude error|")
+        if alt_tol_line is not None:
+            handles.append(alt_tol_line)
+            labels.append("Altitude tolerance")
+        if vel_handle is not None:
+            handles.append(vel_handle)
+            labels.append("|Velocity error|")
+        if vel_tol_line is not None:
+            handles.append(vel_tol_line)
+            labels.append("Velocity tolerance")
+        if handles:
+            ax_terminal.legend(handles, labels, loc="upper left", fontsize=8)
+
+        self.suite._finalize_figure(fig, "randomized_multistart")
 
 def evaluate_terminal_state(
     sim_res,
@@ -249,34 +2527,11 @@ def evaluate_terminal_state(
 
     return metrics
 
-
-def normalized_orbit_error(
-    metrics,
-    alt_tol_m=TERMINAL_ALT_TOL_M,
-    vel_tol_m_s=TERMINAL_VEL_TOL_M_S,
-    radial_vel_tol_m_s=TERMINAL_RADIAL_VEL_TOL_M_S,
-    inc_tol_deg=TERMINAL_INC_TOL_DEG,
-):
-    """
-    Return a unitless terminal-orbit error norm.
-    Values <= 1.0 indicate orbit criteria are satisfied (fuel excluded).
-    """
-    if not isinstance(metrics, dict) or not bool(metrics.get("terminal_valid", False)):
-        return np.nan
-    terms = [
-        float(metrics.get("alt_err_m", np.nan)) / alt_tol_m,
-        float(metrics.get("vel_err_m_s", np.nan)) / vel_tol_m_s,
-        float(metrics.get("radial_velocity_m_s", np.nan)) / radial_vel_tol_m_s,
-        float(metrics.get("inclination_err_deg", np.nan)) / inc_tol_deg,
-    ]
-    if not np.all(np.isfinite(terms)):
-        return np.nan
-    return float(np.sqrt(np.sum(np.square(terms))))
-
-
 def _ms_refine_peak_time(t_series, y_series, idx_peak):
     """
     Peak refinement helper used by reliability diagnostics.
+    The refined value is bounded by the local sampled maximum so the
+    quadratic fit cannot invent a path-constraint violation between nodes.
     """
     t = np.asarray(t_series, dtype=float)
     y = np.asarray(y_series, dtype=float)
@@ -306,6 +2561,10 @@ def _ms_refine_peak_time(t_series, y_series, idx_peak):
 
     y_peak = a * x_peak * x_peak + b * x_peak + c
     if not np.isfinite(y_peak):
+        return float(t[i]), float(y[i])
+    sampled_peak = float(np.nanmax(y_w))
+    tol = max(1.0e-12, 1.0e-9 * abs(sampled_peak))
+    if y_peak > sampled_peak + tol:
         return float(t[i]), float(y[i])
     return float(t[i] + x_peak), float(y_peak)
 
@@ -433,62 +2692,6 @@ def _ms_evaluate_path_compliance(traj_diag, cfg, q_slack_pa, g_slack):
         "max_g": max_g,
     })
     return out
-
-def _run_monte_carlo_batch_worker(payload):
-    """
-    Evaluate a batch of Monte Carlo uncertainty samples in one worker process.
-    Returns aggregate counts needed by Wilson-CI stopping.
-    """
-    opt_res = payload["opt_res"]
-    base_cfg = payload["base_cfg"]
-    base_env_cfg = payload["base_env_cfg"]
-    q_slack_pa = float(payload["q_slack_pa"])
-    g_slack = float(payload["g_slack"])
-    samples = payload["samples"]
-
-    successes = 0
-    path_failures = 0
-    orbit_errors = []
-    mission_flags = []
-
-    for thrust_mult, isp_mult, dens_mult in samples:
-        cfg = copy.deepcopy(base_cfg)
-        env_cfg = copy.deepcopy(base_env_cfg)
-        cfg.stage_1.thrust_vac *= float(thrust_mult)
-        cfg.stage_2.thrust_vac *= float(thrust_mult)
-        cfg.stage_1.isp_vac *= float(isp_mult)
-        cfg.stage_2.isp_vac *= float(isp_mult)
-        env_cfg.density_multiplier = float(dens_mult)
-
-        try:
-            with suppress_stdout():
-                env_mc = Environment(env_cfg)
-                veh_mc = Vehicle(cfg, env_mc)
-                sim_res = run_simulation(opt_res, veh_mc, cfg)
-            terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
-            traj = _ms_trajectory_diagnostics(sim_res, veh_mc, cfg)
-            path = _ms_evaluate_path_compliance(traj, cfg, q_slack_pa, g_slack)
-            strict_path_ok = bool(terminal.get("strict_ok", False) and path.get("path_ok", False))
-            orbit_err = normalized_orbit_error(terminal)
-            if strict_path_ok:
-                successes += 1
-            if bool(terminal.get("strict_ok", False)) and (not strict_path_ok):
-                path_failures += 1
-            orbit_errors.append(float(orbit_err) if np.isfinite(orbit_err) else np.nan)
-            mission_flags.append(int(strict_path_ok))
-        except Exception:
-            # Treat simulation failures as non-success samples.
-            orbit_errors.append(np.nan)
-            mission_flags.append(0)
-            continue
-
-    return {
-        "successes": int(successes),
-        "path_failures": int(path_failures),
-        "orbit_errors": orbit_errors,
-        "mission_flags": mission_flags,
-    }
-
 
 def _run_grid_independence_worker(payload):
     """
@@ -678,247 +2881,6 @@ def _run_interval_replay_phase_worker(payload):
     }
 
 
-def _run_bifurcation_batch_worker(payload):
-    """
-    Evaluate a chunk of (thrust, density) bifurcation points.
-    """
-    opt_res = payload["opt_res"]
-    base_cfg = payload["base_cfg"]
-    base_env_cfg = payload["base_env_cfg"]
-    q_slack_pa = float(payload["q_slack_pa"])
-    g_slack = float(payload["g_slack"])
-    samples = payload["samples"]
-
-    rows = []
-    for iy, ix, thrust, dens in samples:
-        cfg = copy.deepcopy(base_cfg)
-        env_cfg = copy.deepcopy(base_env_cfg)
-        cfg.stage_1.thrust_vac *= float(thrust)
-        cfg.stage_2.thrust_vac *= float(thrust)
-        env_cfg.density_multiplier = float(dens)
-
-        try:
-            with suppress_stdout():
-                env_i = Environment(env_cfg)
-                veh_i = Vehicle(cfg, env_i)
-                sim_res = run_simulation(opt_res, veh_i, cfg)
-            terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
-            traj = _ms_trajectory_diagnostics(sim_res, veh_i, cfg)
-            path = _ms_evaluate_path_compliance(traj, cfg, q_slack_pa, g_slack)
-            strict_path_ok = bool(terminal.get("strict_ok", False) and path.get("path_ok", False))
-            margin = terminal["fuel_margin_kg"] if terminal["terminal_valid"] else np.nan
-            orbit_err = normalized_orbit_error(terminal)
-            status = terminal.get("status", "SIM_ERROR")
-            if bool(terminal.get("strict_ok", False)) and not strict_path_ok:
-                status = "PATH"
-            rows.append(
-                {
-                    "iy": int(iy),
-                    "ix": int(ix),
-                    "thrust": float(thrust),
-                    "density": float(dens),
-                    "strict_success": int(strict_path_ok),
-                    "fuel_margin_kg": float(margin) if np.isfinite(margin) else np.nan,
-                    "normalized_orbit_error": float(orbit_err) if np.isfinite(orbit_err) else np.nan,
-                    "spherical_height_error_m": float(terminal.get("spherical_height_err_m", np.nan)),
-                    "velocity_error_m_s": float(terminal.get("vel_err_m_s", np.nan)),
-                    "q_ok": int(path.get("q_ok", False)),
-                    "g_ok": int(path.get("g_ok", False)),
-                    "status": str(status),
-                }
-            )
-        except Exception:
-            rows.append(
-                {
-                    "iy": int(iy),
-                    "ix": int(ix),
-                    "thrust": float(thrust),
-                    "density": float(dens),
-                    "strict_success": 0,
-                    "fuel_margin_kg": np.nan,
-                    "normalized_orbit_error": np.nan,
-                    "spherical_height_error_m": np.nan,
-                    "velocity_error_m_s": np.nan,
-                    "q_ok": 0,
-                    "g_ok": 0,
-                    "status": "SIM_ERROR",
-                }
-            )
-    return {"rows": rows}
-
-
-def _run_q2_grid_point_worker(payload):
-    """
-    Q2 uncertainty budget: solve one node-count case.
-    """
-    node_count = int(payload["num_nodes"])
-    base_cfg = payload["base_cfg"]
-    base_env_cfg = payload["base_env_cfg"]
-
-    cfg = copy.deepcopy(base_cfg)
-    cfg.num_nodes = node_count
-
-    t0 = time.time()
-    ok = False
-    fuel_i = np.nan
-    status = "Failed"
-    try:
-        with suppress_stdout():
-            env_i = Environment(copy.deepcopy(base_env_cfg))
-            veh_i = Vehicle(cfg, env_i)
-            opt_i = solve_optimal_trajectory(cfg, veh_i, env_i, print_level=0)
-        ok = bool(opt_i.get("success", False))
-        if ok:
-            X3 = opt_i.get("X3", None)
-            if isinstance(X3, np.ndarray) and X3.ndim == 2 and X3.shape[0] >= 7 and X3.shape[1] >= 1:
-                m_final_i = float(X3[6, -1])
-            else:
-                m_final_i = np.nan
-            if np.isfinite(m_final_i) and m_final_i > 0.0:
-                fuel_i = float(cfg.launch_mass - m_final_i)
-            else:
-                fuel_i = np.nan
-            status = "Converged" if np.isfinite(fuel_i) else "Failed"
-    except Exception:
-        ok = False
-        fuel_i = np.nan
-        status = "Error"
-
-    return {
-        "nodes": node_count,
-        "solver_success": int(ok),
-        "status": status,
-        "minimum_fuel_kg": float(fuel_i) if np.isfinite(fuel_i) else np.nan,
-        "runtime_s": float(time.time() - t0),
-    }
-
-
-def _run_q2_integrator_point_worker(payload):
-    """
-    Q2 uncertainty budget: evaluate one integrator-tolerance verification run.
-    """
-    opt_nom = payload["opt_nom"]
-    base_cfg = payload["base_cfg"]
-    base_env_cfg = payload["base_env_cfg"]
-    rtol = float(payload["rtol"])
-    atol = float(payload["atol"])
-    q_slack_pa = float(payload["q_slack_pa"])
-    g_slack = float(payload["g_slack"])
-
-    cfg = copy.deepcopy(base_cfg)
-    env_cfg = copy.deepcopy(base_env_cfg)
-
-    term_i = {"terminal_valid": False, "strict_ok": False, "status": "SIM_ERROR"}
-    path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
-    strict_path_i = 0
-    fuel_sim = np.nan
-    status = "SIM_ERROR"
-    try:
-        with suppress_stdout():
-            env_i = Environment(env_cfg)
-            veh_i = Vehicle(cfg, env_i)
-            sim_i = run_simulation(opt_nom, veh_i, cfg, rtol=rtol, atol=atol)
-        term_i = evaluate_terminal_state(sim_i, cfg, env_cfg)
-        traj_i = _ms_trajectory_diagnostics(sim_i, veh_i, cfg)
-        path_i = _ms_evaluate_path_compliance(traj_i, cfg, q_slack_pa, g_slack)
-        strict_path_i = int(bool(term_i.get("strict_ok", False)) and bool(path_i.get("path_ok", False)))
-        y = sim_i.get("y", None)
-        if isinstance(y, np.ndarray) and y.ndim == 2 and y.shape[0] >= 7 and y.shape[1] >= 1:
-            m_final_sim = float(y[6, -1])
-            if np.isfinite(m_final_sim) and m_final_sim > 0.0:
-                fuel_sim = float(cfg.launch_mass - m_final_sim)
-        status = term_i.get("status", "SIM_ERROR")
-        if bool(term_i.get("strict_ok", False)) and not bool(strict_path_i):
-            status = "PATH"
-    except Exception:
-        status = "SIM_ERROR"
-
-    return {
-        "rtol": rtol,
-        "atol": atol,
-        "terminal_valid": int(term_i.get("terminal_valid", False)),
-        "strict_ok": int(term_i.get("strict_ok", False)),
-        "strict_path_ok": int(strict_path_i),
-        "q_ok": int(path_i.get("q_ok", False)),
-        "g_ok": int(path_i.get("g_ok", False)),
-        "status": status,
-        "fuel_used_kg": float(fuel_sim) if np.isfinite(fuel_sim) else np.nan,
-    }
-
-
-def _run_q2_parameter_sample_worker(payload):
-    """
-    Q2 uncertainty budget: one parameter-perturbed re-optimization sample.
-    """
-    run_index = int(payload["run_index"])
-    thrust_mult = float(payload["thrust_multiplier"])
-    isp_mult = float(payload["isp_multiplier"])
-    dens_mult = float(payload["density_multiplier"])
-    base_cfg = payload["base_cfg"]
-    base_env_cfg = payload["base_env_cfg"]
-    q_slack_pa = float(payload["q_slack_pa"])
-    g_slack = float(payload["g_slack"])
-
-    cfg_i = copy.deepcopy(base_cfg)
-    env_cfg_i = copy.deepcopy(base_env_cfg)
-    cfg_i.stage_1.thrust_vac *= thrust_mult
-    cfg_i.stage_2.thrust_vac *= thrust_mult
-    cfg_i.stage_1.isp_vac *= isp_mult
-    cfg_i.stage_2.isp_vac *= isp_mult
-    env_cfg_i.density_multiplier = dens_mult
-
-    t0 = time.time()
-    opt_success = False
-    strict_ok = False
-    strict_path_ok = False
-    fuel_i = np.nan
-    status = "OPT_FAIL"
-    path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
-
-    try:
-        with suppress_stdout():
-            env_i = Environment(env_cfg_i)
-            veh_i = Vehicle(cfg_i, env_i)
-            opt_i = solve_optimal_trajectory(cfg_i, veh_i, env_i, print_level=0)
-        opt_success = bool(opt_i.get("success", False))
-        if opt_success:
-            X3 = opt_i.get("X3", None)
-            m_final_i = float(X3[6, -1]) if isinstance(X3, np.ndarray) and X3.ndim == 2 and X3.shape[0] >= 7 and X3.shape[1] >= 1 else np.nan
-            if np.isfinite(m_final_i) and m_final_i > 0.0:
-                fuel_i = float(cfg_i.launch_mass - m_final_i)
-            try:
-                with suppress_stdout():
-                    sim_i = run_simulation(opt_i, veh_i, cfg_i, rtol=1e-9, atol=1e-12)
-                term_i = evaluate_terminal_state(sim_i, cfg_i, env_cfg_i)
-                traj_i = _ms_trajectory_diagnostics(sim_i, veh_i, cfg_i)
-                path_i = _ms_evaluate_path_compliance(traj_i, cfg_i, q_slack_pa, g_slack)
-                strict_ok = bool(term_i.get("strict_ok", False))
-                strict_path_ok = bool(strict_ok and path_i.get("path_ok", False))
-                status = term_i.get("status", "SIM_ERROR")
-                if strict_ok and not strict_path_ok:
-                    status = "PATH"
-            except Exception:
-                status = "ERROR"
-    except Exception:
-        status = "ERROR"
-        path_i = {"q_ok": False, "g_ok": False, "path_ok": False}
-
-    return {
-        "run": run_index + 1,
-        "thrust_multiplier": thrust_mult,
-        "isp_multiplier": isp_mult,
-        "density_multiplier": dens_mult,
-        "optimizer_success": int(opt_success),
-        "strict_ok": int(strict_ok),
-        "strict_path_ok": int(strict_path_ok),
-        "q_ok": int(path_i["q_ok"]),
-        "g_ok": int(path_i["g_ok"]),
-        "status": status,
-        "minimum_fuel_kg": float(fuel_i) if np.isfinite(fuel_i) else np.nan,
-        "runtime_s": float(time.time() - t0),
-    }
-
-
 def _export_csv(path, headers, rows):
     def _format_cell(value):
         if value is None:
@@ -982,6 +2944,8 @@ class ReliabilitySuite:
         plt.rcParams.update({
             "figure.dpi": 120,
             "savefig.dpi": 300,
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
             "font.size": 11,
             "axes.titlesize": 13,
             "axes.labelsize": 11,
@@ -1057,7 +3021,10 @@ class ReliabilitySuite:
         print(f"  [Saved] {out}")
 
     def _finalize_figure(self, fig, stem):
-        fig.tight_layout()
+        layout_engine_getter = getattr(fig, "get_layout_engine", None)
+        layout_engine = layout_engine_getter() if callable(layout_engine_getter) else None
+        if layout_engine is None:
+            fig.tight_layout()
         if self.save_outputs:
             png_path = self.fig_dir / f"{stem}.png"
             pdf_path = self.fig_dir / f"{stem}.pdf"
@@ -1107,7 +3074,8 @@ class ReliabilitySuite:
     def _refine_peak_time(t_series, y_series, idx_peak):
         """
         Refine a sampled peak time/value with a local quadratic fit.
-        Falls back to sampled values if the parabola is ill-posed.
+        Falls back to sampled values if the parabola is ill-posed or if the
+        fitted extremum overshoots the local sampled envelope.
         """
         t = np.asarray(t_series, dtype=float)
         y = np.asarray(y_series, dtype=float)
@@ -1140,38 +3108,11 @@ class ReliabilitySuite:
         y_peak = a * x_peak * x_peak + b * x_peak + c
         if not np.isfinite(y_peak):
             return float(t[i]), float(y[i])
+        sampled_peak = float(np.nanmax(y_w))
+        tol = max(1.0e-12, 1.0e-9 * abs(sampled_peak))
+        if y_peak > sampled_peak + tol:
+            return float(t[i]), float(y[i])
         return float(t[i] + x_peak), float(y_peak)
-
-    def _draw_uncertainty_multipliers(self, rng, model="gaussian_independent"):
-        """
-        Draw uncertainty multipliers for thrust, ISP, and atmosphere density.
-        """
-        if model == "gaussian_independent":
-            thrust_mult = rng.normal(1.0, 0.02)
-            isp_mult = rng.normal(1.0, 0.01)
-            dens_mult = rng.normal(1.0, 0.10)
-        elif model == "uniform_bounded":
-            thrust_mult = rng.uniform(0.94, 1.06)
-            isp_mult = rng.uniform(0.97, 1.03)
-            dens_mult = rng.uniform(0.70, 1.30)
-        elif model == "gaussian_correlated":
-            sig = np.array([0.02, 0.01, 0.10], dtype=float)
-            corr = np.array([
-                [1.0,  0.55, -0.20],
-                [0.55, 1.0, -0.15],
-                [-0.20, -0.15, 1.0]
-            ], dtype=float)
-            cov = np.outer(sig, sig) * corr
-            draw = rng.multivariate_normal(np.ones(3), cov)
-            thrust_mult, isp_mult, dens_mult = draw[0], draw[1], draw[2]
-        else:
-            raise ValueError(f"Unknown uncertainty model '{model}'")
-
-        # Guardrails for physically meaningful environment and engine factors.
-        thrust_mult = float(np.clip(thrust_mult, 0.80, 1.20))
-        isp_mult = float(np.clip(isp_mult, 0.85, 1.15))
-        dens_mult = float(np.clip(dens_mult, 0.20, 2.00))
-        return thrust_mult, isp_mult, dens_mult
 
     def _trajectory_diagnostics(self, sim_res, veh, cfg):
         """
@@ -1268,84 +3209,6 @@ class ReliabilitySuite:
         out["g_violation"] = bool(np.isfinite(out["max_g"]) and out["max_g"] > cfg.max_g_load)
         return out
 
-    def _simulate_uncertainty_case(self, opt_res, thrust_mult, isp_mult, dens_mult):
-        """
-        Run one perturbed open-loop simulation and return terminal/constraint diagnostics.
-        """
-        cfg = copy.deepcopy(self.base_config)
-        env_cfg = copy.deepcopy(self.base_env_config)
-        cfg.stage_1.thrust_vac *= thrust_mult
-        cfg.stage_2.thrust_vac *= thrust_mult
-        cfg.stage_1.isp_vac *= isp_mult
-        cfg.stage_2.isp_vac *= isp_mult
-        env_cfg.density_multiplier = dens_mult
-
-        sim_res = {"y": np.zeros((7, 1)), "t": np.array([0.0]), "u": np.zeros((4, 1))}
-        try:
-            with suppress_stdout():
-                env_mc = Environment(env_cfg)
-                veh_mc = Vehicle(cfg, env_mc)
-                sim_res = run_simulation(opt_res, veh_mc, cfg)
-            terminal = evaluate_terminal_state(sim_res, cfg, env_cfg)
-            traj = self._trajectory_diagnostics(sim_res, veh_mc, cfg)
-            path = self._evaluate_path_compliance(traj, cfg)
-        except Exception:
-            terminal = evaluate_terminal_state({"y": np.zeros((7, 1))}, cfg, env_cfg)
-            traj = {
-                "valid": False,
-                "max_q_pa": np.nan,
-                "max_q_time_s": np.nan,
-                "max_g": np.nan,
-                "max_g_time_s": np.nan,
-                "staging_time_s": np.nan,
-                "depletion_time_s": np.nan,
-                "q_violation": False,
-                "g_violation": False
-            }
-            path = self._evaluate_path_compliance(traj, cfg)
-        strict_path_ok = self._is_strict_path_success(terminal, traj, cfg)
-
-        return {
-            "thrust_multiplier": float(thrust_mult),
-            "isp_multiplier": float(isp_mult),
-            "density_multiplier": float(dens_mult),
-            "terminal": terminal,
-            "trajectory": traj,
-            "path": path,
-            "strict_path_ok": int(strict_path_ok)
-        }
-
-    @staticmethod
-    def _extract_final_mass_from_opt(opt_res):
-        if not isinstance(opt_res, dict):
-            return np.nan
-        X3 = opt_res.get("X3", None)
-        if not isinstance(X3, np.ndarray) or X3.ndim != 2 or X3.shape[0] < 7 or X3.shape[1] < 1:
-            return np.nan
-        m_final = float(X3[6, -1])
-        if not np.isfinite(m_final) or m_final <= 0.0:
-            return np.nan
-        return m_final
-
-    @staticmethod
-    def _extract_final_mass_from_sim(sim_res):
-        if not isinstance(sim_res, dict):
-            return np.nan
-        y = sim_res.get("y", None)
-        if not isinstance(y, np.ndarray) or y.ndim != 2 or y.shape[0] < 7 or y.shape[1] < 1:
-            return np.nan
-        m_final = float(y[6, -1])
-        if not np.isfinite(m_final) or m_final <= 0.0:
-            return np.nan
-        return m_final
-
-    @staticmethod
-    def _rss(values):
-        arr = np.array([float(v) for v in values if np.isfinite(v)], dtype=float)
-        if arr.size == 0:
-            return np.nan
-        return float(np.sqrt(np.sum(arr * arr)))
-
     def _evaluate_path_compliance(self, traj_diag, cfg, q_slack_pa=None, g_slack=None):
         """
         Evaluate path-constraint compliance with small numerical slack.
@@ -1390,37 +3253,10 @@ class ReliabilitySuite:
         path = self._evaluate_path_compliance(traj_diag, cfg)
         return bool(path["path_ok"])
 
-    def _get_saved_metric(self, table_name, key):
-        """
-        Best-effort helper for cross-test summaries.
-        Reads `metric,value` style CSVs if they exist.
-        """
-        table_path = self.data_dir / f"{table_name}.csv"
-        if not table_path.exists():
-            return np.nan
-        try:
-            with open(table_path, "r", encoding="utf-8", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    if str(row.get("metric", "")).strip() == str(key):
-                        val = row.get("value", "nan")
-                        try:
-                            return float(val)
-                        except Exception:
-                            return np.nan
-        except Exception:
-            return np.nan
-        return np.nan
-
-    def run_all(self, monte_carlo_samples=200, max_workers=None):
+    def run_all(self, max_workers=None):
         """Runs enabled analyses from shortest expected runtime to longest."""
         self._analysis_execution = []
         ran_any = False
-        mc_n = max(1, int(monte_carlo_samples))
-        mc_max_precision = max(400, mc_n, int(np.ceil(1.30 * mc_n)))
-        # Keep a conservative minimum before CI-based stopping to avoid over-optimistic early stops.
-        mc_min_precision = min(mc_max_precision, max(80, mc_n // 4))
-        mc_batch = max(5, min(50, max(1, mc_n // 10)))
         if max_workers is None:
             worker_cap = min(4, max(1, os.cpu_count() or 1))
         else:
@@ -1437,9 +3273,6 @@ class ReliabilitySuite:
             "theoretical_efficiency",
             "integrator_tolerance",
             "interval_replay_audit",
-            "bifurcation_2d_map",
-            "monte_carlo_precision_target",
-            "q2_uncertainty_budget",
         )
         try:
             if any(bool(getattr(self.test_toggles, name, True)) for name in baseline_flags):
@@ -1449,41 +3282,17 @@ class ReliabilitySuite:
             # Run grid independence first so the main discretization check is available early.
             ordered_tests = [
                 ("grid_independence", "Grid independence", self.analyze_grid_independence, (), {"max_workers": worker_cap}),
-                ("model_limitations", "Model limitations", self.analyze_model_limitations, (), {}),
                 ("smooth_integrator_benchmark", "Smooth ODE integrator benchmark", self.analyze_smooth_integrator_benchmark, (), {}),
                 ("drift", "Drift analysis", _run_drift_with_cached_baseline, (), {}),
                 ("theoretical_efficiency", "Theoretical efficiency", self.analyze_theoretical_efficiency, (), {}),
                 ("integrator_tolerance", "Integrator tolerance", self.analyze_integrator_tolerance, (), {}),
                 ("interval_replay_audit", "Interval replay audit", self.analyze_interval_replay_audit, (), {"max_workers": worker_cap}),
-                ("bifurcation_2d_map", "Bifurcation 2D map", self.analyze_bifurcation_2d_map, (), {"max_workers": worker_cap}),
                 ("randomized_multistart", "Warm-start multi-seed robustness", self.analyze_randomized_multistart, (), {}),
-                (
-                    "monte_carlo_precision_target",
-                    "Monte Carlo precision target",
-                    self.analyze_monte_carlo_precision_target,
-                    (),
-                    {"min_samples": mc_min_precision, "max_samples": mc_max_precision, "batch_size": mc_batch, "max_workers": worker_cap},
-                ),
-                (
-                    "q2_uncertainty_budget",
-                    "Q2 uncertainty budget",
-                    self.analyze_q2_uncertainty_budget,
-                    (),
-                    {"parameter_samples": max(30, min(60, mc_n // 6)), "max_workers": worker_cap},
-                ),
             ]
-            total_steps = len(ordered_tests) + 1  # + synthesis step
+            total_steps = len(ordered_tests)
             for i, (flag, label, fn, args, kwargs) in enumerate(ordered_tests, start=1):
                 progress = f"{i}/{total_steps}"
                 ran_any |= self._run_if_enabled(flag, label, fn, *args, progress=progress, **kwargs)
-
-            # Keep synthesis last because it consumes outputs from earlier analyses.
-            ran_any |= self._run_if_enabled(
-                "q7_conclusion_support",
-                "Q7 conclusion support",
-                self.analyze_q7_conclusion_support,
-                progress=f"{total_steps}/{total_steps}",
-            )
 
             if not ran_any:
                 print("\nNo analyses executed. Enable tests in RELIABILITY_ANALYSIS_TOGGLES in config.py.")
@@ -1915,6 +3724,165 @@ class ReliabilitySuite:
             n_trials=n_trials,
         )
 
+    def analyze_global_launch_cost(self, lat_step=5.0, solver_max_cpu_time=120.0):
+        debug._print_sub_header("Global Launch-Cost Latitude Sweep")
+        rows = self._run_global_launch_cost_sweep(
+            lat_step=lat_step,
+            solver_max_cpu_time=solver_max_cpu_time,
+        )
+        self._save_table(
+            "global_launch_cost_latitude_sweep",
+            [
+                "latitude_deg",
+                "fuel_consumed_kg",
+                "final_mass_kg",
+                "earth_rotation_speed_m_s",
+                "solver_success",
+            ],
+            [
+                (
+                    float(row["latitude_deg"]),
+                    float(row["fuel_consumed_kg"]),
+                    float(row["final_mass_kg"]),
+                    float(row["earth_rotation_speed_m_s"]),
+                    int(bool(row["solver_success"])),
+                )
+                for row in rows
+            ],
+        )
+        figure_available = self._render_global_launch_cost_heatmap(rows, "global_launch_cost_heatmap")
+        return {
+            "rows": rows,
+            "figure_available": bool(figure_available),
+        }
+
+    def _run_global_launch_cost_sweep(self, lat_step=5.0, solver_max_cpu_time=120.0):
+        lat_step = float(lat_step)
+        if lat_step <= 0.0:
+            raise ValueError("lat_step must be positive.")
+        solver_max_cpu_time = float(solver_max_cpu_time)
+        lat_values = np.arange(-90.0, 90.0 + 1.0e-9, lat_step, dtype=float)
+        rows = []
+
+        for lat in lat_values:
+            cfg_i = copy.deepcopy(self.base_config)
+            env_cfg_i = copy.deepcopy(self.base_env_config)
+            env_cfg_i.launch_latitude = float(lat)
+            env_cfg_i.launch_longitude = 0.0
+            cfg_i.target_inclination = None
+
+            try:
+                with suppress_stdout():
+                    env_i = Environment(env_cfg_i)
+                    veh_i = Vehicle(cfg_i, env_i)
+                    _, v_launch = env_i.get_launch_site_state()
+                    res = solve_optimal_trajectory(
+                        cfg_i,
+                        veh_i,
+                        env_i,
+                        print_level=0,
+                        solver_max_cpu_time=solver_max_cpu_time,
+                    )
+                success = bool(res.get("success", False))
+                m_final = float(res["X3"][6, -1]) if success else np.nan
+                fuel_used = float(cfg_i.launch_mass - m_final) if success else np.nan
+                v_rot = float(np.linalg.norm(v_launch))
+            except Exception:
+                success = False
+                m_final = np.nan
+                fuel_used = np.nan
+                v_rot = np.nan
+
+            rows.append(
+                {
+                    "latitude_deg": float(lat),
+                    "fuel_consumed_kg": float(fuel_used),
+                    "final_mass_kg": float(m_final),
+                    "earth_rotation_speed_m_s": float(v_rot),
+                    "solver_success": int(success),
+                }
+            )
+            print(
+                f"  [Heatmap] lat={lat:6.1f} deg | success={int(success)} | "
+                f"fuel={fuel_used if np.isfinite(fuel_used) else np.nan:.2f} kg"
+            )
+
+        return rows
+
+    def _render_global_launch_cost_heatmap(self, rows, stem):
+        ordered = sorted(rows, key=lambda row: float(row["latitude_deg"]))
+        lat_values = np.array([float(row["latitude_deg"]) for row in ordered], dtype=float)
+        fuel_values = np.array([float(row["fuel_consumed_kg"]) for row in ordered], dtype=float)
+        success_values = np.array([int(row.get("solver_success", 0)) for row in ordered], dtype=int)
+        lon_values = np.linspace(-180.0, 180.0, 73, dtype=float)
+
+        if lat_values.size == 0 or fuel_values.size == 0:
+            return False
+
+        fuel_lat = fuel_values.copy()
+        valid_success = np.isfinite(fuel_lat) & (success_values == 1)
+        if not np.any(valid_success):
+            return False
+        if np.any(~valid_success):
+            fuel_lat[~valid_success] = np.nan
+
+        lon_grid, lat_grid = np.meshgrid(lon_values, lat_values)
+        fuel_grid = np.repeat(fuel_lat[:, None], len(lon_values), axis=1)
+        rad_lat = np.radians(lat_grid)
+        rad_lon = np.radians(lon_grid)
+        x = np.cos(rad_lat) * np.cos(rad_lon)
+        y = np.cos(rad_lat) * np.sin(rad_lon)
+        z = np.sin(rad_lat)
+
+        norm = Normalize(vmin=float(np.nanmin(fuel_grid)), vmax=float(np.nanmax(fuel_grid)))
+        cmap = plt.get_cmap("cividis")
+        filled = np.nan_to_num(fuel_grid, nan=float(np.nanmax(fuel_grid)))
+        colors = cmap(norm(filled))
+        if np.any(~np.isfinite(fuel_grid)):
+            colors[~np.isfinite(fuel_grid)] = np.array([0.72, 0.72, 0.72, 1.0], dtype=float)
+
+        fig = plt.figure(figsize=(7.0, 6.2), layout="constrained")
+        ax = fig.add_subplot(111, projection="3d")
+        ax.plot_surface(
+            x,
+            y,
+            z,
+            facecolors=colors,
+            rstride=1,
+            cstride=1,
+            linewidth=0.0,
+            antialiased=True,
+            shade=False,
+        )
+
+        phi = np.linspace(0.0, 2.0 * np.pi, 240)
+        ax.plot(np.cos(phi), np.sin(phi), np.zeros_like(phi), color="white", alpha=0.35, linewidth=0.7)
+        mer = np.linspace(-np.pi / 2.0, np.pi / 2.0, 160)
+        ax.plot(np.cos(mer), np.zeros_like(mer), np.sin(mer), color="white", alpha=0.25, linewidth=0.6)
+
+        best_idx = int(np.nanargmin(fuel_values[valid_success]))
+        best_lat = float(lat_values[valid_success][best_idx])
+        best_lat_rad = np.radians(best_lat)
+        ax.scatter(
+            [np.cos(best_lat_rad)],
+            [0.0],
+            [np.sin(best_lat_rad)],
+            color="black",
+            s=18,
+            depthshade=False,
+        )
+
+        mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+        mappable.set_array([])
+        cbar = fig.colorbar(mappable, ax=ax, fraction=0.045, pad=0.04)
+        cbar.set_label("Fuel consumed (kg)")
+        ax.view_init(elev=18.0, azim=-48.0)
+        ax.set_box_aspect((1, 1, 1))
+        ax.set_axis_off()
+
+        self._finalize_figure(fig, stem)
+        return True
+
     def analyze_interval_replay_audit(self, max_workers=None):
         debug._print_sub_header("Interval Replay Audit")
         opt_res = self._get_baseline_opt_res()
@@ -2021,6 +3989,22 @@ class ReliabilitySuite:
                     finite_max.append(float(np.nanmax(arr)))
             return float(max(finite_max)) if finite_max else np.nan
 
+        total_intervals = int(sum(len(s[1]) for s in phase_series))
+
+        def _series_limit_counts(values, limit):
+            exceedances = 0
+            finite_count = 0
+            for arr in values:
+                arr = np.asarray(arr, dtype=float)
+                if arr.size == 0:
+                    continue
+                finite_mask = np.isfinite(arr)
+                finite_count += int(np.count_nonzero(finite_mask))
+                if np.any(finite_mask):
+                    exceedances += int(np.count_nonzero(arr[finite_mask] > limit))
+            missing_count = max(total_intervals - finite_count, 0)
+            return exceedances, missing_count
+
         max_pos = _series_max([s[1] for s in phase_series])
         max_vel = _series_max([s[2] for s in phase_series])
         max_mass = _series_max([s[3] for s in phase_series])
@@ -2028,6 +4012,8 @@ class ReliabilitySuite:
         max_q_dense = _series_max([s[5] for s in phase_series])
         max_g_dense = _series_max([s[6] for s in phase_series])
         interval_failures = int(sum(int(np.size(s[7]) - np.count_nonzero(s[7])) for s in phase_series))
+        q_violations, q_missing = _series_limit_counts([s[5] for s in phase_series], float(self.base_config.max_q_limit))
+        g_violations, g_missing = _series_limit_counts([s[6] for s in phase_series], float(self.base_config.max_g_load))
 
         print(f"Max interval replay position error: {max_pos:.3e} m")
         print(f"Max interval replay velocity error: {max_vel:.3e} m/s")
@@ -2036,10 +4022,25 @@ class ReliabilitySuite:
         print(f"Max dense-sampled Q during audit:   {max_q_dense/1000.0:.3f} kPa")
         print(f"Max dense-sampled g during audit:   {max_g_dense:.3f} g")
         print(f"Interval replay solver failures:    {interval_failures}")
-        if interval_failures == 0 and np.isfinite(max_rel) and max_rel < 1e-6:
+        print(f"Dense replay Q violations:          {q_violations}")
+        print(f"Dense replay g violations:          {g_violations}")
+        if q_missing > 0 or g_missing > 0:
+            print(f"Dense replay samples missing:       q={q_missing}, g={g_missing}")
+        if (
+            interval_failures == 0
+            and q_violations == 0
+            and g_violations == 0
+            and q_missing == 0
+            and g_missing == 0
+            and np.isfinite(max_rel)
+            and max_rel < 1e-6
+        ):
             print(f">>> {debug.Style.GREEN}PASS: Interval replay mismatches stay small under an independent solver.{debug.Style.RESET}")
         else:
-            print(f">>> {debug.Style.YELLOW}WARN: Interval replay audit found non-negligible mismatch or solver failures.{debug.Style.RESET}")
+            print(
+                f">>> {debug.Style.YELLOW}WARN: Interval replay audit found non-negligible mismatch, "
+                f"solver failures, or dense replay path-limit violations.{debug.Style.RESET}"
+            )
 
         rows = []
         for phase_name, pos_s, vel_s, m_s, rel_s, q_s, g_s, ok_s in phase_series:
@@ -2068,7 +4069,6 @@ class ReliabilitySuite:
         eps = 1e-18
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 
-        total_intervals = int(sum(len(s[1]) for s in phase_series))
         offset = 0
         for phase_name, pos_s, vel_s, m_s, rel_s, q_s, g_s, ok_s in phase_series:
             idx = np.arange(offset, offset + len(pos_s))
@@ -2085,7 +4085,7 @@ class ReliabilitySuite:
         ax1.grid(True, which="both", ls="-", alpha=0.3)
 
         ax2.axhline(1e-6, color="tab:orange", linestyle="--", alpha=0.8, label="Reference threshold (1e-6)")
-        ax2.set_xlabel("Global Interval Index")
+        ax2.set_xlabel("Node interval index")
         ax2.set_ylabel("Max relative error (-)")
         ax2.legend(loc="best")
         ax2.grid(True, which="both", ls="-", alpha=0.3)
@@ -2599,1267 +4599,23 @@ class ReliabilitySuite:
             "pass_flag": overall_pass,
         }
 
-    # 17. MONTE CARLO PRECISION TARGET
-    def analyze_monte_carlo_precision_target(
-        self,
-        target_half_width=0.04,
-        target_relative_half_width=0.60,
-        min_samples=80,
-        max_samples=400,
-        batch_size=20,
-        max_workers=None,
-    ):
-        debug._print_sub_header("17. Monte Carlo Precision Target (CI-Based Stop)")
-        print("Running Monte Carlo until Wilson 95% CI half-width reaches target precision.")
-
-        if min_samples < 1 or max_samples < min_samples or batch_size < 1:
-            print("  Invalid parameters for precision-target Monte Carlo. Skipping.")
-            return
-
-        opt_res = self._get_baseline_opt_res()
-        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
-        if max_workers is None:
-            max_workers = min(4, max(1, os.cpu_count() or 1))
-        max_workers = max(1, int(max_workers))
-
-        successes = 0
-        path_failures = 0
-        orbit_errors_all = []
-        mission_flags_all = []
-        n = 0
-        batch_rows = []
-        stop_reason = "max_samples"
-        t0 = time.time()
-        parallel_active = bool(max_workers > 1 and batch_size > 1)
-        executor = None
-        if parallel_active:
-            try:
-                executor = ProcessPoolExecutor(max_workers=max_workers)
-                print(f"  Parallel execution enabled (workers={max_workers}).")
-            except Exception:
-                parallel_active = False
-                executor = None
-                print("  Parallel execution unavailable; using serial mode.")
-        if not parallel_active:
-            print("  Serial execution mode.")
-
-        try:
-            while n < max_samples:
-                n_batch = min(batch_size, max_samples - n)
-                draws = [
-                    self._draw_uncertainty_multipliers(rng, model="gaussian_independent")
-                    for _ in range(n_batch)
-                ]
-                batch_successes = 0
-                batch_path_failures = 0
-
-                if parallel_active and executor is not None:
-                    n_chunks = min(max_workers, n_batch)
-                    chunk_size = int(np.ceil(n_batch / max(n_chunks, 1)))
-                    fut_to_chunk_size = {}
-                    for i0 in range(0, n_batch, chunk_size):
-                        chunk = draws[i0:i0 + chunk_size]
-                        payload = {
-                            "opt_res": opt_res,
-                            "base_cfg": self.base_config,
-                            "base_env_cfg": self.base_env_config,
-                            "q_slack_pa": float(self.path_q_slack_pa),
-                            "g_slack": float(self.path_g_slack),
-                            "samples": chunk,
-                        }
-                        fut = executor.submit(_run_monte_carlo_batch_worker, payload)
-                        fut_to_chunk_size[fut] = len(chunk)
-
-                    parallel_ok = True
-                    parallel_successes = 0
-                    parallel_path_failures = 0
-                    parallel_orbit_errors = []
-                    parallel_mission_flags = []
-                    completed_batch_samples = 0
-                    for fut in as_completed(fut_to_chunk_size):
-                        completed_batch_samples += int(fut_to_chunk_size[fut])
-                        self._print_parallel_progress(
-                            "Monte Carlo samples (toward max)",
-                            n + completed_batch_samples,
-                            max_samples,
-                        )
-                        try:
-                            res = fut.result()
-                            parallel_successes += int(res.get("successes", 0))
-                            parallel_path_failures += int(res.get("path_failures", 0))
-                            batch_orbit_errors = res.get("orbit_errors", [])
-                            batch_mission_flags = res.get("mission_flags", [])
-                            parallel_orbit_errors.extend([float(v) if np.isfinite(v) else np.nan for v in batch_orbit_errors])
-                            parallel_mission_flags.extend([int(v) for v in batch_mission_flags])
-                        except Exception:
-                            parallel_ok = False
-                            break
-
-                    if not parallel_ok:
-                        print("  Worker failure during Monte Carlo batch; switching to serial mode.")
-                        parallel_active = False
-                        if executor is not None:
-                            executor.shutdown(wait=True)
-                            executor = None
-                        batch_successes = 0
-                        batch_path_failures = 0
-                        for thrust_mult, isp_mult, dens_mult in draws:
-                            result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
-                            batch_successes += int(result["strict_path_ok"])
-                            batch_path_failures += int(
-                                bool(result["terminal"].get("strict_ok", False)) and not bool(result["strict_path_ok"])
-                            )
-                            orbit_err = normalized_orbit_error(result["terminal"])
-                            orbit_errors_all.append(float(orbit_err) if np.isfinite(orbit_err) else np.nan)
-                            mission_flags_all.append(int(result["strict_path_ok"]))
-                    else:
-                        batch_successes = parallel_successes
-                        batch_path_failures = parallel_path_failures
-                        orbit_errors_all.extend(parallel_orbit_errors)
-                        mission_flags_all.extend(parallel_mission_flags)
-                else:
-                    for thrust_mult, isp_mult, dens_mult in draws:
-                        result = self._simulate_uncertainty_case(opt_res, thrust_mult, isp_mult, dens_mult)
-                        batch_successes += int(result["strict_path_ok"])
-                        batch_path_failures += int(
-                            bool(result["terminal"].get("strict_ok", False)) and not bool(result["strict_path_ok"])
-                        )
-                        orbit_err = normalized_orbit_error(result["terminal"])
-                        orbit_errors_all.append(float(orbit_err) if np.isfinite(orbit_err) else np.nan)
-                        mission_flags_all.append(int(result["strict_path_ok"]))
-
-                successes += batch_successes
-                path_failures += batch_path_failures
-                n += n_batch
-
-                lo, hi = wilson_interval(successes, n, z=1.96)
-                p = successes / n
-                half_width = 0.5 * (hi - lo)
-                rel_half_width = half_width / max(p, 1.0 / max(n, 1))
-                finite_orbit = np.array([x for x in orbit_errors_all if np.isfinite(x)], dtype=float)
-                if finite_orbit.size > 0:
-                    orbit_p50 = float(np.percentile(finite_orbit, 50.0))
-                    orbit_p90 = float(np.percentile(finite_orbit, 90.0))
-                    orbit_p95 = float(np.percentile(finite_orbit, 95.0))
-                    orbit_feasible_frac = float(np.mean(finite_orbit <= 1.0))
-                else:
-                    orbit_p50 = np.nan
-                    orbit_p90 = np.nan
-                    orbit_p95 = np.nan
-                    orbit_feasible_frac = np.nan
-
-                batch_rows.append(
-                    (
-                        n, p, lo, hi, half_width, rel_half_width,
-                        orbit_p50, orbit_p90, orbit_p95, orbit_feasible_frac
-                    )
-                )
-                print(
-                    f"  N={n:4d} | Success={p*100:6.2f}% | CI=[{lo*100:5.2f}, {hi*100:5.2f}] | "
-                    f"Half-width={half_width*100:5.2f}% | Relative={rel_half_width*100:5.1f}% | "
-                    f"OrbitErr p90={orbit_p90:6.2f} | Feasible<=1: {orbit_feasible_frac*100 if np.isfinite(orbit_feasible_frac) else np.nan:5.1f}%"
-                )
-
-                abs_ok = half_width <= target_half_width
-                rel_ok = True
-                if target_relative_half_width is not None:
-                    rel_ok = rel_half_width <= float(target_relative_half_width)
-                if n >= min_samples and abs_ok and rel_ok:
-                    stop_reason = "target_precision"
-                    break
-        finally:
-            if executor is not None:
-                executor.shutdown(wait=True)
-
-        elapsed = time.time() - t0
-        final_n, final_p, final_lo, final_hi, final_half, final_rel_half, final_orbit_p50, final_orbit_p90, final_orbit_p95, final_orbit_feas = batch_rows[-1]
-        print(f"  Stop reason: {stop_reason}")
-        print(
-            f"  Final: N={final_n}, Success={final_p*100:.2f}%, "
-            f"CI=[{final_lo*100:.2f}, {final_hi*100:.2f}], "
-            f"Half-width={final_half*100:.2f}% ({final_rel_half*100:.1f}% relative)"
-        )
-        print(
-            f"  Orbit-error quantiles: p50={final_orbit_p50:.3f}, "
-            f"p90={final_orbit_p90:.3f}, p95={final_orbit_p95:.3f}, "
-            f"feasible(error<=1)={final_orbit_feas*100 if np.isfinite(final_orbit_feas) else np.nan:.1f}%"
-        )
-        p_eff = float(np.clip(final_p, 1e-9, 1.0 - 1e-9))
-        n_req_abs = int(np.ceil((1.96 ** 2) * p_eff * (1.0 - p_eff) / (target_half_width ** 2)))
-        n_req_rel = np.nan
-        if target_relative_half_width is not None:
-            n_req_rel = int(np.ceil((1.96 ** 2) * (1.0 - p_eff) / ((target_relative_half_width ** 2) * p_eff)))
-        n_req = max(min_samples, n_req_abs, int(n_req_rel) if np.isfinite(n_req_rel) else min_samples)
-        print(f"  Path-violation reclassifications: {path_failures}")
-        print(f"  Runtime: {elapsed:.1f}s")
-        print(
-            f"  Approx. required N from current success rate: "
-            f"abs~{n_req_abs}, rel~{n_req_rel if np.isfinite(n_req_rel) else 'n/a'}, combined~{n_req}"
-        )
-        if stop_reason != "target_precision":
-            print(
-                f">>> {debug.Style.YELLOW}WARN: Precision targets not met before max samples "
-                f"(N={max_samples}). Consider increasing max_samples toward ~{n_req}.{debug.Style.RESET}"
-            )
-
-        self._save_table(
-            "monte_carlo_precision_target",
-            [
-                "n", "success_rate", "wilson_low_95", "wilson_high_95",
-                "ci_half_width_95", "relative_half_width", "target_half_width",
-                "target_relative_half_width",
-                "orbit_error_p50", "orbit_error_p90", "orbit_error_p95",
-                "orbit_feasible_fraction_error_leq_1"
-            ],
-            [
-                (
-                    row[0], row[1], row[2], row[3], row[4], row[5],
-                    target_half_width,
-                    np.nan if target_relative_half_width is None else target_relative_half_width,
-                    row[6], row[7], row[8], row[9]
-                )
-                for row in batch_rows
-            ]
-        )
-
-        self._save_table(
-            "monte_carlo_orbit_error_samples",
-            ["sample_index", "mission_success", "normalized_orbit_error"],
-            [
-                (i + 1, mission_flags_all[i], orbit_errors_all[i])
-                for i in range(min(len(orbit_errors_all), len(mission_flags_all)))
-            ],
-        )
-
-        fig, (ax1, ax3) = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
-        n_vals = np.array([r[0] for r in batch_rows], dtype=int)
-        p_vals = np.array([r[1] for r in batch_rows], dtype=float) * 100.0
-        lo_vals = np.array([r[2] for r in batch_rows], dtype=float) * 100.0
-        hi_vals = np.array([r[3] for r in batch_rows], dtype=float) * 100.0
-        hw_vals = np.array([r[4] for r in batch_rows], dtype=float) * 100.0
-        rel_hw_vals = np.array([r[5] for r in batch_rows], dtype=float) * 100.0
-        orbit_p50_vals = np.array([r[6] for r in batch_rows], dtype=float)
-        orbit_p90_vals = np.array([r[7] for r in batch_rows], dtype=float)
-        orbit_p95_vals = np.array([r[8] for r in batch_rows], dtype=float)
-        orbit_feas_vals = np.array([r[9] for r in batch_rows], dtype=float) * 100.0
-
-        ax1.plot(n_vals, p_vals, "b-o", label="Success rate")
-        ax1.fill_between(n_vals, lo_vals, hi_vals, color="b", alpha=0.15, label="Wilson 95% CI")
-        ax1.set_xlabel("Samples N")
-        ax1.set_ylabel("Success Rate (%)", color="b")
-        ax1.tick_params(axis="y", labelcolor="b")
-        ax1.grid(True, alpha=0.3)
-
-        ax2 = ax1.twinx()
-        ax2.plot(n_vals, hw_vals, "r-s", label="CI half-width")
-        ax2.axhline(target_half_width * 100.0, color="r", linestyle="--", alpha=0.7, label="Target half-width")
-        if target_relative_half_width is not None:
-            ax2.plot(n_vals, rel_hw_vals, color="tab:purple", marker="^", linestyle="-.", label="Relative half-width")
-            ax2.axhline(
-                target_relative_half_width * 100.0,
-                color="tab:purple",
-                linestyle=":",
-                alpha=0.7,
-                label="Target relative half-width"
-            )
-        ax2.set_ylabel("CI Half-Width (%)", color="r")
-        ax2.tick_params(axis="y", labelcolor="r")
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc="best")
-        ax1.set_title("Monte Carlo Precision Target (Adaptive Sample Size)")
-
-        finite_mask = np.isfinite(orbit_p50_vals) & np.isfinite(orbit_p90_vals) & np.isfinite(orbit_p95_vals)
-        if np.any(finite_mask):
-            ax3.plot(n_vals[finite_mask], orbit_p50_vals[finite_mask], "o-", color="tab:green", label="Orbit error p50")
-            ax3.plot(n_vals[finite_mask], orbit_p90_vals[finite_mask], "s-", color="tab:orange", label="Orbit error p90")
-            ax3.plot(n_vals[finite_mask], orbit_p95_vals[finite_mask], "^-", color="tab:red", label="Orbit error p95")
-            ax3.axhline(1.0, color="k", linestyle="--", alpha=0.7, label="Feasible threshold (=1)")
-        else:
-            ax3.text(0.5, 0.5, "No finite orbit-error values", transform=ax3.transAxes, ha="center", va="center")
-        ax3.set_ylabel("Normalized Orbit Error (-)")
-        ax3.grid(True, alpha=0.3)
-
-        ax4 = ax3.twinx()
-        if np.any(np.isfinite(orbit_feas_vals)):
-            ax4.plot(n_vals[np.isfinite(orbit_feas_vals)], orbit_feas_vals[np.isfinite(orbit_feas_vals)], "d-.", color="tab:purple", label="Feasible fraction (error<=1)")
-        ax4.set_ylabel("Orbit-Feasible Fraction (%)", color="tab:purple")
-        ax4.tick_params(axis="y", labelcolor="tab:purple")
-        lines3, labels3 = ax3.get_legend_handles_labels()
-        lines4, labels4 = ax4.get_legend_handles_labels()
-        if len(lines3) > 0 or len(lines4) > 0:
-            ax3.legend(lines3 + lines4, labels3 + labels4, loc="best")
-
-        ax3.set_xlabel("Samples N")
-        self._finalize_figure(fig, "monte_carlo_precision_target")
-
-    # 19. Q2 UNCERTAINTY BUDGET (MINIMUM FUEL)
-    def analyze_q2_uncertainty_budget(self, parameter_samples=30, max_workers=None):
-        debug._print_sub_header("19. Q2 Uncertainty Budget (Minimum Fuel)")
-        print("Quantifying minimum-fuel uncertainty split: numerical vs parameter sources.")
-
-        opt_nom = self._get_baseline_opt_res()
-        m_final_nom = self._extract_final_mass_from_opt(opt_nom)
-        if not np.isfinite(m_final_nom):
-            print("  Baseline optimization did not return a valid final mass. Skipping.")
-            return
-        fuel_nominal = float(self.base_config.launch_mass - m_final_nom)
-        if max_workers is None:
-            max_workers = min(4, max(1, os.cpu_count() or 1))
-        max_workers = max(1, int(max_workers))
-
-        # --- A) Numerical component 1: transcription/grid sensitivity of objective ---
-        node_counts = [120, 130, 140]
-        grid_rows = []
-        grid_fuels = []
-
-        print("\n  [A] Grid sensitivity on minimum fuel:")
-        print(f"  {'Nodes':<6} | {'Status':<10} | {'Min Fuel (kg)':<15} | {'Runtime (s)':<10}")
-        print("  " + "-" * 52)
-        grid_jobs = [
-            {"num_nodes": int(N), "base_cfg": self.base_config, "base_env_cfg": self.base_env_config}
-            for N in node_counts
-        ]
-        grid_results = {}
-        grid_parallel = bool(max_workers > 1 and len(grid_jobs) > 1)
-        if grid_parallel:
-            print(f"  [A] Parallel execution enabled (workers={max_workers}).")
-            try:
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    fut_to_n = {executor.submit(_run_q2_grid_point_worker, payload): int(payload["num_nodes"]) for payload in grid_jobs}
-                    parallel_ok = True
-                    total_grid_jobs = len(fut_to_n)
-                    done_grid_jobs = 0
-                    for fut in as_completed(fut_to_n):
-                        done_grid_jobs += 1
-                        self._print_parallel_progress("[A] Grid jobs", done_grid_jobs, total_grid_jobs)
-                        n_key = fut_to_n[fut]
-                        try:
-                            grid_results[n_key] = fut.result()
-                        except Exception:
-                            parallel_ok = False
-                            break
-                if not parallel_ok:
-                    print("  [A] Worker failure; switching to serial mode.")
-                    grid_parallel = False
-                    grid_results = {}
-            except Exception:
-                print("  [A] Parallel execution unavailable; switching to serial mode.")
-                grid_parallel = False
-                grid_results = {}
-        if not grid_parallel:
-            print("  [A] Serial execution mode.")
-            for payload in grid_jobs:
-                n_key = int(payload["num_nodes"])
-                grid_results[n_key] = _run_q2_grid_point_worker(payload)
-
-        for N in node_counts:
-            r = grid_results.get(int(N), None)
-            if r is None:
-                r = {
-                    "nodes": int(N),
-                    "solver_success": 0,
-                    "status": "Error",
-                    "minimum_fuel_kg": np.nan,
-                    "runtime_s": np.nan,
-                }
-            ok = int(r["solver_success"])
-            status = str(r["status"])
-            fuel_i = float(r["minimum_fuel_kg"]) if np.isfinite(r["minimum_fuel_kg"]) else np.nan
-            dt = float(r["runtime_s"]) if np.isfinite(r["runtime_s"]) else np.nan
-            if np.isfinite(fuel_i):
-                grid_fuels.append(fuel_i)
-            grid_rows.append((int(N), ok, status, fuel_i, dt))
-            print(f"  {int(N):<6d} | {status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}")
-
-        sigma_grid = float(np.std(grid_fuels, ddof=1)) if len(grid_fuels) >= 2 else np.nan
-
-        # --- B) Numerical component 2: integrator tolerance sensitivity in verification ---
-        integrator_tols = [
-            (1e-9, 1e-12),
-            (1e-10, 1e-13),
-            (1e-11, 1e-14),
-            (1e-12, 1e-14),
-        ]
-        integ_rows = []
-        integ_fuels = []
-
-        print("\n  [B] Integrator sensitivity on verified terminal fuel:")
-        print(f"  {'RTOL':<8} | {'ATOL':<8} | {'Status':<10} | {'Path':<6} | {'Fuel Used (kg)':<15}")
-        print("  " + "-" * 62)
-        integ_jobs = [
-            {
-                "rtol": float(rtol),
-                "atol": float(atol),
-                "opt_nom": opt_nom,
-                "base_cfg": self.base_config,
-                "base_env_cfg": self.base_env_config,
-                "q_slack_pa": float(self.path_q_slack_pa),
-                "g_slack": float(self.path_g_slack),
-            }
-            for rtol, atol in integrator_tols
-        ]
-        integ_results = {}
-        integ_parallel = bool(max_workers > 1 and len(integ_jobs) > 1)
-        if integ_parallel:
-            print(f"  [B] Parallel execution enabled (workers={max_workers}).")
-            try:
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    fut_to_key = {
-                        executor.submit(_run_q2_integrator_point_worker, payload): (float(payload["rtol"]), float(payload["atol"]))
-                        for payload in integ_jobs
-                    }
-                    parallel_ok = True
-                    total_integ_jobs = len(fut_to_key)
-                    done_integ_jobs = 0
-                    for fut in as_completed(fut_to_key):
-                        done_integ_jobs += 1
-                        self._print_parallel_progress("[B] Integrator jobs", done_integ_jobs, total_integ_jobs)
-                        key = fut_to_key[fut]
-                        try:
-                            integ_results[key] = fut.result()
-                        except Exception:
-                            parallel_ok = False
-                            break
-                if not parallel_ok:
-                    print("  [B] Worker failure; switching to serial mode.")
-                    integ_parallel = False
-                    integ_results = {}
-            except Exception:
-                print("  [B] Parallel execution unavailable; switching to serial mode.")
-                integ_parallel = False
-                integ_results = {}
-        if not integ_parallel:
-            print("  [B] Serial execution mode.")
-            for payload in integ_jobs:
-                key = (float(payload["rtol"]), float(payload["atol"]))
-                integ_results[key] = _run_q2_integrator_point_worker(payload)
-
-        for rtol, atol in integrator_tols:
-            key = (float(rtol), float(atol))
-            r = integ_results.get(key, None)
-            if r is None:
-                r = {
-                    "rtol": float(rtol),
-                    "atol": float(atol),
-                    "terminal_valid": 0,
-                    "strict_ok": 0,
-                    "strict_path_ok": 0,
-                    "q_ok": 0,
-                    "g_ok": 0,
-                    "status": "SIM_ERROR",
-                    "fuel_used_kg": np.nan,
-                }
-            status = str(r["status"])
-            strict_path_i = int(r["strict_path_ok"])
-            fuel_sim = float(r["fuel_used_kg"]) if np.isfinite(r["fuel_used_kg"]) else np.nan
-            integ_rows.append((
-                float(rtol), float(atol),
-                int(r["terminal_valid"]),
-                int(r["strict_ok"]),
-                strict_path_i,
-                int(r["q_ok"]),
-                int(r["g_ok"]),
-                status,
-                fuel_sim,
-            ))
-            if np.isfinite(fuel_sim):
-                integ_fuels.append(fuel_sim)
-            print(f"  {rtol:<8.0e} | {atol:<8.0e} | {status:<10} | {strict_path_i:<6d} | {fuel_sim:<15.3f}")
-
-        sigma_integrator = float(np.std(integ_fuels, ddof=1)) if len(integ_fuels) >= 2 else np.nan
-        fuel_sim_nom = integ_rows[0][8] if len(integ_rows) > 0 else np.nan
-        bias_opt_vs_sim = abs(fuel_nominal - fuel_sim_nom) if np.isfinite(fuel_sim_nom) else np.nan
-
-        sigma_numerical = self._rss([sigma_grid, sigma_integrator, bias_opt_vs_sim])
-
-        # --- C) Parameter uncertainty on the minimum-fuel estimate ---
-        n_param = max(30, int(parameter_samples))
-        rng = np.random.default_rng(self.seed_sequence.spawn(1)[0])
-        param_rows = []
-        param_fuels_all = []
-        param_fuels_feasible = []
-        print(f"\n  [C] Parameter uncertainty via re-optimization (N={n_param}):")
-        print(
-            f"  {'Run':<4} | {'Thrust':<7} | {'ISP':<7} | {'Density':<7} | "
-            f"{'Status':<10} | {'Min Fuel (kg)':<15} | {'Runtime (s)':<10}"
-        )
-        print("  " + "-" * 88)
-        param_draws = [self._draw_uncertainty_multipliers(rng, model="gaussian_independent") for _ in range(n_param)]
-        param_jobs = []
-        for i, draw in enumerate(param_draws):
-            thrust_mult, isp_mult, dens_mult = draw
-            param_jobs.append(
-                {
-                    "run_index": int(i),
-                    "thrust_multiplier": float(thrust_mult),
-                    "isp_multiplier": float(isp_mult),
-                    "density_multiplier": float(dens_mult),
-                    "base_cfg": self.base_config,
-                    "base_env_cfg": self.base_env_config,
-                    "q_slack_pa": float(self.path_q_slack_pa),
-                    "g_slack": float(self.path_g_slack),
-                }
-            )
-
-        param_results = {}
-        param_parallel = bool(max_workers > 1 and len(param_jobs) > 1)
-        if param_parallel:
-            print(f"  [C] Parallel execution enabled (workers={max_workers}).")
-            try:
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    fut_to_i = {
-                        executor.submit(_run_q2_parameter_sample_worker, payload): int(payload["run_index"])
-                        for payload in param_jobs
-                    }
-                    parallel_ok = True
-                    total_param_jobs = len(fut_to_i)
-                    done_param_jobs = 0
-                    for fut in as_completed(fut_to_i):
-                        done_param_jobs += 1
-                        self._print_parallel_progress("[C] Parameter samples", done_param_jobs, total_param_jobs)
-                        idx = fut_to_i[fut]
-                        try:
-                            param_results[idx] = fut.result()
-                        except Exception:
-                            parallel_ok = False
-                            break
-                if not parallel_ok:
-                    print("  [C] Worker failure; switching to serial mode.")
-                    param_parallel = False
-                    param_results = {}
-            except Exception:
-                print("  [C] Parallel execution unavailable; switching to serial mode.")
-                param_parallel = False
-                param_results = {}
-        if not param_parallel:
-            print("  [C] Serial execution mode.")
-            for payload in param_jobs:
-                idx = int(payload["run_index"])
-                param_results[idx] = _run_q2_parameter_sample_worker(payload)
-
-        for i in range(n_param):
-            r = param_results.get(i, None)
-            if r is None:
-                thrust_mult, isp_mult, dens_mult = param_draws[i]
-                r = {
-                    "run": i + 1,
-                    "thrust_multiplier": float(thrust_mult),
-                    "isp_multiplier": float(isp_mult),
-                    "density_multiplier": float(dens_mult),
-                    "optimizer_success": 0,
-                    "strict_ok": 0,
-                    "strict_path_ok": 0,
-                    "q_ok": 0,
-                    "g_ok": 0,
-                    "status": "ERROR",
-                    "minimum_fuel_kg": np.nan,
-                    "runtime_s": np.nan,
-                }
-            run_i = int(r["run"])
-            thrust_mult = float(r["thrust_multiplier"])
-            isp_mult = float(r["isp_multiplier"])
-            dens_mult = float(r["density_multiplier"])
-            opt_success = int(r["optimizer_success"])
-            strict_ok = int(r["strict_ok"])
-            strict_path_ok = int(r["strict_path_ok"])
-            q_ok = int(r["q_ok"])
-            g_ok = int(r["g_ok"])
-            status = str(r["status"])
-            fuel_i = float(r["minimum_fuel_kg"]) if np.isfinite(r["minimum_fuel_kg"]) else np.nan
-            dt = float(r["runtime_s"]) if np.isfinite(r["runtime_s"]) else np.nan
-
-            if opt_success and np.isfinite(fuel_i):
-                param_fuels_all.append(fuel_i)
-            if opt_success and strict_path_ok and np.isfinite(fuel_i):
-                param_fuels_feasible.append(fuel_i)
-
-            param_rows.append((
-                run_i,
-                thrust_mult,
-                isp_mult,
-                dens_mult,
-                opt_success,
-                strict_ok,
-                strict_path_ok,
-                q_ok,
-                g_ok,
-                status,
-                fuel_i,
-                dt,
-            ))
-            print(
-                f"  {run_i:<4d} | {thrust_mult:<7.3f} | {isp_mult:<7.3f} | {dens_mult:<7.3f} | "
-                f"{status:<10} | {fuel_i:<15.3f} | {dt:<10.2f}"
-            )
-
-        sigma_parameter = float(np.std(param_fuels_all, ddof=1)) if len(param_fuels_all) >= 2 else np.nan
-        param_mean = float(np.mean(param_fuels_all)) if len(param_fuels_all) > 0 else np.nan
-        param_p025 = float(np.percentile(param_fuels_all, 2.5)) if len(param_fuels_all) > 0 else np.nan
-        param_p975 = float(np.percentile(param_fuels_all, 97.5)) if len(param_fuels_all) > 0 else np.nan
-        valid_param_rate = float(len(param_fuels_all) / max(n_param, 1))
-
-        sigma_parameter_feasible = float(np.std(param_fuels_feasible, ddof=1)) if len(param_fuels_feasible) >= 2 else np.nan
-        feasible_param_rate = float(len(param_fuels_feasible) / max(n_param, 1))
-        sigma_param_ci_low = np.nan
-        sigma_param_ci_high = np.nan
-        if len(param_fuels_all) >= 8:
-            rng_boot = np.random.default_rng(self.seed_sequence.spawn(1)[0])
-            arr = np.array(param_fuels_all, dtype=float)
-            boots = np.zeros(1200, dtype=float)
-            for b in range(len(boots)):
-                idx = rng_boot.integers(0, len(arr), size=len(arr))
-                boots[b] = np.std(arr[idx], ddof=1)
-            sigma_param_ci_low = float(np.percentile(boots, 2.5))
-            sigma_param_ci_high = float(np.percentile(boots, 97.5))
-
-        sigma_param_feasible_ci_low = np.nan
-        sigma_param_feasible_ci_high = np.nan
-        if len(param_fuels_feasible) >= 8:
-            rng_boot = np.random.default_rng(self.seed_sequence.spawn(1)[0])
-            arr_f = np.array(param_fuels_feasible, dtype=float)
-            boots_f = np.zeros(1200, dtype=float)
-            for b in range(len(boots_f)):
-                idx = rng_boot.integers(0, len(arr_f), size=len(arr_f))
-                boots_f[b] = np.std(arr_f[idx], ddof=1)
-            sigma_param_feasible_ci_low = float(np.percentile(boots_f, 2.5))
-            sigma_param_feasible_ci_high = float(np.percentile(boots_f, 97.5))
-
-        # --- D) Total uncertainty and contribution split ---
-        sigma_total = self._rss([sigma_numerical, sigma_parameter])
-        ci95_half_width = 1.96 * sigma_total if np.isfinite(sigma_total) else np.nan
-        sigma_total_ci_low = self._rss([sigma_numerical, sigma_param_ci_low]) if np.isfinite(sigma_param_ci_low) else np.nan
-        sigma_total_ci_high = self._rss([sigma_numerical, sigma_param_ci_high]) if np.isfinite(sigma_param_ci_high) else np.nan
-
-        if np.isfinite(sigma_total) and sigma_total > 0.0:
-            var_total = sigma_total * sigma_total
-            num_var = sigma_numerical * sigma_numerical if np.isfinite(sigma_numerical) else 0.0
-            param_var = sigma_parameter * sigma_parameter if np.isfinite(sigma_parameter) else 0.0
-            numerical_share_pct = 100.0 * num_var / var_total
-            parameter_share_pct = 100.0 * param_var / var_total
-        else:
-            numerical_share_pct = np.nan
-            parameter_share_pct = np.nan
-
-        if np.isfinite(ci95_half_width) and ci95_half_width > 0.0:
-            rounding_step_kg = float(10.0 ** np.floor(np.log10(ci95_half_width)))
-            reported_uncertainty_kg = float(np.round(ci95_half_width / rounding_step_kg) * rounding_step_kg)
-            reported_fuel_kg = float(np.round(fuel_nominal / rounding_step_kg) * rounding_step_kg)
-        else:
-            rounding_step_kg = np.nan
-            reported_uncertainty_kg = np.nan
-            reported_fuel_kg = np.nan
-
-        print("\n  Q2 uncertainty budget summary (minimum fuel):")
-        print(f"    Baseline minimum fuel (nominal): {fuel_nominal:.3f} kg")
-        print(f"    Numerical sigma (kg):            {sigma_numerical:.3f}")
-        print(f"      - Grid sigma (kg):             {sigma_grid:.3f}")
-        print(f"      - Integrator sigma (kg):       {sigma_integrator:.3f}")
-        print(f"      - Opt-vs-sim bias (kg):        {bias_opt_vs_sim:.3f}")
-        print(f"    Parameter sigma (kg):            {sigma_parameter:.3f}")
-        if np.isfinite(sigma_param_ci_low) and np.isfinite(sigma_param_ci_high):
-            print(f"      - Parameter sigma 95% CI (kg): [{sigma_param_ci_low:.3f}, {sigma_param_ci_high:.3f}]")
-        print(f"    Feasible-only parameter sigma:   {sigma_parameter_feasible:.3f} kg")
-        if np.isfinite(sigma_param_feasible_ci_low) and np.isfinite(sigma_param_feasible_ci_high):
-            print(
-                f"      - Feasible-only sigma 95% CI:   "
-                f"[{sigma_param_feasible_ci_low:.3f}, {sigma_param_feasible_ci_high:.3f}] kg"
-            )
-        print(f"    Total sigma (kg):                {sigma_total:.3f}")
-        if np.isfinite(sigma_total_ci_low) and np.isfinite(sigma_total_ci_high):
-            print(f"      - Total sigma range from sigma_param CI (kg): [{sigma_total_ci_low:.3f}, {sigma_total_ci_high:.3f}]")
-        print(f"    95% half-width (kg):             {ci95_half_width:.3f}")
-        print(f"    Variance share numerical:        {numerical_share_pct:.1f}%")
-        print(f"    Variance share parameter:        {parameter_share_pct:.1f}%")
-        print(f"    Converged parameter solves:      {len(param_fuels_all)}/{n_param} ({100.0*valid_param_rate:.1f}%)")
-        print(f"    Feasible parameter solves:       {len(param_fuels_feasible)}/{n_param} ({100.0*feasible_param_rate:.1f}%)")
-        if np.isfinite(reported_fuel_kg) and np.isfinite(reported_uncertainty_kg):
-            print(
-                f"    Suggested report form:            "
-                f"{reported_fuel_kg:.0f} +/- {reported_uncertainty_kg:.0f} kg (95%)"
-            )
-
-        if len(param_fuels_all) < 20:
-            print(
-                f">>> {debug.Style.YELLOW}WARN: Too few converged parameter re-optimizations for a stable "
-                f"unconditional parameter-uncertainty estimate.{debug.Style.RESET}"
-            )
-        if len(param_fuels_feasible) < 20:
-            print(
-                f">>> {debug.Style.YELLOW}WARN: Feasible-only parameter subset is small; "
-                f"feasible-conditioned uncertainty is high-variance.{debug.Style.RESET}"
-            )
-
-        self._save_table(
-            "q2_uncertainty_grid",
-            ["nodes", "solver_success", "status", "minimum_fuel_kg", "runtime_s"],
-            grid_rows
-        )
-        self._save_table(
-            "q2_uncertainty_integrator",
-            [
-                "rtol", "atol", "terminal_valid", "strict_ok",
-                "strict_path_ok", "q_ok", "g_ok", "status", "fuel_used_kg"
-            ],
-            integ_rows
-        )
-        self._save_table(
-            "q2_uncertainty_parameter_samples",
-            [
-                "run", "thrust_multiplier", "isp_multiplier", "density_multiplier",
-                "optimizer_success", "strict_ok", "strict_path_ok", "q_ok", "g_ok",
-                "status", "minimum_fuel_kg", "runtime_s"
-            ],
-            param_rows
-        )
-        self._save_table(
-            "q2_uncertainty_budget",
-            ["metric", "value"],
-            [
-                ("baseline_minimum_fuel_kg", fuel_nominal),
-                ("sigma_grid_kg", sigma_grid),
-                ("sigma_integrator_kg", sigma_integrator),
-                ("bias_opt_vs_sim_kg", bias_opt_vs_sim),
-                ("sigma_numerical_kg", sigma_numerical),
-                ("sigma_parameter_kg", sigma_parameter),
-                ("sigma_parameter_ci_low_95_kg", sigma_param_ci_low),
-                ("sigma_parameter_ci_high_95_kg", sigma_param_ci_high),
-                ("sigma_parameter_feasible_only_kg", sigma_parameter_feasible),
-                ("sigma_parameter_feasible_only_ci_low_95_kg", sigma_param_feasible_ci_low),
-                ("sigma_parameter_feasible_only_ci_high_95_kg", sigma_param_feasible_ci_high),
-                ("sigma_total_kg", sigma_total),
-                ("sigma_total_from_sigma_param_ci_low_kg", sigma_total_ci_low),
-                ("sigma_total_from_sigma_param_ci_high_kg", sigma_total_ci_high),
-                ("ci95_half_width_kg", ci95_half_width),
-                ("numerical_variance_share_percent", numerical_share_pct),
-                ("parameter_variance_share_percent", parameter_share_pct),
-                ("parameter_converged_rate", valid_param_rate),
-                ("parameter_feasible_rate", feasible_param_rate),
-                ("parameter_mean_minimum_fuel_kg", param_mean),
-                ("parameter_p2p5_minimum_fuel_kg", param_p025),
-                ("parameter_p97p5_minimum_fuel_kg", param_p975),
-                ("report_rounding_step_kg", rounding_step_kg),
-                ("report_value_kg", reported_fuel_kg),
-                ("report_uncertainty_kg", reported_uncertainty_kg),
-            ]
-        )
-
-        fig, axes = plt.subplots(2, 2, figsize=(13, 9))
-        ax1, ax2, ax3, ax4 = axes.flatten()
-
-        # Grid objective sensitivity.
-        grid_nodes_plot = np.array([r[0] for r in grid_rows if np.isfinite(r[3])], dtype=float)
-        grid_fuels_plot = np.array([r[3] for r in grid_rows if np.isfinite(r[3])], dtype=float)
-        if len(grid_nodes_plot) > 0:
-            grid_delta = grid_fuels_plot - fuel_nominal
-            ax1.plot(grid_nodes_plot, grid_delta, "o-", color="tab:blue")
-            ax1.axhline(0.0, color="tab:blue", linestyle="--", alpha=0.5, label="Nominal N=140")
-            ax1.set_xlabel("Collocation Nodes")
-            ax1.set_ylabel("Delta Minimum Fuel (kg)")
-            ax1.legend(loc="best")
-        else:
-            ax1.text(0.5, 0.5, "No converged grid runs", transform=ax1.transAxes, ha="center", va="center")
-        ax1.set_title("Numerical: Grid Sensitivity")
-        ax1.grid(True, alpha=0.3)
-
-        # Integrator sensitivity.
-        tol_plot = np.array([r[0] for r in integ_rows if np.isfinite(r[8])], dtype=float)
-        fuel_plot = np.array([r[8] for r in integ_rows if np.isfinite(r[8])], dtype=float)
-        if len(tol_plot) > 0:
-            ref_fuel = fuel_plot[-1]
-            drift = np.abs(fuel_plot - ref_fuel)
-            ax2.loglog(tol_plot, np.maximum(drift, 1e-12), "s-", color="tab:orange")
-            ax2.invert_xaxis()
-            ax2.set_xlabel("Integrator rtol")
-            ax2.set_ylabel("|Fuel Drift| vs tightest (kg)")
-        else:
-            ax2.text(0.5, 0.5, "No valid integrator runs", transform=ax2.transAxes, ha="center", va="center")
-        ax2.set_title("Numerical: Integrator Sensitivity")
-        ax2.grid(True, which="both", alpha=0.3)
-
-        # Parameter uncertainty distribution.
-        if len(param_fuels_all) > 0:
-            ax3.hist(
-                param_fuels_all,
-                bins=min(12, max(5, len(param_fuels_all))),
-                color="tab:green",
-                alpha=0.55,
-                edgecolor="k",
-                label="All converged"
-            )
-            if len(param_fuels_feasible) > 0:
-                ax3.hist(
-                    param_fuels_feasible,
-                    bins=min(12, max(5, len(param_fuels_feasible))),
-                    color="tab:blue",
-                    alpha=0.45,
-                    edgecolor="k",
-                    label="Feasible subset"
-                )
-            ax3.axvline(fuel_nominal, color="tab:blue", linestyle="--", linewidth=1.5, label="Nominal")
-            ax3.set_xlabel("Minimum Fuel (kg)")
-            ax3.set_ylabel("Count")
-            ax3.legend(loc="best")
-        else:
-            ax3.text(0.5, 0.5, "No valid parameter re-optimizations", transform=ax3.transAxes, ha="center", va="center")
-        ax3.set_title("Parameter Uncertainty (Re-optimization)")
-        ax3.grid(True, axis="y", alpha=0.3)
-
-        # Contribution split.
-        comp_labels = ["Grid", "Integrator", "Opt-Sim bias", "Numerical", "Parameter", "Total"]
-        comp_vals = [sigma_grid, sigma_integrator, bias_opt_vs_sim, sigma_numerical, sigma_parameter, sigma_total]
-        comp_plot = [1e-6 if (not np.isfinite(v) or v <= 0.0) else float(v) for v in comp_vals]
-        colors = ["tab:blue", "tab:orange", "tab:gray", "tab:purple", "tab:green", "tab:red"]
-        ax4.bar(comp_labels, comp_plot, color=colors, alpha=0.8)
-        ax4.set_ylabel("Uncertainty sigma (kg, log scale)")
-        ax4.set_yscale("log")
-        ax4.set_title("Q2 Uncertainty Budget")
-        ax4.tick_params(axis="x", rotation=20)
-        ax4.grid(True, axis="y", alpha=0.3)
-        if np.isfinite(numerical_share_pct) and np.isfinite(parameter_share_pct):
-            ax4.text(
-                0.02,
-                0.97,
-                (
-                    f"Variance shares:\n"
-                    f"Numerical {numerical_share_pct:.3f}%\n"
-                    f"Parameter {parameter_share_pct:.3f}%\n"
-                    f"95% half-width: {ci95_half_width:.0f} kg"
-                ),
-                transform=ax4.transAxes,
-                va="top",
-                ha="left",
-                bbox=dict(facecolor="white", alpha=0.8, edgecolor="0.7")
-            )
-
-        fig.suptitle("Q2: Minimum-Fuel Accuracy and Uncertainty Split")
-        self._finalize_figure(fig, "q2_uncertainty_budget")
-        self._summary["q2_budget"] = {
-            "baseline_minimum_fuel_kg": fuel_nominal,
-            "sigma_numerical_kg": sigma_numerical,
-            "sigma_parameter_kg": sigma_parameter,
-            "sigma_parameter_ci_low_95_kg": sigma_param_ci_low,
-            "sigma_parameter_ci_high_95_kg": sigma_param_ci_high,
-            "sigma_parameter_feasible_only_kg": sigma_parameter_feasible,
-            "sigma_parameter_feasible_only_ci_low_95_kg": sigma_param_feasible_ci_low,
-            "sigma_parameter_feasible_only_ci_high_95_kg": sigma_param_feasible_ci_high,
-            "sigma_total_kg": sigma_total,
-            "ci95_half_width_kg": ci95_half_width,
-            "numerical_variance_share_percent": numerical_share_pct,
-            "parameter_variance_share_percent": parameter_share_pct,
-            "parameter_converged_rate": valid_param_rate,
-            "parameter_feasible_rate": feasible_param_rate,
-        }
-
-    # 22. BIFURCATION 2D MAP
-    def analyze_bifurcation_2d_map(self, n_thrust=11, n_density=11, max_workers=None):
-        debug._print_sub_header("22. Bifurcation 2D Map (Thrust x Density)")
-        print("Mapping open-loop strict success and orbit-error structure over a 2D parameter grid.")
-
-        opt_res = self._get_baseline_opt_res()
-        if not opt_res.get("success", False):
-            print("  Baseline optimization failed. Skipping.")
-            return
-
-        n_thrust = max(3, int(n_thrust))
-        n_density = max(3, int(n_density))
-        thrust_vals = np.linspace(0.94, 1.06, n_thrust)
-        density_vals = np.linspace(0.80, 1.20, n_density)
-        success_map = np.zeros((len(density_vals), len(thrust_vals)), dtype=float)
-        margin_map = np.full((len(density_vals), len(thrust_vals)), np.nan, dtype=float)
-        orbit_err_map = np.full((len(density_vals), len(thrust_vals)), np.nan, dtype=float)
-        rows = []
-
-        if max_workers is None:
-            max_workers = min(4, max(1, os.cpu_count() or 1))
-        max_workers = max(1, int(max_workers))
-
-        samples = []
-        for iy, dens in enumerate(density_vals):
-            for ix, thrust in enumerate(thrust_vals):
-                samples.append((int(iy), int(ix), float(thrust), float(dens)))
-
-        sample_rows = []
-        parallel_active = bool(max_workers > 1 and len(samples) > 1)
-        if parallel_active:
-            print(f"  Parallel execution enabled (workers={max_workers}).")
-            try:
-                n_chunks = min(max_workers, len(samples))
-                chunk_size = int(np.ceil(len(samples) / max(n_chunks, 1)))
-                with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                    fut_to_chunk_size = {}
-                    for i0 in range(0, len(samples), chunk_size):
-                        chunk = samples[i0:i0 + chunk_size]
-                        payload = {
-                            "opt_res": opt_res,
-                            "base_cfg": self.base_config,
-                            "base_env_cfg": self.base_env_config,
-                            "q_slack_pa": float(self.path_q_slack_pa),
-                            "g_slack": float(self.path_g_slack),
-                            "samples": chunk,
-                        }
-                        fut = executor.submit(_run_bifurcation_batch_worker, payload)
-                        fut_to_chunk_size[fut] = len(chunk)
-
-                    parallel_ok = True
-                    completed_samples = 0
-                    for fut in as_completed(fut_to_chunk_size):
-                        completed_samples += int(fut_to_chunk_size[fut])
-                        self._print_parallel_progress("Bifurcation samples", completed_samples, len(samples))
-                        try:
-                            r = fut.result()
-                            sample_rows.extend(r.get("rows", []))
-                        except Exception:
-                            parallel_ok = False
-                            break
-                if not parallel_ok:
-                    print("  Worker failure during bifurcation map; switching to serial mode.")
-                    parallel_active = False
-                    sample_rows = []
-            except Exception:
-                print("  Parallel execution unavailable; switching to serial mode.")
-                parallel_active = False
-                sample_rows = []
-
-        if not parallel_active:
-            print("  Serial execution mode.")
-            r = _run_bifurcation_batch_worker(
-                {
-                    "opt_res": opt_res,
-                    "base_cfg": self.base_config,
-                    "base_env_cfg": self.base_env_config,
-                    "q_slack_pa": float(self.path_q_slack_pa),
-                    "g_slack": float(self.path_g_slack),
-                    "samples": samples,
-                }
-            )
-            sample_rows = list(r.get("rows", []))
-
-        sample_rows.sort(key=lambda d: (int(d.get("iy", 0)), int(d.get("ix", 0))))
-        for item in sample_rows:
-            iy = int(item.get("iy", 0))
-            ix = int(item.get("ix", 0))
-            thrust = float(item.get("thrust", np.nan))
-            dens = float(item.get("density", np.nan))
-            success = int(item.get("strict_success", 0))
-            margin = float(item.get("fuel_margin_kg", np.nan))
-            orbit_err = float(item.get("normalized_orbit_error", np.nan))
-            alt_err = float(item.get("spherical_height_error_m", np.nan))
-            vel_err = float(item.get("velocity_error_m_s", np.nan))
-            q_ok = int(item.get("q_ok", 0))
-            g_ok = int(item.get("g_ok", 0))
-            status = str(item.get("status", "SIM_ERROR"))
-
-            if 0 <= iy < success_map.shape[0] and 0 <= ix < success_map.shape[1]:
-                success_map[iy, ix] = success
-                margin_map[iy, ix] = margin
-                orbit_err_map[iy, ix] = orbit_err
-
-            rows.append((
-                thrust,
-                dens,
-                success,
-                margin,
-                orbit_err,
-                alt_err,
-                vel_err,
-                q_ok,
-                g_ok,
-                status,
-            ))
-
-        self._save_table(
-            "bifurcation_2d_map",
-            [
-                "thrust_multiplier", "density_multiplier", "strict_success",
-                "fuel_margin_kg", "normalized_orbit_error",
-                "spherical_height_error_m", "velocity_error_m_s", "q_ok", "g_ok", "status"
-            ],
-            rows
-        )
-
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        im1 = ax1.imshow(
-            success_map,
-            origin="lower",
-            aspect="auto",
-            extent=[thrust_vals[0], thrust_vals[-1], density_vals[0], density_vals[-1]],
-            vmin=0,
-            vmax=1,
-            cmap="RdYlGn"
-        )
-        ax1.set_xlabel("Thrust Multiplier")
-        ax1.set_ylabel("Density Multiplier")
-        ax1.set_title("Strict Success Map")
-        fig.colorbar(im1, ax=ax1, label="Success (0/1)")
-
-        # Focus the second panel on orbit-feasibility error, not fuel margin.
-        finite_err = orbit_err_map[np.isfinite(orbit_err_map)]
-        if finite_err.size > 0:
-            vmax = max(1.5, float(np.nanpercentile(finite_err, 95.0)))
-        else:
-            vmax = 2.0
-        im2 = ax2.imshow(
-            orbit_err_map,
-            origin="lower",
-            aspect="auto",
-            extent=[thrust_vals[0], thrust_vals[-1], density_vals[0], density_vals[-1]],
-            cmap="viridis",
-            vmin=0.0,
-            vmax=vmax
-        )
-        ax2.set_xlabel("Thrust Multiplier")
-        ax2.set_ylabel("Density Multiplier")
-        ax2.set_title("Normalized Orbit Error Map")
-        fig.colorbar(im2, ax=ax2, label="Orbit Error (-)")
-        finite_mask = np.isfinite(orbit_err_map)
-        if np.any(finite_mask):
-            finite_vals = orbit_err_map[finite_mask]
-            if float(np.min(finite_vals)) <= 1.0 <= float(np.max(finite_vals)):
-                ax2.contour(
-                    thrust_vals, density_vals, orbit_err_map,
-                    levels=[1.0], colors="w", linewidths=1.3
-                )
-        else:
-            print("  Note: no finite orbit-error values available for threshold contour.")
-
-        strict_count = int(np.sum(success_map))
-        total_count = int(success_map.size)
-        strict_fraction = strict_count / max(total_count, 1)
-        orbit_feasible = np.isfinite(orbit_err_map) & (orbit_err_map <= 1.0)
-        orbit_feasible_count = int(np.sum(orbit_feasible))
-        orbit_feasible_fraction = orbit_feasible_count / max(total_count, 1)
-
-        dens_idx_nom = int(np.argmin(np.abs(density_vals - 1.0)))
-        row_nom = orbit_err_map[dens_idx_nom, :]
-        row_lower = np.nan
-        row_upper = np.nan
-
-        # Interpolate threshold crossings on nominal-density row.
-        row_crossings = []
-        for i in range(1, len(thrust_vals)):
-            e0 = row_nom[i - 1]
-            e1 = row_nom[i]
-            if not (np.isfinite(e0) and np.isfinite(e1)):
-                continue
-            f0 = e0 - 1.0
-            f1 = e1 - 1.0
-            if abs(f0) < 1e-12:
-                row_crossings.append(float(thrust_vals[i - 1]))
-            if f0 * f1 < 0.0:
-                row_crossings.append(float(np.interp(0.0, [f0, f1], [thrust_vals[i - 1], thrust_vals[i]])))
-            if i == len(thrust_vals) - 1 and abs(f1) < 1e-12:
-                row_crossings.append(float(thrust_vals[i]))
-        row_crossings = sorted(row_crossings)
-        if len(row_crossings) > 0:
-            row_lower = float(min(row_crossings))
-            row_upper = float(max(row_crossings))
-        else:
-            # Fallback: use discrete feasible band if no crossing can be interpolated.
-            row_mask = np.isfinite(row_nom) & (row_nom <= 1.0)
-            if np.any(row_mask):
-                row_lower = float(np.min(thrust_vals[row_mask]))
-                row_upper = float(np.max(thrust_vals[row_mask]))
-        margin_lower_pct = (1.0 - row_lower) * 100.0 if np.isfinite(row_lower) else np.nan
-        margin_upper_pct = (row_upper - 1.0) * 100.0 if np.isfinite(row_upper) else np.nan
-        margin_candidates = [m for m in [margin_lower_pct, margin_upper_pct] if np.isfinite(m)]
-        min_margin_pct = float(np.min(margin_candidates)) if len(margin_candidates) > 0 else np.nan
-
-        self._save_table(
-            "bifurcation_2d_summary",
-            ["metric", "value"],
-            [
-                ("strict_success_fraction", strict_fraction),
-                ("orbit_feasible_fraction", orbit_feasible_fraction),
-                ("nominal_density_row_lower_thrust", row_lower),
-                ("nominal_density_row_upper_thrust", row_upper),
-                ("nominal_density_row_lower_margin_percent", margin_lower_pct),
-                ("nominal_density_row_upper_margin_percent", margin_upper_pct),
-                ("nominal_density_row_min_margin_percent", min_margin_pct),
-            ]
-        )
-        self._summary["q5_bifurcation_2d"] = {
-            "strict_success_fraction": strict_fraction,
-            "orbit_feasible_fraction": orbit_feasible_fraction,
-            "nominal_row_min_margin_percent": min_margin_pct,
-        }
-
-        print(f"  Strict-success points: {strict_count}/{total_count}")
-        print(f"  Orbit-feasible points (error<=1): {orbit_feasible_count}/{total_count}")
-        if np.isfinite(min_margin_pct):
-            print(f"  Nominal-density row minimum thrust margin: {min_margin_pct:.2f}%")
-        self._finalize_figure(fig, "bifurcation_2d_map")
-        print(f">>> {debug.Style.GREEN}PASS: 2D bifurcation map generated.{debug.Style.RESET}")
-
-    # 23. MODEL LIMITATIONS REGISTER (Q6)
-    def analyze_model_limitations(self):
-        debug._print_sub_header("23. Model Limitations and Validity Bounds")
-        print("Documenting modeling assumptions, likely bias directions, and mitigation evidence.")
-
-        rows = [
-            (
-                "open_loop_control",
-                "No feedback controller; controls are replayed open-loop.",
-                "Tends to overstate fragility under perturbations.",
-                "bifurcation_2d_map",
-                "High",
-            ),
-            (
-                "reduced_dof",
-                "Translational dynamics only (no full attitude/actuator dynamics).",
-                "Can misestimate controllability and steering losses.",
-                "drift, smooth_integrator_benchmark",
-                "High",
-            ),
-            (
-                "aero_prop_models",
-                "Aerodynamics and propulsion use reduced lookup/parametric models.",
-                "Bias in drag/thrust loss estimates and fuel optimum.",
-                "theoretical_efficiency, q2_uncertainty_budget",
-                "Medium",
-            ),
-            (
-                "atmosphere_uncertainty",
-                "Atmospheric uncertainty modeled with scalar density multiplier.",
-                "May underrepresent profile/wind-structure uncertainty.",
-                "monte_carlo_precision_target, q2_uncertainty_budget",
-                "Medium",
-            ),
-            (
-                "numerical_transcription",
-                "Finite collocation grid and finite solver tolerances.",
-                "Can introduce discretization/integration bias in objective.",
-                "grid_independence, integrator_tolerance, q2_uncertainty_budget",
-                "Medium",
-            ),
-            (
-                "ideal_staging",
-                "Stage transitions are idealized without hardware faults.",
-                "Underestimates real mission risk and contingency fuel.",
-                "integrator_tolerance, drift",
-                "Medium",
-            ),
-        ]
-
-        self._save_table(
-            "model_limitations",
-            ["id", "assumption", "likely_impact", "mitigation_evidence", "severity"],
-            rows,
-        )
-
-        sev_map = {"High": 3, "Medium": 2, "Low": 1}
-        severity_score = int(np.sum([sev_map.get(r[4], 1) for r in rows]))
-        high_count = int(np.sum([1 for r in rows if r[4] == "High"]))
-        print(f"  Documented limitations: {len(rows)}")
-        print(f"  High-severity limitations: {high_count}")
-        self._save_table(
-            "model_limitations_summary",
-            ["metric", "value"],
-            [
-                ("n_limitations", len(rows)),
-                ("n_high_severity", high_count),
-                ("severity_score", severity_score),
-            ],
-        )
-        self._summary["q6_limitations"] = {
-            "n_limitations": len(rows),
-            "n_high_severity": high_count,
-            "severity_score": severity_score,
-        }
-
-    # 24. CONCLUSION SUPPORT SYNTHESIS (Q7)
-    def analyze_q7_conclusion_support(self):
-        debug._print_sub_header("24. Q7 Conclusion Support Synthesis")
-        print("Synthesizing evidence for the final engineering conclusion.")
-
-        q2 = self._summary.get("q2_budget", {})
-        q5 = self._summary.get("q5_bifurcation_2d", {})
-
-        # Fallback to saved summary tables if upstream tests were skipped.
-        ci95_half_width_kg = q2.get("ci95_half_width_kg", self._get_saved_metric("q2_uncertainty_budget", "ci95_half_width_kg"))
-        param_share_pct = q2.get(
-            "parameter_variance_share_percent",
-            self._get_saved_metric("q2_uncertainty_budget", "parameter_variance_share_percent"),
-        )
-        num_share_pct = q2.get(
-            "numerical_variance_share_percent",
-            self._get_saved_metric("q2_uncertainty_budget", "numerical_variance_share_percent"),
-        )
-        min_margin_pct = q5.get(
-            "nominal_row_min_margin_percent",
-            self._get_saved_metric("bifurcation_2d_summary", "nominal_density_row_min_margin_percent")
-        )
-        strict_success_fraction = q5.get(
-            "strict_success_fraction",
-            self._get_saved_metric("bifurcation_2d_summary", "strict_success_fraction"),
-        )
-        orbit_feasible_fraction = q5.get(
-            "orbit_feasible_fraction",
-            self._get_saved_metric("bifurcation_2d_summary", "orbit_feasible_fraction"),
-        )
-
-        evidence_rows = [
-            ("q2_ci95_half_width_kg", ci95_half_width_kg),
-            ("q2_parameter_variance_share_percent", param_share_pct),
-            ("q2_numerical_variance_share_percent", num_share_pct),
-            ("q5_nominal_row_min_thrust_margin_percent", min_margin_pct),
-            ("q5_strict_success_fraction", strict_success_fraction),
-            ("q5_orbit_feasible_fraction", orbit_feasible_fraction),
-        ]
-
-        # Pragmatic decision rules from retained tests only.
-        cliff_supported = bool(
-            np.isfinite(min_margin_pct) and min_margin_pct > 0.0 and min_margin_pct <= 3.0
-        )
-        uncertainty_supported = bool(
-            np.isfinite(param_share_pct) and np.isfinite(num_share_pct) and param_share_pct > num_share_pct
-        )
-        map_coverage_supported = bool(
-            np.isfinite(strict_success_fraction)
-            and np.isfinite(orbit_feasible_fraction)
-            and strict_success_fraction > 0.0
-            and orbit_feasible_fraction > 0.0
-        )
-        support_score = int(cliff_supported) + int(uncertainty_supported) + int(map_coverage_supported)
-        conclusion_supported = int(support_score >= 2)
-
-        self._save_table(
-            "q7_conclusion_support",
-            ["metric", "value"],
-            evidence_rows
-            + [
-                ("cliff_supported", int(cliff_supported)),
-                ("uncertainty_supported", int(uncertainty_supported)),
-                ("map_coverage_supported", int(map_coverage_supported)),
-                ("support_score", support_score),
-                ("conclusion_supported", conclusion_supported),
-            ],
-        )
-
-        print(f"  Cliff-edge evidence (2D margin): {int(cliff_supported)}")
-        print(f"  Uncertainty evidence (parameter > numerical): {int(uncertainty_supported)}")
-        print(f"  2D map coverage evidence: {int(map_coverage_supported)}")
-        if conclusion_supported:
-            print(f">>> {debug.Style.GREEN}PASS: Evidence supports the Q7 engineering conclusion.{debug.Style.RESET}")
-        else:
-            print(f">>> {debug.Style.YELLOW}WARN: Evidence is incomplete for a strong Q7 claim.{debug.Style.RESET}")
-
-        self._summary["q7_conclusion"] = {
-            "support_score": support_score,
-            "conclusion_supported": conclusion_supported,
-        }
-
-if __name__ == "__main__":
+def build_cli_parser():
     parser = argparse.ArgumentParser(description="Reliability and robustness analysis suite.")
     parser.add_argument("--output-dir", type=str, default=None, help="Directory for exported figures and CSV tables.")
-    parser.add_argument("--seed", type=int, default=1337, help="Global random seed for reproducible Monte Carlo runs.")
-    parser.add_argument("--mc-samples", type=int, default=200, help="Monte Carlo sample count used in Monte Carlo-based analyses.")
+    parser.add_argument("--seed", type=int, default=1337, help="Global random seed for reproducible stochastic analyses.")
     parser.add_argument("--max-workers", type=int, default=None, help="Maximum parallel workers (set 1 for fully serial mode).")
     parser.add_argument("--course-core", action="store_true", help="Run only the recommended paper-safe course-core evidence set.")
+    parser.add_argument("--analysis", choices=("all", "warm-start-multiseed", "global-launch-cost"), default="all", help="Select a single analysis entry point instead of the full suite.")
+    parser.add_argument("--trials", type=int, default=DEFAULT_WARM_START_TRIALS, help="Warm-start multi-seed trial count when --analysis=warm-start-multiseed.")
+    parser.add_argument("--heatmap-lat-step", type=float, default=5.0, help="Latitude step in degrees when --analysis=global-launch-cost.")
+    parser.add_argument("--heatmap-solver-cpu-time", type=float, default=120.0, help="Per-latitude CPU time cap for --analysis=global-launch-cost.")
     parser.add_argument("--no-show", action="store_true", help="Do not open interactive plot windows (save figures only).")
     parser.add_argument("--no-save", action="store_true", help="Do not save figures/CSV outputs.")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    args = build_cli_parser().parse_args(argv)
 
     suite = ReliabilitySuite(
         output_dir=args.output_dir,
@@ -3868,4 +4624,17 @@ if __name__ == "__main__":
         random_seed=args.seed,
         analysis_profile="course_core" if args.course_core else "default",
     )
-    suite.run_all(monte_carlo_samples=args.mc_samples, max_workers=args.max_workers)
+    if args.analysis == "warm-start-multiseed":
+        suite.analyze_randomized_multistart(n_trials=args.trials)
+        return
+    if args.analysis == "global-launch-cost":
+        suite.analyze_global_launch_cost(
+            lat_step=args.heatmap_lat_step,
+            solver_max_cpu_time=args.heatmap_solver_cpu_time,
+        )
+        return
+    suite.run_all(max_workers=args.max_workers)
+
+
+if __name__ == "__main__":
+    main()
