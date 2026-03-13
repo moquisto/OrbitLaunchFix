@@ -1,0 +1,12 @@
+| Seed | Status | Final-mass gap to best (mg) | Max position separation (m) | Max velocity delta (m/s) |
+| --- | --- | --- | --- | --- |
+| Nominal | Raw pass | 14.515 | 0.000 | 0.0000 |
+| Timing - | Raw pass | 0.062 | 14.673 | 0.0538 |
+| Timing + | Raw pass | 0.021 | 11.249 | 0.0507 |
+| Lateral - | Raw pass | 0.035 | 14.616 | 0.0506 |
+| Lateral + | Raw pass | 0.035 | 11.656 | 0.0524 |
+| Random 1 | Raw pass | 0.063 | 10.527 | 0.0478 |
+| Random 2 | Raw pass | 0.024 | 9.715 | 0.0420 |
+| Random 3 | Raw pass | 0.012 | 10.965 | 0.0377 |
+| Random 4 | Raw pass | 0.000 | 15.326 | 0.0560 |
+| Random 5 | Raw pass | 0.057 | 9.459 | 0.0391 |

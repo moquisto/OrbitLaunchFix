@@ -1,0 +1,8 @@
+toggle,label,enabled,status,runtime_s,error_message
+grid_independence,Grid independence,1,completed,149.054345846,
+smooth_integrator_benchmark,Smooth ODE integrator benchmark,1,completed,0.567337989807,
+drift,Drift analysis,1,completed,2.92894172668,
+theoretical_efficiency,Theoretical efficiency,1,completed,2.59247279167,
+integrator_tolerance,Integrator tolerance,1,completed,26.0985641479,
+interval_replay_audit,Interval replay audit,1,completed,10.03074193,
+randomized_multistart,Warm-start multi-seed robustness,1,completed,1146.93430185,

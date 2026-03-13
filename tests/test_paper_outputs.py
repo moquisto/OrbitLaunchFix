@@ -216,6 +216,9 @@ class PaperOutputSummaryTests(unittest.TestCase):
             manifest = (Path(tmpdir) / "notes" / "paper_pack_manifest.md").read_text(encoding="utf-8")
             self.assertIn("fig_app_05_global_launch_cost", manifest)
             self.assertIn("fig_main_06_warm_start_multiseed", manifest)
+            self.assertNotIn("fig_main_05_replay_drift", manifest)
+            self.assertIn("table_04_replay_drift_by_phase", manifest)
+            self.assertIn("table_05_multistart_consistency", manifest)
             self.assertNotIn("fig_app_06_warm_start_multiseed", manifest)
 
     def test_multistart_artifacts_exist_helper_checks_top_level_outputs(self):
@@ -357,9 +360,15 @@ class PaperOutputSummaryTests(unittest.TestCase):
             (reliability_dir / "figures" / "randomized_multistart.png").write_text("png", encoding="utf-8")
             (reliability_dir / "figures" / "randomized_multistart.pdf").write_text("pdf", encoding="utf-8")
             (reliability_dir / "data" / "randomized_multistart.csv").write_text(
-                "trial,label,status,solver_success,mission_success,runtime_s,solver_iter_count,max_q_pa,max_g,alt_err_m,vel_err_m_s\n"
-                "1,nominal,PASS_RAW,1,1,86.2,46,34850.0,3.975,0.0,0.0\n"
-                "2,time_minus,PASS_RAW,1,1,93.5,37,34890.0,3.980,0.4,0.03\n",
+                "trial,label,status,solver_success,mission_success,final_mass_gap_to_best_kg,max_q_pa,max_g,alt_err_m,vel_err_m_s\n"
+                "1,nominal,PASS_RAW,1,1,1.5e-05,34850.0,3.975,0.0,0.0\n"
+                "2,time_minus,PASS_RAW,1,1,6.1e-08,34890.0,3.980,0.4,0.03\n",
+                encoding="utf-8",
+            )
+            (reliability_dir / "data" / "randomized_multistart_deltas.csv").write_text(
+                "trial,label,status,position_separation_km,delta_velocity_m_s\n"
+                "1,nominal,PASS_RAW,0.0,0.0\n"
+                "2,time_minus,PASS_RAW,0.012,0.03\n",
                 encoding="utf-8",
             )
             (reliability_dir / "data" / "randomized_multistart_trajectory_summary.csv").write_text(
@@ -374,8 +383,9 @@ class PaperOutputSummaryTests(unittest.TestCase):
             self.assertGreater((Path(tmpdir) / "figures" / "fig_main_06_warm_start_multiseed.png").stat().st_size, 0)
             self.assertGreater((Path(tmpdir) / "figures" / "fig_main_06_warm_start_multiseed.pdf").stat().st_size, 0)
             self.assertIn("nominal", (Path(tmpdir) / "data" / "randomized_multistart.csv").read_text(encoding="utf-8"))
+            self.assertIn("time_minus", (Path(tmpdir) / "data" / "randomized_multistart_deltas.csv").read_text(encoding="utf-8"))
 
-    def test_multistart_overview_uses_raw_metrics_without_mass_gap_overlay(self):
+    def test_multistart_overview_uses_local_minimum_metrics(self):
         with TemporaryDirectory() as tmpdir:
             args = SimpleNamespace(
                 output_dir=tmpdir,
@@ -390,12 +400,7 @@ class PaperOutputSummaryTests(unittest.TestCase):
                     "status": "PASS_RAW",
                     "solver_success": "1",
                     "mission_success": "1",
-                    "runtime_s": "86.2",
-                    "solver_iter_count": "46",
-                    "max_q_pa": "34850.0",
-                    "max_g": "3.975",
-                    "alt_err_m": "0.0",
-                    "vel_err_m_s": "0.0",
+                    "final_mass_gap_to_best_kg": "1.5e-05",
                 },
                 {
                     "trial": "2",
@@ -403,17 +408,21 @@ class PaperOutputSummaryTests(unittest.TestCase):
                     "status": "PASS_RAW",
                     "solver_success": "1",
                     "mission_success": "1",
-                    "runtime_s": "206.8",
-                    "solver_iter_count": "263",
-                    "max_q_pa": "34920.0",
-                    "max_g": "3.990",
-                    "alt_err_m": "1.8",
-                    "vel_err_m_s": "0.12",
+                    "final_mass_gap_to_best_kg": "6.1e-08",
                 },
             ]
             summary = {
-                "median_success_runtime_s": "146.5",
-                "mass_spread_kg": "1.0e-5",
+                "mission_success_rate_raw": "1.0",
+            }
+            delta_summary = {
+                "nominal": {
+                    "max_position_separation_m": 0.0,
+                    "max_velocity_delta_m_s": 0.0,
+                },
+                "state_plus": {
+                    "max_position_separation_m": 11.7,
+                    "max_velocity_delta_m_s": 0.032,
+                },
             }
             captured = {}
 
@@ -422,46 +431,73 @@ class PaperOutputSummaryTests(unittest.TestCase):
                 captured["stem"] = stem
 
             with patch("analysis_tools.paper_outputs._save_figure", side_effect=capture_figure):
-                rendered = builder._render_multistart_overview(rows, summary, Path(tmpdir) / "figures" / "fig_main_06_warm_start_multiseed")
+                rendered = builder._render_multistart_overview(
+                    rows,
+                    summary,
+                    delta_summary,
+                    Path(tmpdir) / "figures" / "fig_main_06_warm_start_multiseed",
+                )
 
             self.assertTrue(rendered)
             fig = captured["fig"]
-            ylabels = {ax.get_ylabel() for ax in fig.axes}
-            self.assertIn("Max dynamic pressure (kPa)", ylabels)
-            self.assertIn("Max g-load (g)", ylabels)
-            self.assertIn("|Altitude error| (m)", ylabels)
-            self.assertIn("|Velocity error| (m/s)", ylabels)
-            self.assertNotIn("Worst path use (% of limit)", ylabels)
-            self.assertNotIn("Terminal use (% of limit)", ylabels)
-            self.assertNotIn("Mass gap to best (g)", ylabels)
-            runtime_axis = next(ax for ax in fig.axes if ax.get_xlabel() == "Trial runtime (s)")
+            xlabels = [ax.get_xlabel() for ax in fig.axes]
+            self.assertEqual(
+                xlabels,
+                [
+                    "Final-mass gap to best (mg)",
+                    "Max position separation (m)",
+                    "Max velocity delta (m/s)",
+                ],
+            )
+            self.assertEqual(len(fig.axes), 3)
+            self.assertEqual(fig.axes[0].get_xscale(), "symlog")
+            runtime_axis = fig.axes[0]
             runtime_tick_labels = [tick.get_text() for tick in runtime_axis.get_yticklabels()]
             self.assertIn("Nominal", runtime_tick_labels)
             self.assertIn("Lateral +", runtime_tick_labels)
-
-            legend_text = []
-            for ax in fig.axes:
-                legend = ax.get_legend()
-                if legend is not None:
-                    legend_text.extend(text.get_text() for text in legend.get_texts())
-            self.assertNotIn("Mass gap to best", legend_text)
-            terminal_axes = [ax for ax in fig.axes if ax.get_ylabel() in {"|Altitude error| (m)", "|Velocity error| (m/s)"}]
-            self.assertEqual(len(terminal_axes), 2)
-            alt_axis = next(ax for ax in terminal_axes if ax.get_ylabel() == "|Altitude error| (m)")
-            vel_axis = next(ax for ax in terminal_axes if ax.get_ylabel() == "|Velocity error| (m/s)")
-            self.assertLess(alt_axis.get_ylim()[1], 5.0)
-            self.assertLess(vel_axis.get_ylim()[1], 0.5)
-            overlay_text = [text.get_text() for ax in terminal_axes for text in ax.texts]
-            self.assertTrue(any("off-scale" in text for text in overlay_text))
-            path_axes = [ax for ax in fig.axes if ax.get_ylabel() in {"Max dynamic pressure (kPa)", "Max g-load (g)"}]
-            self.assertEqual(len(path_axes), 2)
-            q_axis = next(ax for ax in path_axes if ax.get_ylabel() == "Max dynamic pressure (kPa)")
-            g_axis = next(ax for ax in path_axes if ax.get_ylabel() == "Max g-load (g)")
-            self.assertGreater(q_axis.get_ylim()[0], 34.7)
-            self.assertLess(q_axis.get_ylim()[1], 35.2)
-            self.assertGreater(g_axis.get_ylim()[0], 3.95)
-            self.assertLess(g_axis.get_ylim()[1], 4.05)
+            self.assertGreaterEqual(runtime_axis.get_xlim()[0], 0.0)
+            axis_text = [text.get_text() for text in runtime_axis.texts]
+            self.assertIn("Raw-feasible: 2/2", axis_text)
             plt.close(fig)
+
+    def test_multistart_consistency_rows_format_seed_metrics_for_table(self):
+        args = SimpleNamespace(
+            output_dir="unused",
+            skip_heatmap=True,
+        )
+        builder = PaperPackBuilder(args)
+        rows = [
+            {
+                "label": "nominal",
+                "status": "PASS_RAW",
+                "final_mass_gap_to_best_kg": "1.5e-05",
+            },
+            {
+                "label": "rand_05",
+                "status": "PASS_SLACK",
+                "final_mass_gap_to_best_kg": "6.1e-08",
+            },
+        ]
+        delta_summary = {
+            "nominal": {
+                "max_position_separation_m": 0.0,
+                "max_velocity_delta_m_s": 0.0,
+            },
+            "rand_05": {
+                "max_position_separation_m": 10.527,
+                "max_velocity_delta_m_s": 0.0224,
+            },
+        }
+
+        table_rows = builder._build_multistart_consistency_rows(rows, delta_summary)
+
+        self.assertEqual(
+            table_rows,
+            [
+                ("Nominal", "Raw pass", "15.000", "0.000", "0.0000"),
+                ("Random 1", "Slack pass", "0.061", "10.527", "0.0224"),
+            ],
+        )
 
     def test_nominal_profile_overlays_optimizer_and_replay_when_histories_available(self):
         with TemporaryDirectory() as tmpdir:
@@ -587,11 +623,66 @@ class PaperOutputSummaryTests(unittest.TestCase):
                 builder._render_3d_trajectory(EARTH_CONFIG, timeseries, Path(tmpdir) / "figures" / "fig_app_04_3d_trajectory")
 
             fig = captured["fig"]
+            ax1 = fig.axes[0]
             ax2 = fig.axes[1]
+            self.assertEqual(ax1.get_xlabel(), "ECI X (km)")
+            self.assertEqual(ax1.get_ylabel(), "ECI Y (km)")
+            self.assertEqual(ax1.get_zlabel(), "ECI Z (km)")
             self.assertEqual(ax2.get_xlabel(), "Orbit-plane x (km)")
             self.assertEqual(ax2.get_ylabel(), "Orbit-plane y (km)")
             self.assertEqual(ax2.get_aspect(), 1.0)
             self.assertGreaterEqual(len(ax2.lines), 2)
+            plt.close(fig)
+
+    def test_grid_independence_render_uses_two_panels(self):
+        with TemporaryDirectory() as tmpdir:
+            args = SimpleNamespace(
+                output_dir=tmpdir,
+                skip_heatmap=True,
+            )
+            builder = PaperPackBuilder(args)
+            builder._ensure_dirs()
+
+            csv_path = Path(tmpdir) / "data" / "grid_independence.csv"
+            with open(csv_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(
+                    [
+                        "nodes",
+                        "final_mass_kg",
+                        "runtime_s",
+                        "solver_success",
+                        "terminal_valid",
+                        "strict_terminal_ok",
+                        "strict_path_ok",
+                        "raw_path_ok",
+                        "raw_q_ok",
+                        "raw_g_ok",
+                        "q_ok",
+                        "g_ok",
+                        "max_q_pa",
+                        "max_g",
+                        "status",
+                    ]
+                )
+                writer.writerow([20, 315800.0, 7.0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 35390.0, 3.97, "PASS_SLACK"])
+                writer.writerow([40, 316120.0, 11.0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 35150.0, 3.97, "PASS_SLACK"])
+                writer.writerow([80, 316230.0, 20.0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 34860.0, 3.97, "PASS_RAW"])
+                writer.writerow([140, 316255.0, 30.0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 34830.0, 3.97, "PASS_RAW"])
+
+            captured = {}
+
+            def capture_figure(fig, stem):
+                captured["fig"] = fig
+                captured["stem"] = stem
+
+            with patch("analysis_tools.paper_outputs._save_figure", side_effect=capture_figure):
+                builder._render_grid_independence(csv_path, Path(tmpdir) / "figures" / "fig_main_03_grid_independence")
+
+            fig = captured["fig"]
+            self.assertEqual(len(fig.axes), 2)
+            self.assertEqual(fig.axes[0].get_ylabel(), "Final mass (kg)")
+            self.assertEqual(fig.axes[1].get_ylabel(), "|m(N)-m_ref| (kg)")
             plt.close(fig)
 
     def test_refine_peak_time_value_falls_back_when_quadratic_peak_overshoots_samples(self):

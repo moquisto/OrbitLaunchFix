@@ -1,0 +1,193 @@
+[Trial Log] trial=3 label=time_plus
+[Trial Log] path=paper_outputs/final_paper_pack/reliability_raw/logs/03_time_plus.log
+[Vehicle] Initializing vehicle dynamics model: SpaceX Starship IFT-6 (Booster 13 / Ship 31)
+
+[Optimizer] Setting up CasADi problem for SpaceX Starship IFT-6 (Booster 13 / Ship 31)...
+[Optimizer] Target Inclination not set. Defaulting to absolute Launch Latitude (26.00 deg) for min-energy orbit.
+[Optimizer] Using external warm-start guess...
+[Optimizer] External guess loaded in 0.00s
+[Optimizer] Guidance Guess Summary:
+  MECO: T=147.6s, Alt=88.5km, Vel=3113.9m/s
+  SECO: T=306.5s, Alt=581.1km, Vel=11807.0m/s
+[Optimizer] Starting IPOPT solver (Max Iter=2000)...
+
+[96m================================================================================[0m
+[1m OPTIMIZATION STRUCTURE (JACOBIAN)                       [0m[2m[SOURCE: CASADI][0m
+[96m================================================================================[0m
+  Constraints: 4506
+  Variables:   3096
+  Non-zeros:   38998
+  Density:     0.2795%
+  >>> [92m✅ SUCCESS: Jacobian is sparse (Expected for Direct Collocation).[0m
+========================================
+
+This is Ipopt version 3.14.11, running with linear solver MUMPS 5.4.1.
+
+Number of nonzeros in equality constraint Jacobian...:    24678
+Number of nonzeros in inequality constraint Jacobian.:    14320
+Number of nonzeros in Lagrangian Hessian.............:    23236
+
+Total number of variables............................:     3096
+                     variables with only lower bounds:        0
+                variables with lower and upper bounds:        0
+                     variables with only upper bounds:        0
+Total number of equality constraints.................:     2258
+Total number of inequality constraints...............:     2248
+        inequality constraints with only lower bounds:      844
+   inequality constraints with lower and upper bounds:        0
+        inequality constraints with only upper bounds:     1404
+
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+   0 -1.0000000e-01 5.90e+03 1.00e+00  -1.0 0.00e+00    -  0.00e+00 0.00e+00   0
+   1 -1.0256986e-01 9.62e+03 8.83e+00  -1.0 3.72e+01  -4.0 4.05e-02 4.60e-02f  1
+   2 -1.0953246e-01 4.27e+03 2.21e+01  -1.0 1.85e+00  -0.9 7.34e-02 1.61e-01f  1
+   3 -1.3033650e-01 5.23e+03 9.76e+01  -1.0 1.39e+00  -0.4 3.98e-01 6.07e-01f  1
+   4 -1.4377502e-01 2.05e+01 5.58e+01  -1.0 8.70e-01  -0.0 7.05e-01 5.61e-01f  1
+   5 -1.5813307e-01 1.79e-01 2.13e+02  -1.0 3.58e-01   0.4 9.90e-01 9.54e-01h  1
+   6 -1.5584039e-01 1.03e+00 4.90e+02  -1.0 4.75e-01  -0.1 9.92e-01 6.70e-01f  1
+   7 -1.5640299e-01 8.24e-03 2.34e+03  -1.0 1.61e-01   0.4 4.54e-01 1.00e+00f  1
+   8 -1.5700985e-01 8.66e-03 2.85e+01  -1.0 1.99e-01  -0.1 1.00e+00 1.00e+00f  1
+   9 -1.5881568e-01 6.88e-02 2.17e+01  -1.0 4.21e-01  -0.6 1.00e+00 1.00e+00f  1
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+  10 -1.6318592e-01 5.06e-01 1.54e+01  -1.0 8.02e-01  -1.1 1.00e+00 1.00e+00f  1
+  11 -1.7231820e-01 3.43e+01 2.99e+02  -1.0 4.30e+00  -1.5 1.00e+00 1.00e+00f  1
+  12 -1.6733807e-01 8.34e+00 1.08e+01  -1.0 1.80e+00  -0.2 1.00e+00 1.00e+00h  1
+  13 -2.0094145e-01 1.94e+00 1.26e+03  -1.0 7.39e+00    -  5.28e-01 1.00e+00f  1
+  14 -2.4996451e-01 2.30e+00 8.59e+02  -1.0 9.65e+00    -  8.30e-01 1.00e+00f  1
+  15 -2.1807620e-01 1.23e+00 1.96e+01  -1.0 1.05e+00  -0.7 1.00e+00 1.00e+00h  1
+  16 -2.1229690e-01 2.86e-01 2.23e+01  -1.0 4.76e+00    -  1.00e+00 1.00e+00h  1
+  17 -2.1301057e-01 3.35e-02 2.90e-02  -1.0 6.68e-01    -  1.00e+00 1.00e+00h  1
+  18 -2.1320681e-01 3.14e-04 2.02e-01  -2.5 1.66e-02    -  1.00e+00 1.00e+00h  1
+  19 -2.2440121e-01 9.45e-03 8.11e-03  -2.5 3.59e-01    -  1.00e+00 1.00e+00h  1
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+  20 -2.3349138e-01 5.09e-03 9.82e+01  -3.8 3.54e-01    -  9.42e-01 1.00e+00h  1
+  21 -2.8164918e-01 1.01e-01 2.49e-01  -3.8 4.14e+00    -  1.00e+00 8.96e-01h  1
+  22 -2.8080345e-01 3.55e-03 6.70e-03  -3.8 2.13e+00    -  1.00e+00 1.00e+00h  1
+  23 -2.8038917e-01 8.56e-06 3.80e-03  -3.8 2.07e-01    -  1.00e+00 1.00e+00h  1
+  24 -2.8038639e-01 6.52e-09 1.48e-05  -3.8 5.58e-03    -  1.00e+00 1.00e+00h  1
+  25 -3.0095338e-01 1.12e-02 2.34e+01  -5.7 4.13e+00    -  7.15e-01 9.64e-01f  1
+  26 -3.1029885e-01 3.08e+02 9.32e+00  -5.7 8.32e+00    -  6.11e-01 6.77e-01h  1
+  27 -3.1014938e-01 3.08e+02 9.44e+00  -5.7 3.39e-02  -1.2 9.12e-03 1.95e-01h  1
+  28 -3.1245857e-01 1.95e+02 8.43e+00  -5.7 3.12e+00    -  1.44e-01 5.44e-01h  1
+  29 -3.1198867e-01 1.68e-04 3.85e+00  -5.7 1.30e-02  -1.6 5.64e-01 1.00e+00h  1
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+  30 -3.1214550e-01 2.96e-01 1.69e-02  -5.7 1.09e-02  -2.1 1.00e+00 7.61e-01h  1
+  31 -3.1238103e-01 2.37e-04 4.05e+00  -5.7 2.89e-02  -2.6 2.98e-03 1.00e+00f  1
+  32 -3.1275048e-01 1.52e-04 4.22e-01  -5.7 6.36e-02  -3.1 1.00e+00 8.96e-01h  1
+  33 -3.1310761e-01 1.33e-04 1.26e-01  -5.7 1.46e-01  -3.6 1.00e+00 7.06e-01f  1
+  34 -3.1367282e-01 1.51e-03 3.01e-02  -5.7 2.53e-01  -4.0 1.00e+00 7.68e-01h  1
+  35 -3.1390068e-01 1.58e+02 1.34e-02  -5.7 8.46e-02  -3.6 1.00e+00 1.00e+00h  1
+  36 -3.1497061e-01 1.63e+02 5.34e-02  -5.7 5.11e+01    -  5.44e-02 8.21e-02h  1
+  37 -3.1558026e-01 1.17e+02 5.98e-02  -5.7 1.56e+01    -  6.60e-02 1.66e-01h  1
+  38 -3.1574983e-01 6.68e+01 5.89e-02  -5.7 4.78e+00    -  5.86e-01 3.39e-01h  1
+  39 -3.1569937e-01 8.80e-04 9.95e-03  -5.7 1.31e+00    -  1.00e+00 1.00e+00h  1
+iter    objective    inf_pr   inf_du lg(mu)  ||d||  lg(rg) alpha_du alpha_pr  ls
+  40 -3.1570145e-01 9.29e-05 5.91e-04  -5.7 4.75e-01    -  1.00e+00 1.00e+00h  1
+  41 -3.1570100e-01 1.66e-06 3.81e-06  -5.7 1.33e-02    -  1.00e+00 1.00e+00h  1
+  42 -3.1608617e-01 1.28e-01 1.00e-01  -7.0 1.22e+00    -  7.60e-01 6.69e-01h  1
+  43 -3.1623385e-01 7.20e-06 7.10e-03  -7.0 1.14e+00    -  7.83e-01 8.62e-01h  1
+  44 -3.1625587e-01 2.57e-07 1.44e-05  -7.0 3.23e-01    -  1.00e+00 1.00e+00h  1
+  45 -3.1625589e-01 1.50e-09 1.66e-06  -7.0 1.70e-02    -  1.00e+00 1.00e+00h  1
+  46 -3.1625589e-01 4.16e-12 6.39e-09  -7.0 4.56e-04    -  1.00e+00 1.00e+00h  1
+
+Number of Iterations....: 46
+
+                                   (scaled)                 (unscaled)
+Objective...............:  -3.1625588608397720e-01   -3.1625588608397720e-01
+Dual infeasibility......:   6.3945809203325155e-09    6.3945809203325155e-09
+Constraint violation....:   4.1564529595916611e-12    4.1564529595916611e-12
+Variable bound violation:   0.0000000000000000e+00    0.0000000000000000e+00
+Complementarity.........:   9.0924055063722237e-08    9.0924055063722237e-08
+Overall NLP error.......:   9.0924055063722237e-08    9.0924055063722237e-08
+
+
+Number of objective function evaluations             = 47
+Number of objective gradient evaluations             = 47
+Number of equality constraint evaluations            = 47
+Number of inequality constraint evaluations          = 47
+Number of equality constraint Jacobian evaluations   = 47
+Number of inequality constraint Jacobian evaluations = 47
+Number of Lagrangian Hessian evaluations             = 46
+Total seconds in IPOPT                               = 26.252
+
+EXIT: Optimal Solution Found.
+      solver  :   t_proc      (avg)   t_wall      (avg)    n_eval
+       nlp_f  | 296.00us (  6.30us) 233.91us (  4.98us)        47
+       nlp_g  | 458.73ms (  9.76ms) 565.43ms ( 12.03ms)        47
+  nlp_grad_f  |   2.19ms ( 45.52us)   2.60ms ( 54.08us)        48
+  nlp_hess_l  |  15.68 s (340.79ms)  17.87 s (388.40ms)        46
+   nlp_jac_g  |   5.93 s (123.46ms)   6.76 s (140.84ms)        48
+       total  |  22.97 s ( 22.97 s)  26.26 s ( 26.26 s)         1
+[Optimizer] SUCCESS: Optimal solution found in 42.29s.
+
+[96m================================================================================[0m
+[1m VARIABLE SCALING CHECK                                  [0m[2m[SOURCE: OPTIMIZER][0m
+[96m================================================================================[0m
+[1mVariable   | Component  | Range (Scaled)       | Mean     | Status[0m
+[96m-----------------------------------------------------------------[0m
+T1         | Time       | 0.1899               | 0.1899   | [92mOK[0m
+T3         | Time       | 0.5524               | 0.5524   | [92mOK[0m
+X1         | Position   | [0.9994, 1.0117]   | 1.0032   | [92mOK[0m
+           | Velocity   | [0.0529, 0.4002]   | 0.1652   | [92mOK[0m
+           | Mass       | [1.5750, 4.9750]   | 3.2615   | [92mOK[0m
+X3         | Position   | [1.0117, 1.0658]   | 1.0464   | [92mOK[0m
+           | Velocity   | [0.4002, 0.9680]   | 0.6546   | [92mOK[0m
+           | Mass       | [0.3163, 1.3000]   | 0.7060   | [92mOK[0m
+U1         | Throttle   | [0.7401, 1.0000]   | 0.9569   | [92mOK[0m
+           | Direction  | [1.0000, 1.0000]   | 1.0000   | [92mOK[0m
+U3         | Throttle   | [0.4001, 0.9999]   | 0.5599   | [92mOK[0m
+           | Direction  | [1.0000, 1.0000]   | 1.0000   | [92mOK[0m
+[96m-----------------------------------------------------------------[0m
+  * Ideal scaling is O(1) (0.1 to 10.0).
+  * 'WARN' indicates potential numerical stiffness for IPOPT.
+========================================
+
+
+[96m================================================================================[0m
+[1m GUIDANCE VS OPTIMALITY CHECK                            [0m[2m[SOURCE: GUESS VS OPT][0m
+[96m================================================================================[0m
+  MECO Time:   Guess=147.6s, Opt=153.2s (Diff: +5.5s)
+  Final Mass:  Guess=100,000kg (Depletion), Opt=316,256kg (Insertion)
+  >>> [92m✅ INFO: Optimizer found a solution with 216,256 kg of fuel remaining.[0m
+      (The initial guess burned all fuel; the optimizer cut the engine early at orbit insertion.)
+========================================
+
+[Optimizer] Total optimization time: 55.05s
+
+[Simulation] Starting Verification Simulation (rtol=1e-09, atol=1e-12)...
+  > Control Reconstruction (Phase 1): Max Error = 0.0e+00
+  > Control Reconstruction (Phase 3): Max Error = 0.0e+00
+[Simulation] Phase 1 (Boost): 0.0s -> 153.15s
+  [Liftoff Check]
+  [Force Diag] Mass: 4975.0t | Alt: 0.0km
+  [Force Diag] G-Force: 48843.0 kN | Net Force: 25731.2 kN
+  [Force Diag] Accel:   5.17 m/s^2 (0.53 g)
+  > Integrator: 1295 steps, Success=True, Msg='The solver successfully reached the end of the integration interval.'
+[Simulation] Phase 1 End: Ellipsoid alt=78.7km, Vel=3165.6m/s
+[Debug] MECO Drift: Pos=0.2m, Mass=-1.19kg
+  [MECO Check]
+  [Force Diag] Mass: 1575.0t | Alt: 78.7km
+  [Force Diag] G-Force: 15087.9 kN | Net Force: 54034.3 kN
+  [Force Diag] Accel:   34.31 m/s^2 (3.50 g)
+[Simulation] Phase 3 (Ship): 153.15s -> 598.56s
+  [Staging Check]
+  [Force Diag] Mass: 1300.0t | Alt: 78.7km
+  [Force Diag] G-Force: 12453.5 kN | Net Force: 12746.8 kN
+  [Force Diag] Accel:   9.81 m/s^2 (1.00 g)
+  > Integrator: 1491 steps, Success=True, Msg='The solver successfully reached the end of the integration interval.'
+[Simulation] Phase 3 End: Ellipsoid alt=423.4km, Vel=7657.3m/s
+[Debug] SECO Drift: Pos=0.00km, Mass=0.02kg
+  [Injection Check]
+  [Force Diag] Mass: 316.3t | Alt: 423.4km
+  [Force Diag] G-Force: 2729.8 kN | Net Force: 7088.1 kN
+  [Force Diag] Accel:   22.41 m/s^2 (2.29 g)
+[Trial Log] status=PASS_RAW
+
+[Trial Summary]
+status=PASS_RAW
+solver_status_class=SOLVE_OK
+solver_return_status=Solve_Succeeded
+solver_iter_count=46
+runtime_s=62.29858684539795
+mission_success_raw=1
+mission_success_slack=1

@@ -35,8 +35,6 @@ from orbit_launch.trajectory_metrics import (
 from orbit_launch.vehicle import Vehicle
 
 from analysis_tools.relabilityanalysis import (
-    TERMINAL_ALT_TOL_M,
-    TERMINAL_VEL_TOL_M_S,
     ReliabilitySuite,
     WarmStartMultiseedAnalyzer,
     evaluate_terminal_state,
@@ -57,7 +55,6 @@ MAIN_FIGURES = [
     "fig_main_02_constraints",
     "fig_main_03_grid_independence",
     "fig_main_04_integrator_convergence",
-    "fig_main_05_replay_drift",
     "fig_main_06_warm_start_multiseed",
 ]
 
@@ -76,6 +73,7 @@ REQUIRED_RELIABILITY_FILES = (
     "data/drift_summary.csv",
     "data/interval_replay_audit.csv",
     "data/randomized_multistart.csv",
+    "data/randomized_multistart_deltas.csv",
     "data/randomized_multistart_trajectory_summary.csv",
     "data/run_metadata.csv",
     "data/smooth_integrator_benchmark.csv",
@@ -88,6 +86,8 @@ REQUIRED_RELIABILITY_FILES = (
 STALE_PAPER_PACK_ARTIFACTS = (
     "figures/fig_app_01_collocation_defect.png",
     "figures/fig_app_01_collocation_defect.pdf",
+    "figures/fig_main_05_replay_drift.png",
+    "figures/fig_main_05_replay_drift.pdf",
     "reliability_raw/data/collocation_defect_audit.csv",
     "reliability_raw/figures/collocation_defect_audit.png",
     "reliability_raw/figures/collocation_defect_audit.pdf",
@@ -103,6 +103,7 @@ MULTISTART_ARTIFACTS = (
     "figures/fig_main_06_warm_start_multiseed.png",
     "figures/fig_main_06_warm_start_multiseed.pdf",
     "data/randomized_multistart.csv",
+    "data/randomized_multistart_deltas.csv",
     "data/randomized_multistart_trajectory_summary.csv",
 )
 
@@ -799,6 +800,9 @@ class PaperPackBuilder:
         grid_rows = _read_csv_rows(reliability_dir / "data" / "grid_independence.csv")
         replay_rows = _read_csv_rows(reliability_dir / "data" / "interval_replay_audit.csv")
         integ_rows = _read_csv_rows(reliability_dir / "data" / "integrator_tolerance.csv")
+        drift_phase_rows = _read_csv_rows(reliability_dir / "data" / "drift_phase_metrics.csv")
+        multistart_rows = _read_csv_rows(reliability_dir / "data" / "randomized_multistart.csv")
+        multistart_delta_rows = _read_csv_rows(reliability_dir / "data" / "randomized_multistart_deltas.csv")
 
         suite = ReliabilitySuite(output_dir=self.output_dir / "_tmp_suite", save_figures=False, show_plots=False, analysis_profile="course_core")
         traj_diag = suite._trajectory_diagnostics(sim_res, veh, cfg)
@@ -941,11 +945,77 @@ class PaperPackBuilder:
         self._write_table_files("table_01_nominal_case", nominal_rows)
         self._write_table_files("table_02_verification_summary", verification_rows)
         self._write_table_files("table_03_assumptions_method", assumptions_rows)
+        replay_drift_rows = []
+        for row in drift_phase_rows:
+            replay_drift_rows.extend(
+                [
+                    (
+                        row["phase"],
+                        "Max position drift",
+                        _fmt_float(float(row["max_position_drift_m"]), 3),
+                        "m",
+                        "Optimizer vs replay",
+                    ),
+                    (
+                        row["phase"],
+                        "RMS position drift",
+                        _fmt_float(float(row["rms_position_drift_m"]), 3),
+                        "m",
+                        "Optimizer vs replay",
+                    ),
+                    (
+                        row["phase"],
+                        "Max velocity drift",
+                        _fmt_float(float(row["max_velocity_drift_m_s"]), 6),
+                        "m/s",
+                        "Optimizer vs replay",
+                    ),
+                    (
+                        row["phase"],
+                        "RMS velocity drift",
+                        _fmt_float(float(row["rms_velocity_drift_m_s"]), 6),
+                        "m/s",
+                        "Optimizer vs replay",
+                    ),
+                    (
+                        row["phase"],
+                        "Max mass drift",
+                        _fmt_float(float(row["max_mass_drift_kg"]), 6),
+                        "kg",
+                        "Optimizer vs replay",
+                    ),
+                    (
+                        row["phase"],
+                        "RMS mass drift",
+                        _fmt_float(float(row["rms_mass_drift_kg"]), 6),
+                        "kg",
+                        "Optimizer vs replay",
+                    ),
+                ]
+            )
+        self._write_table_files(
+            "table_04_replay_drift_by_phase",
+            replay_drift_rows,
+            headers=["Phase", "Metric", "Value", "Unit", "Notes"],
+        )
+        multistart_delta_summary = self._summarize_multistart_deltas(multistart_delta_rows)
+        self._write_table_files(
+            "table_05_multistart_consistency",
+            self._build_multistart_consistency_rows(multistart_rows, multistart_delta_summary),
+            headers=[
+                "Seed",
+                "Status",
+                "Final-mass gap to best (mg)",
+                "Max position separation (m)",
+                "Max velocity delta (m/s)",
+            ],
+        )
 
         plt.close("all")
 
-    def _write_table_files(self, stem, rows):
-        headers = ["Quantity", "Value", "Unit", "Notes"]
+    def _write_table_files(self, stem, rows, headers=None):
+        if headers is None:
+            headers = ["Quantity", "Value", "Unit", "Notes"]
         csv_rows = [tuple(row) for row in rows]
         _save_csv(self.table_dir / f"{stem}.csv", headers, csv_rows)
         _save_markdown_table(self.table_dir / f"{stem}.md", headers, csv_rows)
@@ -1025,7 +1095,16 @@ class PaperPackBuilder:
             )
         ax.set_xlabel("Downrange (km)")
         ax.set_ylabel("Ellipsoidal altitude (km)")
-        fig.legend(legend_handles, legend_labels, loc="upper center", ncol=len(legend_handles), frameon=True)
+        fig.legend(
+            legend_handles,
+            legend_labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 1.0),
+            ncol=len(legend_handles),
+            frameon=True,
+            columnspacing=1.4,
+            handlelength=2.0,
+        )
         _add_panel_labels(axes)
         _save_figure(fig, self.figure_dir / "fig_main_01_nominal_profile")
 
@@ -1035,13 +1114,13 @@ class PaperPackBuilder:
         axes[0].axvline(stage_time, color="0.55", linestyle=":", linewidth=1.0)
         axes[0].annotate("Staging", (stage_time, 0.98), xycoords=("data", "axes fraction"), xytext=(4, -4), textcoords="offset points", fontsize=8, color="0.2", va="top")
         axes[0].set_ylabel("Dynamic pressure (kPa)")
-        axes[0].legend(loc="best")
+        axes[0].legend(loc="upper right")
 
         axes[1].plot(t_sim, timeseries["g_load"], color="tab:orange")
         axes[1].axhline(cfg.max_g_load, color="tab:red", linestyle="--", label="Max g-load limit")
         axes[1].axvline(stage_time, color="0.55", linestyle=":", linewidth=1.0)
         axes[1].set_ylabel("g-load (g)")
-        axes[1].legend(loc="best")
+        axes[1].legend(loc="upper right")
 
         axes[2].step(t_sim, timeseries["throttle"], where="post", color="tab:green")
         axes[2].axhline(cfg.sequence.min_throttle, color="0.35", linestyle=":", label="Min throttle")
@@ -1049,7 +1128,7 @@ class PaperPackBuilder:
         axes[2].set_xlabel("Time (s)")
         axes[2].set_ylabel("Throttle (-)")
         axes[2].set_ylim(-0.02, 1.05)
-        axes[2].legend(loc="best")
+        axes[2].legend(loc="upper right")
         _add_panel_labels(axes)
         _save_figure(fig, self.figure_dir / "fig_main_02_constraints")
 
@@ -1074,37 +1153,31 @@ class PaperPackBuilder:
         masses = summary["masses"]
         mass_err = summary["mass_err"]
 
-        fig, (ax1, ax2, ax3) = plt.subplots(
-            3,
+        fig, (ax1, ax2) = plt.subplots(
+            2,
             1,
-            figsize=(7.2, 7.4),
+            figsize=(7.2, 5.8),
             sharex=True,
             layout="constrained",
-            gridspec_kw={"height_ratios": [1.15, 1.0, 0.9]},
+            gridspec_kw={"height_ratios": [1.15, 1.0]},
         )
 
         ax1.plot(nodes, masses, marker="o", color="tab:blue", label="Final mass")
         ax1.axhline(summary["reference_mass_kg"], color="tab:blue", linestyle="--", alpha=0.55, label=f"Reference (N={summary['reference_node']})")
         ax1.set_ylabel("Final mass (kg)")
         ax1.ticklabel_format(style="plain", axis="y", useOffset=False)
-        ax1.legend(loc="best")
+        ax1.legend(loc="upper right")
 
         mask = np.arange(len(nodes)) != len(nodes) - 1
         ax2.semilogy(nodes[mask], np.maximum(mass_err[mask], 1e-12), marker="o", color="tab:purple", label="Mass error")
         ax2.axhline(summary["criterion_kg"], color="tab:orange", linestyle="--", label="Criterion")
+        ax2.set_xlabel("Nodes in each burn")
         ax2.set_ylabel("|m(N)-m_ref| (kg)")
-        ax2.legend(loc="best")
+        ax2.legend(loc="upper right")
 
-        ax3.scatter(nodes, summary["slack_ok"].astype(float) + 0.02, color="tab:green", marker="o", label="Replay-valid (slack)")
-        ax3.scatter(nodes, summary["raw_ok"].astype(float) - 0.02, color="tab:purple", marker="x", label="Replay-valid (raw)")
-        ax3.set_xlabel("Nodes in each burn")
-        ax3.set_ylabel("Replay validity")
-        ax3.set_ylim(-0.1, 1.1)
-        ax3.set_yticks([0.0, 1.0], labels=["Invalid", "Valid"])
-        ax3.legend(loc="best")
-        for ax in (ax1, ax2, ax3):
+        for ax in (ax1, ax2):
             _apply_paper_grid(ax, axis="y")
-        _add_panel_labels((ax1, ax2, ax3))
+        _add_panel_labels((ax1, ax2))
         _save_figure(fig, stem)
 
     def _render_integrator_convergence(self, csv_path, stem):
@@ -1123,18 +1196,18 @@ class PaperPackBuilder:
         axes[0].loglog(rtol, np.maximum(altitude_drift, 1e-12), marker="o", color="tab:blue", label="Altitude drift")
         axes[0].axhline(summary["thresholds"]["altitude_m"], color="tab:orange", linestyle="--", label="Criterion")
         axes[0].set_ylabel("Altitude drift (m)")
-        axes[0].legend(loc="best")
+        axes[0].legend(loc="upper right")
 
         axes[1].loglog(rtol, np.maximum(velocity_drift, 1e-12), marker="s", color="tab:orange", label="Velocity drift")
         axes[1].axhline(summary["thresholds"]["velocity_m_s"], color="tab:red", linestyle="--", label="Criterion")
         axes[1].set_ylabel("Velocity drift (m/s)")
-        axes[1].legend(loc="best")
+        axes[1].legend(loc="upper right")
 
         axes[2].loglog(rtol, np.maximum(radial_velocity_drift, 1e-12), marker="^", color="tab:green", label="Radial velocity drift")
         axes[2].axhline(summary["thresholds"]["radial_velocity_m_s"], color="tab:red", linestyle="--", label="Criterion")
         axes[2].set_xlabel("Integrator relative tolerance (rtol)")
         axes[2].set_ylabel("Radial velocity drift (m/s)")
-        axes[2].legend(loc="best")
+        axes[2].legend(loc="upper right")
 
         for ax in axes:
             ax.invert_xaxis()
@@ -1251,7 +1324,9 @@ class PaperPackBuilder:
     def _render_3d_trajectory(self, env_cfg, timeseries, stem):
         state_hist = timeseries["state"]
         r_hist = state_hist[0:3, :]
+        r_hist_km = r_hist / 1000.0
         orbit_hist = _compute_orbit_projection(state_hist, env_cfg)
+        orbit_hist_km = None if orbit_hist is None else orbit_hist[0:3, :] / 1000.0
         r_eq = env_cfg.earth_radius_equator
         r_pol = r_eq * (1.0 - env_cfg.earth_flattening)
 
@@ -1261,25 +1336,25 @@ class PaperPackBuilder:
 
         u = np.linspace(0.0, 2.0 * np.pi, 30)
         v = np.linspace(0.0, np.pi, 30)
-        x_earth = r_eq * np.outer(np.cos(u), np.sin(v))
-        y_earth = r_eq * np.outer(np.sin(u), np.sin(v))
-        z_earth = r_pol * np.outer(np.ones_like(u), np.cos(v))
+        x_earth = (r_eq * np.outer(np.cos(u), np.sin(v))) / 1000.0
+        y_earth = (r_eq * np.outer(np.sin(u), np.sin(v))) / 1000.0
+        z_earth = (r_pol * np.outer(np.ones_like(u), np.cos(v))) / 1000.0
         ax.plot_wireframe(x_earth, y_earth, z_earth, color="0.75", alpha=0.28, linewidth=0.5)
 
-        ax.plot(r_hist[0, :], r_hist[1, :], r_hist[2, :], color="tab:red", label="Flight path")
-        if orbit_hist is not None:
-            ax.plot(orbit_hist[0, :], orbit_hist[1, :], orbit_hist[2, :], linestyle="--", color="0.25", label="Projected orbit")
-        ax.scatter(r_hist[0, 0], r_hist[1, 0], r_hist[2, 0], color="tab:green", s=26, label="Launch")
-        ax.scatter(r_hist[0, -1], r_hist[1, -1], r_hist[2, -1], color="black", marker="x", s=34, label="Injection")
+        ax.plot(r_hist_km[0, :], r_hist_km[1, :], r_hist_km[2, :], color="tab:red", label="Flight path")
+        if orbit_hist_km is not None:
+            ax.plot(orbit_hist_km[0, :], orbit_hist_km[1, :], orbit_hist_km[2, :], linestyle="--", color="0.25", label="Projected orbit")
+        ax.scatter(r_hist_km[0, 0], r_hist_km[1, 0], r_hist_km[2, 0], color="tab:green", s=26, label="Launch")
+        ax.scatter(r_hist_km[0, -1], r_hist_km[1, -1], r_hist_km[2, -1], color="black", marker="x", s=34, label="Injection")
 
-        max_val = max(np.max(np.abs(r_hist)), r_eq) * 1.05
+        max_val = max(np.max(np.abs(r_hist_km)), r_eq / 1000.0) * 1.05
         ax.set_xlim(-max_val, max_val)
         ax.set_ylim(-max_val, max_val)
         ax.set_zlim(-max_val, max_val)
         ax.set_box_aspect((1, 1, 1))
-        ax.set_xlabel("ECI X (m)")
-        ax.set_ylabel("ECI Y (m)")
-        ax.set_zlabel("ECI Z (m)")
+        ax.set_xlabel("ECI X (km)")
+        ax.set_ylabel("ECI Y (km)")
+        ax.set_zlabel("ECI Z (km)")
         ax.legend(loc="upper left")
 
         ax2 = fig.add_subplot(gs[0, 1])
@@ -1368,19 +1443,25 @@ class PaperPackBuilder:
     def _copy_multistart_artifacts(self, reliability_dir):
         source_root = Path(reliability_dir)
         src_csv = source_root / "data" / "randomized_multistart.csv"
+        src_deltas = source_root / "data" / "randomized_multistart_deltas.csv"
         src_summary = source_root / "data" / "randomized_multistart_trajectory_summary.csv"
-        required = (src_csv, src_summary)
+        required = (src_csv, src_deltas, src_summary)
         if not all(path.exists() for path in required):
             return False
         shutil.copy2(src_csv, self.data_dir / "randomized_multistart.csv")
+        shutil.copy2(src_deltas, self.data_dir / "randomized_multistart_deltas.csv")
         shutil.copy2(src_summary, self.data_dir / "randomized_multistart_trajectory_summary.csv")
         rows = self._load_multistart_rows(src_csv)
+        delta_summary = self._load_multistart_delta_summary(src_deltas)
         summary = _read_metric_value_csv(src_summary)
-        self._render_multistart_overview(rows, summary, self.figure_dir / "fig_main_06_warm_start_multiseed")
+        self._render_multistart_overview(rows, summary, delta_summary, self.figure_dir / "fig_main_06_warm_start_multiseed")
         return self._multistart_artifacts_exist()
 
     def _load_multistart_rows(self, csv_path):
         return _read_csv_rows(csv_path)
+
+    def _load_multistart_delta_summary(self, csv_path):
+        return self._summarize_multistart_deltas(_read_csv_rows(csv_path))
 
     @staticmethod
     def _float_from_row(row, key):
@@ -1397,7 +1478,64 @@ class PaperPackBuilder:
         except (TypeError, ValueError):
             return 0
 
-    def _render_multistart_overview(self, rows, summary, stem):
+    @classmethod
+    def _summarize_multistart_deltas(cls, rows):
+        summary = {}
+        for row in rows:
+            label = str(row.get("label", "")).strip()
+            if not label:
+                continue
+            entry = summary.setdefault(
+                label,
+                {
+                    "max_position_separation_m": np.nan,
+                    "max_velocity_delta_m_s": np.nan,
+                },
+            )
+            position_sep_km = cls._float_from_row(row, "position_separation_km")
+            velocity_delta_m_s = cls._float_from_row(row, "delta_velocity_m_s")
+            if np.isfinite(position_sep_km):
+                position_sep_m = abs(position_sep_km) * 1000.0
+                current = entry["max_position_separation_m"]
+                entry["max_position_separation_m"] = position_sep_m if not np.isfinite(current) else max(current, position_sep_m)
+            if np.isfinite(velocity_delta_m_s):
+                velocity_delta = abs(velocity_delta_m_s)
+                current = entry["max_velocity_delta_m_s"]
+                entry["max_velocity_delta_m_s"] = velocity_delta if not np.isfinite(current) else max(current, velocity_delta)
+        return summary
+
+    @staticmethod
+    def _multistart_status_label(status):
+        status_key = str(status).strip()
+        if status_key == "PASS_RAW":
+            return "Raw pass"
+        if status_key == "PASS_SLACK":
+            return "Slack pass"
+        if not status_key:
+            return "Unknown"
+        return status_key.replace("_", " ").title()
+
+    def _build_multistart_consistency_rows(self, rows, delta_summary):
+        if not rows:
+            return []
+        raw_seed_labels = [str(row.get("label", "seed")) for row in rows]
+        seed_labels = WarmStartMultiseedAnalyzer._seed_display_labels(raw_seed_labels)
+        table_rows = []
+        for display_label, row in zip(seed_labels, rows):
+            label = str(row.get("label", ""))
+            delta_row = delta_summary.get(label, {})
+            table_rows.append(
+                (
+                    display_label,
+                    self._multistart_status_label(row.get("status", "")),
+                    _fmt_float(self._float_from_row(row, "final_mass_gap_to_best_kg") * 1.0e6, 3),
+                    _fmt_float(float(delta_row.get("max_position_separation_m", np.nan)), 3),
+                    _fmt_float(float(delta_row.get("max_velocity_delta_m_s", np.nan)), 4),
+                )
+            )
+        return table_rows
+
+    def _render_multistart_overview(self, rows, summary, delta_summary, stem):
         if not rows:
             return False
 
@@ -1405,262 +1543,81 @@ class PaperPackBuilder:
         raw_seed_labels = [str(row.get("label", "seed")) for row in rows]
         seed_labels = WarmStartMultiseedAnalyzer._seed_display_labels(raw_seed_labels)
         group_breaks = WarmStartMultiseedAnalyzer._seed_group_break_indices(raw_seed_labels)
-        status_colors = [WarmStartMultiseedAnalyzer._outcome_color(row.get("status", "")) for row in rows]
-        runtime_vals = np.array([self._float_from_row(row, "runtime_s") for row in rows], dtype=float)
-        runtime_vals = np.where(np.isfinite(runtime_vals), runtime_vals, 0.0)
-        iter_vals = np.array([self._float_from_row(row, "solver_iter_count") for row in rows], dtype=float)
-        q_max_kpa = np.array([self._float_from_row(row, "max_q_pa") / 1000.0 for row in rows], dtype=float)
-        g_max = np.array([self._float_from_row(row, "max_g") for row in rows], dtype=float)
-        alt_err_abs_m = np.abs(np.array([self._float_from_row(row, "alt_err_m") for row in rows], dtype=float))
-        vel_err_abs_m_s = np.abs(np.array([self._float_from_row(row, "vel_err_m_s") for row in rows], dtype=float))
-
-        max_runtime = float(np.nanmax(runtime_vals)) if np.any(np.isfinite(runtime_vals)) else 1.0
-        max_runtime = max(max_runtime, 1.0)
-        runtime_pad = 0.06 * max_runtime
-
-        fig = plt.figure(figsize=(12.0, 8.4), layout="constrained")
-        gs = fig.add_gridspec(3, 1, height_ratios=[1.35, 0.9, 1.0])
-        ax_runtime = fig.add_subplot(gs[0, 0])
-        ax_path = fig.add_subplot(gs[1, 0])
-        ax_consistency = fig.add_subplot(gs[2, 0], sharex=ax_path)
-
-        ax_runtime.barh(seed_positions, runtime_vals, color=status_colors, edgecolor="0.25", linewidth=0.7, alpha=0.9)
-        ax_runtime.set_yticks(seed_positions)
-        ax_runtime.set_yticklabels(seed_labels)
-        ax_runtime.invert_yaxis()
-        ax_runtime.set_xlim(0.0, 1.35 * max_runtime)
-        ax_runtime.set_xlabel("Trial runtime (s)")
-        _apply_paper_grid(ax_runtime, axis="x")
-        ax_runtime.text(0.01, 0.98, "a)", transform=ax_runtime.transAxes, ha="left", va="top", fontsize=10, fontweight="bold", color="0.2")
-        for break_idx in group_breaks:
-            ax_runtime.axhline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
-        for idx, row in enumerate(rows):
-            status_label = WarmStartMultiseedAnalyzer._status_display(row.get("status", ""))
-            if status_label == "PASS RAW" and np.isfinite(iter_vals[idx]):
-                annotation = f"{int(iter_vals[idx])} it"
-            elif np.isfinite(iter_vals[idx]):
-                annotation = f"{status_label} | {int(iter_vals[idx])} it"
-            else:
-                annotation = status_label or "n/a"
-            ax_runtime.text(runtime_vals[idx] + runtime_pad, seed_positions[idx], annotation, va="center", fontsize=8)
-
-        raw_pass = sum(self._int_from_row(row, "mission_success") for row in rows)
-        solver_success = sum(self._int_from_row(row, "solver_success") for row in rows)
-        q_max_summary = float(np.nanmax(q_max_kpa)) if np.any(np.isfinite(q_max_kpa)) else np.nan
-        g_max_summary = float(np.nanmax(g_max)) if np.any(np.isfinite(g_max)) else np.nan
-        alt_err_summary = float(np.nanmax(alt_err_abs_m)) if np.any(np.isfinite(alt_err_abs_m)) else np.nan
-        vel_err_summary = float(np.nanmax(vel_err_abs_m_s)) if np.any(np.isfinite(vel_err_abs_m_s)) else np.nan
-        summary_lines = [
-            f"Raw pass: {raw_pass}/{len(rows)}",
-            f"Solver success: {solver_success}/{len(rows)}",
-            f"Median raw-pass runtime: {WarmStartMultiseedAnalyzer._format_summary_value(float(summary.get('median_success_runtime_s', np.nan)), ' s')}",
-            f"Max Q: {WarmStartMultiseedAnalyzer._format_summary_value(q_max_summary, ' kPa')}",
-            f"Max g: {WarmStartMultiseedAnalyzer._format_summary_value(g_max_summary, ' g')}",
-            f"Max |alt err|: {WarmStartMultiseedAnalyzer._format_summary_value(alt_err_summary, ' m')}",
-            f"Max |vel err|: {WarmStartMultiseedAnalyzer._format_summary_value(vel_err_summary, ' m/s')}",
-            f"Mass spread: {WarmStartMultiseedAnalyzer._format_summary_value(1000.0 * float(summary.get('mass_spread_kg', np.nan)), ' g')}",
-        ]
-        ax_runtime.text(
-            0.98,
-            0.02,
-            "\n".join(summary_lines),
-            transform=ax_runtime.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=8.5,
-            bbox=dict(facecolor="white", alpha=0.88, edgecolor="0.7"),
+        mass_gap_mg = np.array(
+            [self._float_from_row(row, "final_mass_gap_to_best_kg") * 1.0e6 for row in rows],
+            dtype=float,
         )
+        position_sep_m = np.array(
+            [float(delta_summary.get(str(row.get("label", "")), {}).get("max_position_separation_m", np.nan)) for row in rows],
+            dtype=float,
+        )
+        velocity_delta_m_s = np.array(
+            [float(delta_summary.get(str(row.get("label", "")), {}).get("max_velocity_delta_m_s", np.nan)) for row in rows],
+            dtype=float,
+        )
+        status_colors = [WarmStartMultiseedAnalyzer._outcome_color(row.get("status", "")) for row in rows]
+        raw_success_rate = float(summary.get("mission_success_rate_raw", np.nan)) if summary else np.nan
 
-        non_raw_indices = [i for i, row in enumerate(rows) if str(row.get("status", "")) != "PASS_RAW"]
-        for idx in non_raw_indices:
-            ax_path.axvspan(idx - 0.45, idx + 0.45, color=status_colors[idx], alpha=0.08, lw=0)
-        for break_idx in group_breaks:
-            ax_path.axvline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
-        ax_path_g = ax_path.twinx()
-        ax_path_g.patch.set_alpha(0.0)
-        q_mask = np.isfinite(q_max_kpa)
-        g_mask = np.isfinite(g_max)
-        q_limit_line = ax_path.axhline(StarshipBlock2.max_q_limit / 1000.0, color="tab:blue", linestyle="--", linewidth=1.0, label="Max-Q limit")
-        g_limit_line = ax_path_g.axhline(StarshipBlock2.max_g_load, color="tab:orange", linestyle="--", linewidth=1.0, label="Max g limit")
-        q_handle = None
-        g_handle = None
-        if np.any(q_mask):
-            ax_path.plot(seed_positions[q_mask], q_max_kpa[q_mask], color="tab:blue", linewidth=1.0, zorder=1)
-            q_handle = ax_path.scatter(
-                seed_positions[q_mask],
-                q_max_kpa[q_mask],
-                color="tab:blue",
-                s=54,
-                edgecolors="0.2",
-                linewidths=0.6,
-                zorder=3,
-                label="Max Q",
-            )
-            q_candidates = [StarshipBlock2.max_q_limit / 1000.0]
-            q_candidates.extend(q_max_kpa[q_mask].tolist())
-            q_min = min(q_candidates)
-            q_max_val = max(q_candidates)
-            q_span = max(q_max_val - q_min, 0.15)
-            q_pad = max(0.08, 0.12 * q_span)
-            ax_path.set_ylim(max(0.0, q_min - q_pad), q_max_val + q_pad)
-        else:
-            ax_path.text(0.5, 0.5, "No replayed path metrics available.", transform=ax_path.transAxes, ha="center", va="center")
-        if np.any(g_mask):
-            ax_path_g.plot(seed_positions[g_mask], g_max[g_mask], color="tab:orange", linewidth=1.0, zorder=1)
-            g_handle = ax_path_g.scatter(
-                seed_positions[g_mask],
-                g_max[g_mask],
-                color="tab:orange",
-                marker="s",
-                s=50,
-                edgecolors="0.2",
-                linewidths=0.6,
-                zorder=3,
-                label="Max g",
-            )
-            g_candidates = [StarshipBlock2.max_g_load]
-            g_candidates.extend(g_max[g_mask].tolist())
-            g_min = min(g_candidates)
-            g_max_val = max(g_candidates)
-            g_span = max(g_max_val - g_min, 0.02)
-            g_pad = max(0.01, 0.12 * g_span)
-            ax_path_g.set_ylim(max(0.0, g_min - g_pad), g_max_val + g_pad)
-        else:
-            ax_path_g.set_ylim(0.0, max(1.0, StarshipBlock2.max_g_load * 1.1))
-        ax_path.set_ylabel("Max dynamic pressure (kPa)")
-        ax_path_g.set_ylabel("Max g-load (g)")
-        _apply_paper_grid(ax_path, axis="y")
-        ax_path.text(0.01, 0.98, "b)", transform=ax_path.transAxes, ha="left", va="top", fontsize=10, fontweight="bold", color="0.2")
-        ax_path.tick_params(axis="x", labelbottom=False)
-        path_handles = []
-        path_labels = []
-        if q_handle is not None:
-            path_handles.extend([q_handle, q_limit_line])
-            path_labels.extend(["Max Q", "Max-Q limit"])
-        if g_handle is not None:
-            path_handles.extend([g_handle, g_limit_line])
-            path_labels.extend(["Max g", "Max g limit"])
-        if path_handles:
-            ax_path.legend(path_handles, path_labels, loc="upper left", fontsize=8)
+        fig, axes = plt.subplots(1, 3, figsize=(9.4, 4.8), sharey=True, layout="constrained")
+        metric_specs = (
+            ("Final-mass gap to best (mg)", mass_gap_mg),
+            ("Max position separation (m)", position_sep_m),
+            ("Max velocity delta (m/s)", velocity_delta_m_s),
+        )
+        for ax, (xlabel, values) in zip(axes, metric_specs):
+            finite_mask = np.isfinite(values)
+            if np.any(finite_mask):
+                ax.scatter(
+                    values[finite_mask],
+                    seed_positions[finite_mask],
+                    c=[status_colors[idx] for idx in np.flatnonzero(finite_mask)],
+                    s=44,
+                    edgecolors="0.20",
+                    linewidths=0.6,
+                    zorder=3,
+                )
+            for break_idx in group_breaks:
+                ax.axhline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
+            ax.set_xlabel(xlabel)
+            ax.set_ylim(-0.6, len(rows) - 0.4)
+            _apply_paper_grid(ax, axis="x")
+            ax.tick_params(axis="y", length=0)
 
-        for idx in non_raw_indices:
-            ax_consistency.axvspan(idx - 0.45, idx + 0.45, color=status_colors[idx], alpha=0.08, lw=0)
-        for break_idx in group_breaks:
-            ax_consistency.axvline(break_idx - 0.5, color="0.65", linestyle=":", linewidth=1.0, zorder=0)
-        ax_vel = ax_consistency.twinx()
-        ax_vel.patch.set_alpha(0.0)
-        alt_mask = np.isfinite(alt_err_abs_m)
-        vel_mask = np.isfinite(vel_err_abs_m_s)
-        alt_handle = None
-        vel_handle = None
-        alt_tol_line = None
-        vel_tol_line = None
-        if np.any(alt_mask):
-            ax_consistency.plot(seed_positions[alt_mask], alt_err_abs_m[alt_mask], color="tab:green", linewidth=1.0, zorder=1)
-            alt_handle = ax_consistency.scatter(
-                seed_positions[alt_mask],
-                alt_err_abs_m[alt_mask],
-                color="tab:green",
-                s=56,
-                edgecolors="0.2",
-                linewidths=0.6,
-                zorder=3,
-                label="|Altitude error|",
-            )
-            alt_candidates = alt_err_abs_m[alt_mask].tolist()
-            alt_max = max(alt_candidates)
-            alt_scale = max(alt_max, 1.0)
-            alt_span = max(alt_max - min(alt_candidates), 0.25 * alt_scale, 0.5)
-            alt_pad = max(0.05 * alt_scale, 0.12 * alt_span, 0.2)
-            alt_upper = alt_max + alt_pad
-            ax_consistency.set_ylim(0.0, alt_upper)
-            if TERMINAL_ALT_TOL_M <= alt_upper:
-                alt_tol_line = ax_consistency.axhline(
-                    TERMINAL_ALT_TOL_M,
-                    color="tab:green",
-                    linestyle="--",
-                    linewidth=1.0,
-                    label="Altitude tolerance",
-                )
-            else:
-                ax_consistency.text(
-                    0.98,
-                    0.92,
-                    f"Altitude tolerance: {TERMINAL_ALT_TOL_M:.0f} m (off-scale)",
-                    transform=ax_consistency.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize=8,
-                    color="0.2",
-                )
+        positive_mass_gap = mass_gap_mg[mass_gap_mg > 0.0]
+        mass_axis = axes[0]
+        if positive_mass_gap.size:
+            linthresh = max(1.0e-3, float(np.nanmin(positive_mass_gap)) * 0.75)
+            mass_axis.set_xscale("symlog", linthresh=linthresh)
+            mass_axis.set_xlim(left=0.0, right=max(20.0, float(np.nanmax(positive_mass_gap)) * 1.15))
         else:
-            ax_consistency.text(0.5, 0.5, "No replayed terminal metrics available.", transform=ax_consistency.transAxes, ha="center", va="center")
-        if np.any(vel_mask):
-            ax_vel.plot(seed_positions[vel_mask], vel_err_abs_m_s[vel_mask], color="tab:red", linewidth=1.0, zorder=1)
-            vel_handle = ax_vel.scatter(
-                seed_positions[vel_mask],
-                vel_err_abs_m_s[vel_mask],
-                color="tab:red",
-                marker="^",
-                s=56,
-                edgecolors="0.2",
-                linewidths=0.6,
-                zorder=3,
-                label="|Velocity error|",
+            mass_axis.set_xlim(0.0, 1.0)
+
+        for ax, values in zip(axes[1:], (position_sep_m, velocity_delta_m_s)):
+            finite_vals = values[np.isfinite(values)]
+            max_val = float(np.nanmax(finite_vals)) if finite_vals.size else 1.0
+            if not np.isfinite(max_val) or max_val <= 0.0:
+                max_val = 1.0
+            ax.set_xlim(0.0, 1.12 * max_val)
+
+        axes[0].set_yticks(seed_positions)
+        axes[0].set_yticklabels(seed_labels)
+        axes[0].invert_yaxis()
+        for ax in axes[1:]:
+            ax.tick_params(axis="y", labelleft=False)
+
+        if np.isfinite(raw_success_rate):
+            mass_axis.text(
+                0.99,
+                0.02,
+                f"Raw-feasible: {int(round(raw_success_rate * len(rows)))}/{len(rows)}",
+                transform=mass_axis.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=8,
+                color="0.25",
             )
-            vel_candidates = vel_err_abs_m_s[vel_mask].tolist()
-            vel_max = max(vel_candidates)
-            vel_scale = max(vel_max, 0.1)
-            vel_span = max(vel_max - min(vel_candidates), 0.25 * vel_scale, 0.02)
-            vel_pad = max(0.05 * vel_scale, 0.12 * vel_span, 0.01)
-            vel_upper = vel_max + vel_pad
-            ax_vel.set_ylim(0.0, vel_upper)
-            if TERMINAL_VEL_TOL_M_S <= vel_upper:
-                vel_tol_line = ax_vel.axhline(
-                    TERMINAL_VEL_TOL_M_S,
-                    color="tab:red",
-                    linestyle="--",
-                    linewidth=1.0,
-                    label="Velocity tolerance",
-                )
-            else:
-                ax_vel.text(
-                    0.98,
-                    0.82,
-                    f"Velocity tolerance: {TERMINAL_VEL_TOL_M_S:.1f} m/s (off-scale)",
-                    transform=ax_vel.transAxes,
-                    ha="right",
-                    va="top",
-                    fontsize=8,
-                    color="0.2",
-                )
-        else:
-            ax_vel.set_ylim(0.0, max(1.0, TERMINAL_VEL_TOL_M_S * 1.1))
 
-        ax_consistency.set_ylabel("|Altitude error| (m)")
-        ax_vel.set_ylabel("|Velocity error| (m/s)")
-        ax_consistency.set_xlabel("Seed")
-        ax_consistency.set_xticks(seed_positions)
-        ax_consistency.set_xticklabels(seed_labels, rotation=35, ha="right")
-        _apply_paper_grid(ax_consistency, axis="y")
-        ax_consistency.text(0.01, 0.98, "c)", transform=ax_consistency.transAxes, ha="left", va="top", fontsize=10, fontweight="bold", color="0.2")
-        terminal_handles = []
-        terminal_labels = []
-        if alt_handle is not None:
-            terminal_handles.append(alt_handle)
-            terminal_labels.append("|Altitude error|")
-        if alt_tol_line is not None:
-            terminal_handles.append(alt_tol_line)
-            terminal_labels.append("Altitude tolerance")
-        if vel_handle is not None:
-            terminal_handles.append(vel_handle)
-            terminal_labels.append("|Velocity error|")
-        if vel_tol_line is not None:
-            terminal_handles.append(vel_tol_line)
-            terminal_labels.append("Velocity tolerance")
-        if terminal_handles:
-            ax_consistency.legend(terminal_handles, terminal_labels, loc="upper left", fontsize=8)
-
+        _add_panel_labels(axes)
         _save_figure(fig, stem)
         return True
 
@@ -1724,6 +1681,8 @@ class PaperPackBuilder:
                 "- `table_01_nominal_case`",
                 "- `table_02_verification_summary`",
                 "- `table_03_assumptions_method`",
+                "- `table_04_replay_drift_by_phase`",
+                "- `table_05_multistart_consistency`",
                 "",
                 "## Figure and table guidance used",
                 "",
